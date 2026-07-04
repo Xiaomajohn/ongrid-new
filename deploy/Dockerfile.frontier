@@ -1,11 +1,32 @@
 # syntax=docker/dockerfile:1.7
+#
+# ── Proxy support (opt-in) ──
+# Same --build-arg contract as the other Dockerfiles:
+#   docker build --build-arg HTTPS_PROXY=http://user:pass@proxy:8080 ...
+# Or `export HTTPS_PROXY=...` before `docker build` (buildkit ≥ 0.8
+# propagates the standard env vars to RUN commands). When unset the build
+# is byte-for-byte equivalent to the legacy direct-connect path. alpine's
+# apk honors HTTP_PROXY/HTTPS_PROXY natively (no /etc/apk/commit extra
+# step needed), and go module download uses GOPROXY (set below) — already
+# CN-friendly in the legacy version, kept here for parity.
 
 FROM golang:1.24-alpine AS builder
 
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ENV HTTP_PROXY=$HTTP_PROXY \
+    HTTPS_PROXY=$HTTPS_PROXY \
+    http_proxy=$HTTP_PROXY \
+    https_proxy=$HTTPS_PROXY \
+    NO_PROXY=$NO_PROXY \
+    no_proxy=$NO_PROXY
+
 RUN apk add --no-cache build-base make
 
+ARG GOPROXY
 ENV GO111MODULE=on \
-    GOPROXY=https://goproxy.cn,https://goproxy.io,https://proxy.golang.org,direct \
+    GOPROXY=${GOPROXY:-https://goproxy.cn,https://goproxy.io,https://proxy.golang.org,direct} \
     CGO_CFLAGS="-D_LARGEFILE64_SOURCE"
 
 WORKDIR /go/src/github.com/singchia/frontier

@@ -37,7 +37,7 @@ services:
       # so storage can be pointed at a customer-managed filesystem (NFS,
       # iSCSI, NVMe) by overriding ONGRID_DATA_DIR. install.sh chowns this
       # to mysql uid 999.
-      - ${ONGRID_DATA_DIR:-/var/lib/ongrid}/mysql:/var/lib/mysql
+      - ${ONGRID_DATA_DIR:-/opt/ongrid/data}/mysql:/var/lib/mysql
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -u root -p$${MYSQL_ROOT_PASSWORD}"]
       interval: 10s
@@ -203,6 +203,24 @@ services:
       ONGRID_NOTIFY_DINGTALK_NAME: ${ONGRID_NOTIFY_DINGTALK_NAME:-dingtalk}
       ONGRID_NOTIFY_DINGTALK_WEBHOOK_URL: ${ONGRID_NOTIFY_DINGTALK_WEBHOOK_URL:-}
       ONGRID_NOTIFY_DINGTALK_SECRET: ${ONGRID_NOTIFY_DINGTALK_SECRET:-}
+      # Outbound proxy — install.sh / upgrade.sh autodetect HTTP_PROXY /
+      # HTTPS_PROXY / NO_PROXY on the host (plus /etc/environment and
+      # /etc/hosts + /etc/resolv.conf for NO_PROXY) and write what's
+      # detected into the three ONGRID_*_PROXY keys below. Only this
+      # manager service actually egresses (LLM API / embedding API /
+      # webhook notifications / knowledge-base repos); every other
+      # service in this file is docker-internal only and stays direct.
+      # Both case-spellings are written so Go's net/http + Python urllib
+      # + curl all see the same value.
+      ONGRID_HTTP_PROXY: ${ONGRID_HTTP_PROXY:-}
+      ONGRID_HTTPS_PROXY: ${ONGRID_HTTPS_PROXY:-}
+      ONGRID_NO_PROXY: ${ONGRID_NO_PROXY:-}
+      HTTP_PROXY: ${ONGRID_HTTPS_PROXY:-${ONGRID_HTTP_PROXY:-}}
+      HTTPS_PROXY: ${ONGRID_HTTPS_PROXY:-${ONGRID_HTTP_PROXY:-}}
+      NO_PROXY: ${ONGRID_NO_PROXY:-localhost,127.0.0.1,mysql,prometheus,loki,tempo,qdrant,searxng,grafana,ongrid,nginx,frontier,.svc,.cluster.local}
+      http_proxy: ${ONGRID_HTTPS_PROXY:-${ONGRID_HTTP_PROXY:-}}
+      https_proxy: ${ONGRID_HTTPS_PROXY:-${ONGRID_HTTP_PROXY:-}}
+      no_proxy: ${ONGRID_NO_PROXY:-localhost,127.0.0.1,mysql,prometheus,loki,tempo,qdrant,searxng,grafana,ongrid,nginx,frontier,.svc,.cluster.local}
     # ADR-008: HTTP API (8080) is no longer published to host — only the
     # nginx service (in this same compose network) talks to it. Metrics
     # port stays exposed so the host's Prometheus can scrape it.
@@ -210,33 +228,33 @@ services:
       - "${ONGRID_METRICS_PORT:-9100}:9100"
     volumes:
       # Manager process logs (slog json output). Bind-mounted so operators
-      # can `tail -f /var/log/ongrid/*.log` directly without docker exec
+      # can `tail -f <parent>/logs/*.log` directly without docker exec
       # and so log shipping (promtail / vector / fluent-bit) can scrape
       # from the host without needing the docker socket. Override
       # ONGRID_LOG_DIR to point at a separate log filesystem.
-      - ${ONGRID_LOG_DIR:-/var/log/ongrid}:/var/log/ongrid
+      - ${ONGRID_LOG_DIR:-/opt/ongrid/logs}:/var/log/ongrid
       # ADR-024: manager reads <bundle>.sha256 to resolve one-button
-      # edge upgrades. Bind-mount the host's /opt/ongrid/edge dir
+      # edge upgrades. Bind-mount the host's <parent>/ongrid-web/edge dir
       # (same dir nginx serves at /edge/) read-only so the resolver
       # can pick up new bundles dropped by install.sh / upgrade.sh.
-      - ./edge:/usr/share/ongrid/edge-bundles:ro
+      - ${ONGRID_WEB_DIR:-/opt/ongrid/ongrid-web}/edge:/usr/share/ongrid/edge-bundles:ro
       # ADR-027 Phase-2: local ONNX embedding model cache. install.sh
       # stages the bundled bge-small-zh-v1.5 here on first install;
       # operator can also drop other fastembed models in by mkdir +
       # cp + setting ONGRID_EMBEDDING_MODEL. Read-write because
       # fastembed-go writes its own download-progress lock files.
-      - ${ONGRID_DATA_DIR:-/var/lib/ongrid}/embeddings:/var/lib/ongrid/embeddings
+      - ${ONGRID_DATA_DIR:-/opt/ongrid/data}/embeddings:/var/lib/ongrid/embeddings
       # HLD-017 cloud skill marketplace: user-installed skills land in
       # ONGRID_SKILLS_ROOT (=/var/lib/ongrid/skills in-container). MUST be a
       # host bind-mount — otherwise installed skills live only in the
       # container layer and are wiped on every `compose up` / image upgrade
       # (the installed_skills DB row would survive in mysql and dangle).
-      - ${ONGRID_DATA_DIR:-/var/lib/ongrid}/skills:/var/lib/ongrid/skills
+      - ${ONGRID_DATA_DIR:-/opt/ongrid/data}/skills:/var/lib/ongrid/skills
       # HLD-019 agent workspace: per-session persistent cwd for cloud_bash
       # (terraform .tf/state, scratch files). Same bind-mount rationale as
       # skills — must survive image upgrades / `compose up`, else a tool's
       # files written in one command vanish before the next.
-      - ${ONGRID_DATA_DIR:-/var/lib/ongrid}/workspace:/var/lib/ongrid/workspace
+      - ${ONGRID_DATA_DIR:-/opt/ongrid/data}/workspace:/var/lib/ongrid/workspace
       # cloud_bash runtime tools (cloudBashToolsDir = /var/lib/ongrid/tools):
       # PYTHONUSERBASE + PATH for runtime-installed CLIs (tccli, awscli, …) and
       # their bin entrypoints. WITHOUT this mount the manager container can't see
@@ -244,11 +262,11 @@ services:
       # agent wastes turns pip-installing or hand-rolling API calls. Host
       # bind-mount so tools survive container recreation / image upgrades and
       # don't bloat the image.
-      - ${ONGRID_DATA_DIR:-/var/lib/ongrid}/tools:/var/lib/ongrid/tools
+      - ${ONGRID_DATA_DIR:-/opt/ongrid/data}/tools:/var/lib/ongrid/tools
       # serve_page hosted reports — must survive `compose up` / image upgrades,
       # else a generated page 404s the moment the manager container is
       # recreated and its "open generated page" link goes dead.
-      - ${ONGRID_DATA_DIR:-/var/lib/ongrid}/pages:/var/lib/ongrid/pages
+      - ${ONGRID_DATA_DIR:-/opt/ongrid/data}/pages:/var/lib/ongrid/pages
     logging:
       driver: json-file
       options:
@@ -288,11 +306,20 @@ services:
       ongrid:
         condition: service_started
     volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./certs:/etc/nginx/certs:ro
-      # Public edge artifact dir: install.sh + cross-arch binaries served
-      # at https://<host>/install.sh and /edge/<file>.
-      - ./edge:/usr/share/nginx/html/edge:ro
+      # All three bind sources live under $ONGRID_WEB_DIR (= <parent>/ongrid-web),
+      # the dedicated dir for the ongrid-web container's host inputs:
+      #   nginx.conf  → /etc/nginx/nginx.conf  (always refreshed from tarball;
+      #                                          operators can also edit in place)
+      #   certs/      → /etc/nginx/certs      (operator's real cert survives
+      #                                          across upgrades; install.sh
+      #                                          only writes when missing)
+      #   edge/       → /usr/share/nginx/html/edge   (one-button edge upgrade
+      #                                          binaries + install.sh; same dir
+      #                                          the manager service mounts at
+      #                                          /usr/share/ongrid/edge-bundles)
+      - ${ONGRID_WEB_DIR:-/opt/ongrid/ongrid-web}/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ${ONGRID_WEB_DIR:-/opt/ongrid/ongrid-web}/certs:/etc/nginx/certs:ro
+      - ${ONGRID_WEB_DIR:-/opt/ongrid/ongrid-web}/edge:/usr/share/nginx/html/edge:ro
     ports:
       - "${ONGRID_HTTP_PORT:-443}:443"
       - "${ONGRID_HTTP_REDIRECT_PORT:-80}:80"
@@ -334,7 +361,7 @@ services:
       # Bind-mount TSDB to host. Prometheus runs as nobody (uid 65534) so
       # install.sh chowns this dir accordingly. Move to a fast SSD or
       # set ONGRID_DATA_DIR to a dedicated metrics filesystem.
-      - ${ONGRID_DATA_DIR:-/var/lib/ongrid}/prometheus:/prometheus
+      - ${ONGRID_DATA_DIR:-/opt/ongrid/data}/prometheus:/prometheus
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       # ADR-026 self-obs alert rules. Sibling file referenced from
       # prometheus.yml under rule_files. Edit + curl /prometheus/-/reload
@@ -359,7 +386,7 @@ services:
       # Loki TSDB / chunks on host. Loki runs as uid 10001; chowned by
       # install.sh. For production externalisation, point ONGRID_LOG_URL
       # at a managed Loki / Grafana Cloud Logs and stop this container.
-      - ${ONGRID_DATA_DIR:-/var/lib/ongrid}/loki:/loki
+      - ${ONGRID_DATA_DIR:-/opt/ongrid/data}/loki:/loki
       - ./loki-config.yaml:/etc/loki/local-config.yaml:ro
     logging:
       driver: json-file
@@ -381,7 +408,7 @@ services:
       # Tempo blocks on host. Tempo runs as uid 10001 (same as Loki);
       # chowned by install.sh. For production externalisation, point
       # ONGRID_TRACE_QUERY_URL at a managed Tempo / Grafana Cloud Traces.
-      - ${ONGRID_DATA_DIR:-/var/lib/ongrid}/tempo:/var/tempo
+      - ${ONGRID_DATA_DIR:-/opt/ongrid/data}/tempo:/var/tempo
       - ./tempo-config.yaml:/etc/tempo/tempo.yaml:ro
     depends_on:
       - prometheus
@@ -404,7 +431,7 @@ services:
       # Qdrant collections on host. Container runs as root so no chown
       # needed. For production externalisation, point ONGRID_QDRANT_URL
       # at a managed qdrant cluster (e.g. qdrant cloud).
-      - ${ONGRID_DATA_DIR:-/var/lib/ongrid}/qdrant:/qdrant/storage
+      - ${ONGRID_DATA_DIR:-/opt/ongrid/data}/qdrant:/qdrant/storage
     logging:
       driver: json-file
       options:
@@ -425,6 +452,22 @@ services:
     environment:
       SEARXNG_BASE_URL: http://searxng:8080/
       INSTANCE_NAME: ongrid-search
+      # Outbound proxy — SearXNG fans out to Bing / DDG / Brave / Baidu /
+      # Sogou; install.sh / upgrade.sh autodetect HTTP_PROXY/HTTPS_PROXY/
+      # NO_PROXY on the host. Both case-spellings so Python requests (the
+      # upstream-engine lib) picks them up regardless of locale. The
+      # compose-internal services (ongrid, this searxng) are pre-listed
+      # in NO_PROXY so metasearch LLM/RPC between ongrid and searxng
+      # doesn't accidentally traverse the corp proxy.
+      ONGRID_HTTP_PROXY: ${ONGRID_HTTP_PROXY:-}
+      ONGRID_HTTPS_PROXY: ${ONGRID_HTTPS_PROXY:-}
+      ONGRID_NO_PROXY: ${ONGRID_NO_PROXY:-}
+      HTTP_PROXY: ${ONGRID_HTTPS_PROXY:-${ONGRID_HTTP_PROXY:-}}
+      HTTPS_PROXY: ${ONGRID_HTTPS_PROXY:-${ONGRID_HTTP_PROXY:-}}
+      NO_PROXY: ${ONGRID_NO_PROXY:-localhost,127.0.0.1,searxng,ongrid,mysql,prometheus,loki,tempo,qdrant,grafana,nginx,frontier,.svc,.cluster.local}
+      http_proxy: ${ONGRID_HTTPS_PROXY:-${ONGRID_HTTP_PROXY:-}}
+      https_proxy: ${ONGRID_HTTPS_PROXY:-${ONGRID_HTTP_PROXY:-}}
+      no_proxy: ${ONGRID_NO_PROXY:-localhost,127.0.0.1,searxng,ongrid,mysql,prometheus,loki,tempo,qdrant,grafana,nginx,frontier,.svc,.cluster.local}
     volumes:
       - ./searxng:/etc/searxng:ro
     logging:
@@ -476,7 +519,7 @@ services:
       # Grafana SQLite + provisioning state on host. Grafana runs as uid
       # 472; chowned by install.sh. For production externalisation,
       # point ONGRID_GRAFANA_INTERNAL_URL at the customer's Grafana.
-      - ${ONGRID_DATA_DIR:-/var/lib/ongrid}/grafana:/var/lib/grafana
+      - ${ONGRID_DATA_DIR:-/opt/ongrid/data}/grafana:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
     logging:
       driver: json-file
@@ -485,9 +528,11 @@ services:
         max-file: "5"
 
 # Named volumes intentionally removed — all stateful services bind-mount
-# to ${ONGRID_DATA_DIR:-/var/lib/ongrid}/<service> on the host. Operators
-# can back up, rotate, mount NFS / iSCSI, or point at the customer's
-# managed storage by overriding ONGRID_DATA_DIR (and ONGRID_LOG_DIR for
-# manager logs). install.sh creates the dirs + chowns to the right uids.
-# Existing installs with named volumes must run the migration documented
-# in README.md "数据卷迁移" before upgrading.
+# to ${ONGRID_DATA_DIR:-/opt/ongrid/data}/<service> on the host, and the
+# ongrid-web (nginx) container's inputs (nginx.conf, certs/, edge/) live
+# under ${ONGRID_WEB_DIR:-/opt/ongrid/ongrid-web}/. Operators can back up,
+# rotate, mount NFS / iSCSI, or point at the customer's managed storage
+# by overriding ONGRID_DATA_DIR (or per-piece ONGRID_LOG_DIR for manager
+# logs / ONGRID_WEB_DIR for the nginx inputs). install.sh creates the dirs
+# + chowns to the right uids. Existing installs with named volumes must
+# run the migration documented in README.md "数据卷迁移" before upgrading.

@@ -26,6 +26,14 @@ MODEL=fast-bge-small-zh-v1.5
 FASTEMBED_BASE=${ONGRID_FASTEMBED_BASE:-https://storage.googleapis.com/qdrant-fastembed}
 TARGET="$DEST/$MODEL"
 
+# Proxy support: curl natively honors the standard HTTP_PROXY / HTTPS_PROXY
+# / NO_PROXY env vars, so nothing needs to be threaded on the command line.
+# Operators on a corporate egress just export before invoking:
+#   HTTPS_PROXY=http://user:pass@proxy:8080 \
+#     bash dist/fetch-embedding-model.sh
+# NO_PROXY is comma-separated. Same pattern works for `make fetch-*`
+# targets via the Makefile FETCH_PROXY_FLAGS auto-derivation.
+
 FILES=(model_optimized.onnx tokenizer_config.json special_tokens_map.json
        config.json tokenizer.json vocab.txt ort_config.json)
 

@@ -62,7 +62,8 @@ done
 detect_install_mode() {
     local has_systemd=0 has_compose=0
     [[ -f /etc/systemd/system/ongrid.service ]] && has_systemd=1
-    [[ -f /opt/ongrid/docker-compose.yml ]]    && has_compose=1
+    local parent="${ONGRID_INSTALL_DIR:-/opt/ongrid}"
+    [[ -f "$parent/ongrid/docker-compose.yml" ]] && has_compose=1
     if (( has_systemd && has_compose )); then
         log_warn "both systemd and compose installs detected — pick one with --mode"
         exit 2
@@ -116,9 +117,19 @@ if [[ $EUID -ne 0 ]]; then
     exec sudo -E bash "$0" "$@"
 fi
 
-INSTALL_DIR="${ONGRID_INSTALL_DIR:-/opt/ongrid}"
+# Same four-subdir layout as install.sh / upgrade.sh: parent + ongrid/
+# + ongrid-web/ + data/ + logs/. Operators who redirected ONGRID_INSTALL_DIR
+# / ONGRID_DATA_DIR / ONGRID_LOG_DIR / ONGRID_WEB_DIR get the matching dirs
+# wiped here; the four ?:- fallbacks land on the new single-parent default
+# (/opt/ongrid/{ongrid,ongrid-web,data,logs}) so this script remains a
+# drop-in replacement for legacy installs too (just override the vars).
+PARENT_DIR="${ONGRID_INSTALL_DIR:-/opt/ongrid}"
+INSTALL_DIR="$PARENT_DIR/ongrid"
+WEB_DIR="${ONGRID_WEB_DIR:-$PARENT_DIR/ongrid-web}"
 COMPOSE_FILE="$INSTALL_DIR/docker-compose.yml"
 ENV_FILE="$INSTALL_DIR/.env"
+DATA_DIR="${ONGRID_DATA_DIR:-$PARENT_DIR/data}"
+LOG_DIR="${ONGRID_LOG_DIR:-$PARENT_DIR/logs}"
 
 if [[ ! -f "$COMPOSE_FILE" ]]; then
     log_warn "no compose file at $COMPOSE_FILE; nothing to stop"
@@ -162,28 +173,45 @@ fi
 log_info "removing named volumes"
 docker volume rm ongrid_mysql_data ongrid_logs 2>/dev/null || true
 
-# /var/lib/ongrid is the bind-mount root used by ADR-026 (mysql /
+# /opt/ongrid/data is the bind-mount root used by ADR-026 (mysql /
 # prometheus / loki / tempo / grafana / qdrant data dirs live here).
 # Without this, a fresh install.sh after --purge picks up the old
 # mysql data dir with the previous random password but writes a *new*
 # password into .env — manager crashloops with `Access denied for user
 # 'ongrid'@…`. Discovered during the 2026-05-20 reinstall smoke.
-DATA_DIR="${ONGRID_DATA_DIR:-/var/lib/ongrid}"
+# DATA_DIR resolved above; falls back to $PARENT_DIR/data so the legacy
+# /var/lib/ongrid path only survives when the operator explicitly
+# exports ONGRID_DATA_DIR.
 if [[ -d "$DATA_DIR" ]]; then
-    log_info "removing bind-mount data dirs in $DATA_DIR (mysql/qdrant/prom/loki/tempo/grafana)"
-    for d in mysql qdrant prometheus loki tempo grafana; do
+    log_info "removing bind-mount data dirs in $DATA_DIR (mysql/qdrant/prom/loki/tempo/grafana/embeddings/skills/pages/workspace/tools)"
+    for d in mysql qdrant prometheus loki tempo grafana embeddings skills pages workspace tools; do
         if [[ -d "$DATA_DIR/$d" ]]; then
             rm -rf "$DATA_DIR/$d"
         fi
     done
     # Only remove the parent dir itself if empty — operators sometimes
-    # park other state under /var/lib/ongrid (edge bundles, skill caches)
+    # park other state under the data root (edge bundles, skill caches)
     # that we don't want to touch.
     rmdir "$DATA_DIR" 2>/dev/null || true
 fi
 
-log_info "removing $INSTALL_DIR"
+# Remove the manager process logs dir (best-effort: only if empty after
+# removing its contents; never touch host-side log shipping destinations).
+if [[ -d "$LOG_DIR" ]]; then
+    log_info "removing manager log dir $LOG_DIR"
+    rm -rf "$LOG_DIR"
+fi
+
+log_info "removing compose install dir $INSTALL_DIR"
 rm -rf "$INSTALL_DIR"
+
+# ongrid-web (nginx) container's host inputs: nginx.conf, TLS certs/,
+# one-button edge upgrade binaries. Same single-parent subdir as
+# install.sh writes; --purge wipes it too so a re-install starts clean.
+if [[ -d "$WEB_DIR" ]]; then
+    log_info "removing ongrid-web inputs $WEB_DIR"
+    rm -rf "$WEB_DIR"
+fi
 
 if [[ -n "$VERSION_FROM_FILE" ]]; then
     log_info "removing ongrid:${VERSION_FROM_FILE} image"
@@ -233,8 +261,10 @@ echo ""
 echo "${C_BOLD}${C_GREEN}uninstall complete${C_RESET}"
 echo "  - stack stopped"
 echo "  - named volumes removed"
-echo "  - bind-mount data dirs removed ($DATA_DIR/{mysql,qdrant,prom,loki,tempo,grafana})"
-echo "  - $INSTALL_DIR removed"
+echo "  - bind-mount data dirs removed ($DATA_DIR/{mysql,qdrant,prom,loki,tempo,grafana,embeddings,skills,pages,workspace,tools})"
+echo "  - manager log dir removed ($LOG_DIR)"
+echo "  - compose install dir removed ($INSTALL_DIR)"
+echo "  - ongrid-web inputs removed ($WEB_DIR)"
 if (( local_edge_present )) && (( ! PURGE_EDGE )); then
     echo "  - ongrid-edge daemon kept running (use --purge-edge or re-enroll)"
 fi

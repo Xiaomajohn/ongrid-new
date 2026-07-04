@@ -9,6 +9,7 @@ func TestIsKnownPluginNameIncludesMetricChildren(t *testing.T) {
 		PluginNameProcMetrics,
 		PluginNameCustomMetrics,
 		PluginNameDatabaseMetrics,
+		PluginNameAudit,
 	} {
 		if !IsKnownPluginName(name) {
 			t.Fatalf("IsKnownPluginName(%q) = false, want true", name)

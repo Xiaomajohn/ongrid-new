@@ -117,6 +117,134 @@ ensure_host_gateway_env() {
     log_warn "docker daemon does not support host-gateway; using ONGRID_HOST_GATEWAY=${gateway}"
 }
 
+# ---------- host proxy detection (mirror of install.sh) ----------
+# Same host → container proxy propagation. Linux env(7) lower-case precedence;
+# /etc/environment fallback for corporate shells. Kept as a separate copy
+# rather than a shared file because both scripts are run standalone from
+# inside an extracted tarball.
+detect_host_proxy_upgrade() {
+    local hp ap np f_hp f_ap f_np
+    np="${no_proxy:-${NO_PROXY:-}}"
+    hp="${http_proxy:-${HTTP_PROXY:-}}"
+    ap="${https_proxy:-${HTTPS_PROXY:-}}"
+    if [[ -z "$hp$ap" && -r /etc/environment ]]; then
+        f_hp=$(grep -E '^[[:space:]]*http_proxy='  /etc/environment 2>/dev/null | tail -n1 | cut -d= -f2- | tr -d '"' || true)
+        f_ap=$(grep -E '^[[:space:]]*https_proxy=' /etc/environment 2>/dev/null | tail -n1 | cut -d= -f2- | tr -d '"' || true)
+        f_np=$(grep -E '^[[:space:]]*no_proxy='    /etc/environment 2>/dev/null | tail -n1 | cut -d= -f2- | tr -d '"' || true)
+        [[ -z "$hp" ]] && hp="$f_hp"
+        [[ -z "$ap" ]] && ap="$f_ap"
+        [[ -z "$np" ]] && np="$f_np"
+    fi
+    printf '%s\n%s\n%s\n' \
+        "${hp//[[:space:]]/}" "${ap//[[:space:]]/}" "${np//[[:space:]]/}"
+}
+
+# Mirror of install.sh:collect_internal_no_proxy_domains — returns the
+# comma-separated list of DNS names / DNS-search domains the manager MUST
+# reach without traversing the host proxy. See install.sh header for the
+# full reasoning; the dup here is intentional (both scripts run standalone
+# from inside an extracted tarball; we don't share a sourced file because
+# install.sh is also exec'd via sudo).
+collect_internal_no_proxy_domains_upgrade() {
+    local parts=() tok p hn fqdn line rest
+    if [[ -n "${ONGRID_NO_PROXY_EXTRA:-}" ]]; then
+        IFS=',' read -ra extras <<<"${ONGRID_NO_PROXY_EXTRA}"
+        for e in "${extras[@]}"; do
+            e="${e//[[:space:]]/}"
+            [[ -n "$e" ]] && parts+=("$e")
+        done
+    fi
+    if [[ -r /etc/hosts ]]; then
+        while IFS= read -r line; do
+            [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+            while read -r h; do
+                [[ -z "$h" ]] && continue
+                [[ "$h" == localhost || "$h" == localhost.* || "$h" == *.localhost || "$h" == *.localhost.* ]] && continue
+                [[ "$h" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && continue
+                [[ "$h" == *:* ]] && continue
+                parts+=("$h")
+            done < <(printf '%s\n' "$line" | awk '{ gsub(/#.*/, ""); for (i=2; i<=NF; i++) print $i }')
+        done < /etc/hosts
+    fi
+    if [[ -r /etc/resolv.conf ]]; then
+        while IFS= read -r line; do
+            [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+            if [[ "$line" =~ ^[[:space:]]*(search|domain)[[:space:]]+ ]]; then
+                rest="${line#${BASH_REMATCH[0]}}"
+                for tok in $rest; do [[ -n "$tok" ]] && parts+=("$tok"); done
+            fi
+        done < /etc/resolv.conf
+    fi
+    hn=$(hostname 2>/dev/null || true)
+    [[ -n "$hn" ]] && parts+=("$hn")
+    if command -v hostname >/dev/null 2>&1; then
+        fqdn=$(hostname -f 2>/dev/null || true)
+        [[ -n "$fqdn" && "$fqdn" != "$hn" ]] && parts+=("$fqdn")
+    fi
+    local seen=""
+    for p in "${parts[@]}"; do
+        [[ -z "$p" ]] && continue
+        case ",${seen}," in *",${p},"*) ;; *) seen="${seen}${seen:+,}${p}" ;; esac
+    done
+    printf '%s' "$seen"
+}
+
+# Mirror of install.sh:append_internal_no_proxy_domains — merges the
+# collect output into the existing ONGRID_NO_PROXY= key in $ENV_FILE.
+# Same idempotent semantics.
+upgrade_append_internal_no_proxy_domains() {
+    local extras current current_set extras_set merged added_csv
+    extras=$(collect_internal_no_proxy_domains_upgrade)
+    [[ -z "$extras" ]] && return 0
+    current=$(grep -E '^ONGRID_NO_PROXY=' "$ENV_FILE" 2>/dev/null | head -n1 | cut -d= -f2- || true)
+    current="${current#"${current%%[![:space:]]*}"}"
+    current="${current%"${current##*[![:space:]]}"}"
+    current="${current%,}"
+    current_set=$(printf '%s' "$current" | awk 'BEGIN{RS=","} {gsub(/^[[:space:]]+|[[:space:]]+$/,""); if($0!="") print}' | sort -u)
+    extras_set=$(printf '%s' "$extras"  | awk 'BEGIN{RS=","} {gsub(/^[[:space:]]+|[[:space:]]+$/,""); if($0!="") print}' | sort -u)
+    merged=$(printf '%s\n%s\n' "$current_set" "$extras_set" | sort -u | paste -sd, -)
+    if [[ "$merged" == "$current" ]]; then
+        return 0
+    fi
+    set_env_value ONGRID_NO_PROXY "$merged"
+    added_csv=$(comm -23 <(printf '%s\n' "$extras_set") <(printf '%s\n' "$current_set") | paste -sd, -)
+    [[ -n "$added_csv" ]] && log_info "appended internal domains to ONGRID_NO_PROXY: ${added_csv}"
+}
+
+# fill_blank-style: only writes when ONGRID_*_PROXY is missing/blank. Honour
+# the operator's hand-tuned values across upgrades (an upgrade that triggers
+# a fresh detect_host_proxy call shouldn't silently overwrite a proxy URL
+# the operator fought through a corp firewall to pin).
+upgrade_apply_host_proxy() {
+    local rc hp ap np
+    rc=$(detect_host_proxy_upgrade) || return 0
+    hp="${rc%%$'\n'*}"; rc="${rc#*$'\n'}"
+    ap="${rc%%$'\n'*}"; rc="${rc#*$'\n'}"
+    np="$rc"
+    if [[ -z "$hp" && -z "$ap" ]]; then
+        log_info "no host proxy detected (HTTP_PROXY/HTTPS_PROXY unset)"
+        return 0
+    fi
+    if ! grep -qE '^ONGRID_HTTPS_PROXY=' "$ENV_FILE" 2>/dev/null && [[ -n "$ap" ]]; then
+        set_env_value ONGRID_HTTPS_PROXY "$ap"
+        log_info "host proxy → ONGRID_HTTPS_PROXY=$ap"
+    fi
+    if ! grep -qE '^ONGRID_HTTP_PROXY='  "$ENV_FILE" 2>/dev/null && [[ -n "$hp" ]]; then
+        set_env_value ONGRID_HTTP_PROXY "$hp"
+        log_info "host proxy → ONGRID_HTTP_PROXY=$hp"
+    fi
+    if ! grep -qE '^ONGRID_NO_PROXY='    "$ENV_FILE" 2>/dev/null && [[ -n "$np" ]]; then
+        set_env_value ONGRID_NO_PROXY "$np"
+        log_info "host proxy → ONGRID_NO_PROXY=$np"
+    fi
+    if [[ -n "$ap$hp" ]]; then
+        log_info "containers `ongrid` & `searxng` will use the host proxy"
+    fi
+    # Always append internal domains so DNS-mapped internal services
+    # (loki.corp.example.com etc.) stay proxy-free.
+    upgrade_append_internal_no_proxy_domains || true
+}
+
 trap 'log_error "upgrade failed at line $LINENO"' ERR
 
 if [[ $EUID -ne 0 ]]; then
@@ -128,18 +256,31 @@ command -v docker >/dev/null 2>&1 || { log_error "docker CLI not found"; exit 1;
 docker info >/dev/null 2>&1 || { log_error "docker daemon not reachable"; exit 1; }
 docker compose version >/dev/null 2>&1 || { log_error "docker compose v2 required"; exit 1; }
 
-INSTALL_DIR="${ONGRID_INSTALL_DIR:-/opt/ongrid}"
+# ---------- install layout (mirror of install.sh: single parent, four subdirs) ----------
+# Same four-subdir layout as install.sh: ongrid/ (compose stack root),
+# ongrid-web/ (nginx container inputs), data/ (component state), logs/.
+# On an in-place upgrade we don't move operator data around — we resolve
+# the path the operator's existing .env points at, and only fall back to
+# the new parent-dir defaults when the key is unset. Operators running an
+# older release that shipped ONGRID_DATA_DIR=/var/lib/ongrid keep their
+# data where it is until they explicitly move it (and edit .env).
+PARENT_DIR="${ONGRID_INSTALL_DIR:-/opt/ongrid}"
+INSTALL_DIR="$PARENT_DIR/ongrid"
+WEB_DIR="${ONGRID_WEB_DIR:-$PARENT_DIR/ongrid-web}"
 ENV_FILE="$INSTALL_DIR/.env"
 
 if [[ ! -f "$ENV_FILE" ]]; then
-    log_error "no existing install found at $INSTALL_DIR/.env"
+    log_error "no existing install found at $ENV_FILE"
     log_error "run install.sh for a fresh install, not upgrade.sh"
     exit 1
 fi
 
 log_info "upgrading ongrid at $INSTALL_DIR"
+log_info "  ongrid/      → $INSTALL_DIR"
+log_info "  ongrid-web/  → $WEB_DIR"
+log_info "  data/        → ${ONGRID_DATA_DIR:-$PARENT_DIR/data}"
+log_info "  logs/        → ${ONGRID_LOG_DIR:-$PARENT_DIR/logs}"
 
-# Determine new version from tarball.
 NEW_VERSION=""
 if [[ -f "$SCRIPT_DIR/VERSION" ]]; then
     NEW_VERSION=$(tr -d '[:space:]' < "$SCRIPT_DIR/VERSION" || true)
@@ -167,12 +308,14 @@ log_info "stopping stack"
 )
 
 # ---------- host data dirs (bind-mount targets) ----------
-# Same shape as install.sh — every upgrade re-asserts dir ownership in
-# case the operator deleted/renamed a dir or the image uid changed.
-ONGRID_DATA_DIR="${ONGRID_DATA_DIR:-/var/lib/ongrid}"
-ONGRID_LOG_DIR="${ONGRID_LOG_DIR:-/var/log/ongrid}"
+# ONGRID_DATA_DIR / ONGRID_LOG_DIR resolved in the install layout block
+# above — they fall back to $PARENT_DIR/data + $PARENT_DIR/logs (matching
+# the new four-subdir default layout) only when unset. If the operator's
+# existing .env has them pointing at a legacy path (e.g. /var/lib/ongrid),
+# we honour it — moving data across upgrades is the operator's call.
 log_info "data dir: $ONGRID_DATA_DIR  (override via ONGRID_DATA_DIR)"
-log_info "log dir:  $ONGRID_LOG_DIR  (override via ONGRID_LOG_DIR)"
+log_info "log dir:  $ONGRID_LOG_DIR   (override via ONGRID_LOG_DIR)"
+log_info "web dir:  $WEB_DIR          (override via ONGRID_WEB_DIR)"
 
 mkdir -p \
     "$ONGRID_DATA_DIR/mysql" \
@@ -318,7 +461,7 @@ chown -R 10001:10001   "$ONGRID_DATA_DIR/tempo"      2>/dev/null || true
 chown -R 472:472       "$ONGRID_DATA_DIR/grafana"    2>/dev/null || true
 chmod 755 "$ONGRID_DATA_DIR" "$ONGRID_LOG_DIR"
 
-export ONGRID_DATA_DIR ONGRID_LOG_DIR
+export ONGRID_DATA_DIR ONGRID_LOG_DIR ONGRID_WEB_DIR ONGRID_INSTALL_DIR
 
 # Overwrite shipped assets. Do NOT touch .env or certs/.
 log_info "copying new docker-compose.yml / frontier.yaml / nginx.conf / prometheus / edge / VERSION"
@@ -329,15 +472,18 @@ fi
 # nginx.conf is refreshed; certs/ is intentionally NOT touched so operator's
 # real cert (if any) survives the upgrade (ADR-008). If certs/ is empty
 # (first upgrade onto a pre-nginx install), generate a self-signed cert.
+# nginx inputs (nginx.conf + certs/) live under $WEB_DIR (= <parent>/ongrid-web/),
+# the dedicated dir for the ongrid-web container. install.sh first run wrote
+# them there; we refresh nginx.conf but leave certs/ alone on every upgrade.
 if [[ -f "$SCRIPT_DIR/nginx.conf" ]]; then
-    cp -f "$SCRIPT_DIR/nginx.conf" "$INSTALL_DIR/nginx.conf"
+    cp -f "$SCRIPT_DIR/nginx.conf" "$WEB_DIR/nginx.conf"
 fi
-mkdir -p "$INSTALL_DIR/certs"
-chmod 700 "$INSTALL_DIR/certs"
-if [[ ! -f "$INSTALL_DIR/certs/tls.crt" || ! -f "$INSTALL_DIR/certs/tls.key" ]]; then
-    log_info "no TLS cert under $INSTALL_DIR/certs; generating self-signed (365d, CN=ongrid)"
-    generate_self_signed_tls_cert "$INSTALL_DIR/certs"
-    log_warn "self-signed cert: replace with real one in $INSTALL_DIR/certs/ later"
+mkdir -p "$WEB_DIR/certs"
+chmod 700 "$WEB_DIR/certs"
+if [[ ! -f "$WEB_DIR/certs/tls.crt" || ! -f "$WEB_DIR/certs/tls.key" ]]; then
+    log_info "no TLS cert under $WEB_DIR/certs; generating self-signed (365d, CN=ongrid)"
+    generate_self_signed_tls_cert "$WEB_DIR/certs"
+    log_warn "self-signed cert: replace with real one in $WEB_DIR/certs/ later"
 fi
 if [[ -f "$SCRIPT_DIR/VERSION" ]]; then
     cp -f "$SCRIPT_DIR/VERSION" "$INSTALL_DIR/VERSION"
@@ -378,22 +524,22 @@ if [[ -d "$SCRIPT_DIR/grafana" ]]; then
     cp -rf "$SCRIPT_DIR/grafana/." "$INSTALL_DIR/grafana/"
 fi
 if [[ -d "$SCRIPT_DIR/edge" ]]; then
-    rm -rf "$INSTALL_DIR/edge"
-    mkdir -p "$INSTALL_DIR/edge"
-    cp -rf "$SCRIPT_DIR/edge/." "$INSTALL_DIR/edge/"
-    find "$INSTALL_DIR/edge" -maxdepth 1 -name '*.sh' -exec chmod 755 {} \;
+    rm -rf "$WEB_DIR/edge"
+    mkdir -p "$WEB_DIR/edge"
+    cp -rf "$SCRIPT_DIR/edge/." "$WEB_DIR/edge/"
+    find "$WEB_DIR/edge" -maxdepth 1 -name '*.sh' -exec chmod 755 {} \;
     # Reassemble the ADR-024 one-button upgrade bundle from the loose edge
     # binaries (no longer double-packed in the tarball — see install.sh /
     # deploy/install/edge/build-edge-bundle.sh). Best-effort; warn on failure.
-    if [[ -x "$INSTALL_DIR/edge/build-edge-bundle.sh" && -n "$NEW_VERSION" ]]; then
+    if [[ -x "$WEB_DIR/edge/build-edge-bundle.sh" && -n "$NEW_VERSION" ]]; then
         # Only rebuild for the edge arch(es) actually staged. v0.9.0+ ships
         # amd64-only edge binaries (EDGE_TARGETS in package.sh), so glob the
         # present ongrid-edge-linux-* instead of assuming both arches —
         # otherwise upgrade warns about the arm64 binaries we didn't ship.
-        for _edge_bin in "$INSTALL_DIR"/edge/ongrid-edge-linux-*; do
+        for _edge_bin in "$WEB_DIR"/edge/ongrid-edge-linux-*; do
             [[ -f "$_edge_bin" ]] || continue   # no-match glob stays literal; skip
             _edge_arch="${_edge_bin##*/ongrid-edge-}"   # ongrid-edge-linux-amd64 -> linux-amd64
-            "$INSTALL_DIR/edge/build-edge-bundle.sh" "$INSTALL_DIR/edge" "$NEW_VERSION" "$_edge_arch" \
+            "$WEB_DIR/edge/build-edge-bundle.sh" "$WEB_DIR/edge" "$NEW_VERSION" "$_edge_arch" \
                 || log_warn "edge upgrade bundle rebuild failed for $_edge_arch; one-button edge upgrade unavailable for that arch until next upgrade"
         done
     fi
@@ -451,6 +597,7 @@ backfill_plain() {
 backfill_plain  GRAFANA_ADMIN_USER     admin
 backfill_secret GRAFANA_ADMIN_PASSWORD 20
 ensure_host_gateway_env
+upgrade_apply_host_proxy
 
 chmod 600 "$ENV_FILE"
 

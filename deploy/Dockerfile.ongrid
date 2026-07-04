@@ -1,8 +1,26 @@
 # syntax=docker/dockerfile:1.7
 # ongrid cloud service image — multi-stage, distroless final.
 # Build context MUST be the repo root (see Makefile target `docker-ongrid`).
+#
+# ── Proxy support (opt-in) ──
+# When the build host needs an HTTP/HTTPS proxy (corporate egress, CN
+# networks, etc.) pass one of:
+#   1. docker build --build-arg HTTPS_PROXY=http://user:pass@proxy:8080 \
+#                   --build-arg HTTP_PROXY=http://user:pass@proxy:8080 \
+#                   --build-arg NO_PROXY=localhost,127.0.0.1,.svc
+#   2. `export HTTPS_PROXY=...` in the shell before `docker build` —
+#      buildkit ≥ 0.8 propagates the standard env vars to RUN commands
+#      automatically. Use --build-arg if you need to be explicit.
+# URL-style auth is supported (http://user:pass@proxy:8080). When unset
+# the build behaves EXACTLY as before — apt/go/onnxruntime all hit the
+# internet direct. Both stages read the same args, so a single set of
+# --build-arg flags covers builder (go mod download) + runtime (apt +
+# onnxruntime fetch).
 
 ARG VERSION=dev
+ARG HTTP_PROXY=
+ARG HTTPS_PROXY=
+ARG NO_PROXY=localhost,127.0.0.1,.svc,.cluster.local
 
 # ---------- Stage 1: builder ----------
 # We need CGO for the fastembed-go local embedder (yalue/onnxruntime_go
@@ -14,6 +32,28 @@ FROM golang:1.25-bookworm AS builder
 
 ARG VERSION
 ARG TARGETARCH
+# Proxy plumbing — both the upper/lower-case spellings so go (which uses
+# lower-case env natively), curl, apt, and any child process all see it.
+# ARG defaults are empty so leaving --build-arg off behaves like legacy.
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ENV HTTP_PROXY=$HTTP_PROXY \
+    HTTPS_PROXY=$HTTPS_PROXY \
+    http_proxy=$HTTP_PROXY \
+    https_proxy=$HTTPS_PROXY \
+    NO_PROXY=$NO_PROXY \
+    no_proxy=$NO_PROXY
+# Belt-and-braces Go module proxy. Covers the case where buildkit doesn't
+# pick up the host HTTPS_PROXY (older daemons, containerd without the
+# proxy env forwarder, etc.) and gives go mod download a CN-friendly path.
+# `direct` is the final fallback so an air-gapped build that already has
+# the modules cached under /go/pkg/mod still resolves.
+# Operator override via `--build-arg GOPROXY=...`; an empty value falls
+# back to the CN-friendly chain (so passing an unset env var through
+# the Makefile stays harmless rather than collapsing to proxy.golang.org).
+ARG GOPROXY
+ENV GOPROXY=${GOPROXY:-https://goproxy.cn,https://goproxy.io,https://proxy.golang.org,direct}
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -52,6 +92,34 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # needed for knowledge-base repo sync, openssh-client for SSH-style
 # repo URLs.
 FROM debian:bookworm-slim
+
+# Proxy plumbing for runtime fetches (apt-get + the onnxruntime
+# .tgz/.nupkg curl below). Same --build-arg contract as the builder
+# stage. NO_PROXY default keeps the manager talking to co-located
+# services without traversing the proxy.
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ENV HTTP_PROXY=$HTTP_PROXY \
+    HTTPS_PROXY=$HTTPS_PROXY \
+    http_proxy=$HTTP_PROXY \
+    https_proxy=$HTTPS_PROXY \
+    NO_PROXY=$NO_PROXY \
+    no_proxy=$NO_PROXY
+
+# Configure apt to honor the proxy if one was passed in. Empty env values
+# leave apt untouched (= direct connect, legacy behavior). Idempotent
+# re-runs are safe; printf overwrites the previous file cleanly.
+RUN set -eux; \
+    if [ -n "$HTTP_PROXY$HTTPS_PROXY" ]; then \
+        { \
+            printf 'Acquire::http::Proxy "%s";\n' "${HTTP_PROXY:-}"; \
+            printf 'Acquire::https::Proxy "%s";\n' "${HTTPS_PROXY:-}"; \
+        } > /etc/apt/apt.conf.d/90proxy; \
+        echo "[ongrid] apt proxy configured (HTTP_PROXY=${HTTP_PROXY:-direct} HTTPS_PROXY=${HTTPS_PROXY:-direct})"; \
+    else \
+        echo "[ongrid] no apt proxy — direct connect"; \
+    fi
 
 # Knowledge-base + onnxruntime runtime deps.
 #   - git / openssh-client / ca-certificates / tzdata: same role as

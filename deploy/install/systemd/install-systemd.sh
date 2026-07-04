@@ -67,14 +67,140 @@ while [[ $# -gt 0 ]]; do
 done
 
 # -----------------------------------------------------------------------------
-# paths
+# paths — overridable via env vars so operators can repoint the install at a
+# customer-managed directory tree without forking the script.
+#
+# Two layout modes:
+#
+#   Default (legacy FHS, ONGRID_INSTALL_PREFIX=/usr/local):
+#     PREFIX_BIN=/usr/local/bin   ETC_DIR=/etc/ongrid
+#     STATE_DIR=/var/lib/ongrid   LOG_DIR=/var/log/ongrid
+#
+#   Collapsed (ONGRID_INSTALL_PREFIX=/opt/ongrid, matches compose mode):
+#     PREFIX_BIN=/opt/ongrid/bin        ETC_DIR=/opt/ongrid/ongrid
+#     STATE_DIR=/opt/ongrid/data        LOG_DIR=/opt/ongrid/logs
+#
+# Per-subdir overrides still work in either mode — e.g. exporting
+# ONGRID_INSTALL_STATE=/var/lib/ongrid while keeping the rest under
+# /opt/ongrid is fine for ops who want metrics on a dedicated disk but the
+# binaries + config on the install root. set any of the four to a fully
+# custom path; unset leaves the collapsed default.
 # -----------------------------------------------------------------------------
-PREFIX_BIN=/usr/local/bin
-ETC_DIR=/etc/ongrid
-STATE_DIR=/var/lib/ongrid
-LOG_DIR=/var/log/ongrid
+PREFIX="${ONGRID_INSTALL_PREFIX:-/usr/local}"
+if [[ "$PREFIX" == "/usr/local" ]]; then
+    PREFIX_BIN="${ONGRID_INSTALL_BIN:-/usr/local/bin}"
+    ETC_DIR="${ONGRID_INSTALL_ETC:-/etc/ongrid}"
+    STATE_DIR="${ONGRID_INSTALL_STATE:-/var/lib/ongrid}"
+    LOG_DIR="${ONGRID_INSTALL_LOG:-/var/log/ongrid}"
+else
+    PREFIX_BIN="${ONGRID_INSTALL_BIN:-$PREFIX/bin}"
+    ETC_DIR="${ONGRID_INSTALL_ETC:-$PREFIX/ongrid}"
+    STATE_DIR="${ONGRID_INSTALL_STATE:-$PREFIX/data}"
+    LOG_DIR="${ONGRID_INSTALL_LOG:-$PREFIX/logs}"
+fi
 SYSTEMD_DIR=/etc/systemd/system
 SERVICE_USER=ongrid
+
+# -----------------------------------------------------------------------------
+# host proxy detection + internal no_proxy collection. Compact implementations
+# (mirrors install.sh / upgrade.sh; kept separate because all three scripts
+# run standalone from a freshly extracted tarball and don't source each other).
+# On first install (when ongrid.env doesn't yet exist) the result is inlined
+# into the heredoc below; on re-install the heredoc is skipped (`[[ ! -f ]]`),
+# so this only matters for fresh systemd-mode setups.
+# -----------------------------------------------------------------------------
+detect_host_proxy_systemd() {
+    local hp ap np f_hp f_ap f_np
+    np="${no_proxy:-${NO_PROXY:-}}"
+    hp="${http_proxy:-${HTTP_PROXY:-}}"
+    ap="${https_proxy:-${HTTPS_PROXY:-}}"
+    if [[ -z "$hp$ap" && -r /etc/environment ]]; then
+        f_hp=$(grep -E '^[[:space:]]*http_proxy='  /etc/environment 2>/dev/null | tail -n1 | cut -d= -f2- | tr -d '"' || true)
+        f_ap=$(grep -E '^[[:space:]]*https_proxy=' /etc/environment 2>/dev/null | tail -n1 | cut -d= -f2- | tr -d '"' || true)
+        f_np=$(grep -E '^[[:space:]]*no_proxy='    /etc/environment 2>/dev/null | tail -n1 | cut -d= -f2- | tr -d '"' || true)
+        [[ -z "$hp" ]] && hp="$f_hp"
+        [[ -z "$ap" ]] && ap="$f_ap"
+        [[ -z "$np" ]] && np="$f_np"
+    fi
+    printf '%s\n%s\n%s\n' \
+        "${hp//[[:space:]]/}" "${ap//[[:space:]]/}" "${np//[[:space:]]/}"
+}
+# Internal DNS names + hostname/FQDN the manager must reach without going
+# through the host proxy. Same four sources as install.sh: ONGRID_NO_PROXY_EXTRA
+# (operator) + /etc/hosts non-localhost + /etc/resolv.conf search/domain +
+# hostname + FQDN. Merged into the operator's NO_PROXY by
+# collect_internal_no_proxy_domains_systemd.
+collect_internal_no_proxy_domains_systemd() {
+    local parts=() tok p hn fqdn line rest
+    if [[ -n "${ONGRID_NO_PROXY_EXTRA:-}" ]]; then
+        IFS=',' read -ra extras <<<"${ONGRID_NO_PROXY_EXTRA}"
+        for e in "${extras[@]}"; do
+            e="${e//[[:space:]]/}"
+            [[ -n "$e" ]] && parts+=("$e")
+        done
+    fi
+    if [[ -r /etc/hosts ]]; then
+        while IFS= read -r line; do
+            [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+            while read -r h; do
+                [[ -z "$h" ]] && continue
+                [[ "$h" == localhost || "$h" == localhost.* || "$h" == *.localhost || "$h" == *.localhost.* ]] && continue
+                [[ "$h" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && continue
+                [[ "$h" == *:* ]] && continue
+                parts+=("$h")
+            done < <(printf '%s\n' "$line" | awk '{ gsub(/#.*/, ""); for (i=2; i<=NF; i++) print $i }')
+        done < /etc/hosts
+    fi
+    if [[ -r /etc/resolv.conf ]]; then
+        while IFS= read -r line; do
+            [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+            if [[ "$line" =~ ^[[:space:]]*(search|domain)[[:space:]]+ ]]; then
+                rest="${line#${BASH_REMATCH[0]}}"
+                for tok in $rest; do [[ -n "$tok" ]] && parts+=("$tok"); done
+            fi
+        done < /etc/resolv.conf
+    fi
+    hn=$(hostname 2>/dev/null || true)
+    [[ -n "$hn" ]] && parts+=("$hn")
+    if command -v hostname >/dev/null 2>&1; then
+        fqdn=$(hostname -f 2>/dev/null || true)
+        [[ -n "$fqdn" && "$fqdn" != "$hn" ]] && parts+=("$fqdn")
+    fi
+    local seen=""
+    for p in "${parts[@]}"; do
+        [[ -z "$p" ]] && continue
+        case ",${seen}," in *",${p},"*) ;; *) seen="${seen}${seen:+,}${p}" ;; esac
+    done
+    printf '%s' "$seen"
+}
+# Convenience wrapper: detect host proxy + collect internal domains, then
+# stash the three values in HOST_PROXY_HP / HOST_PROXY_AP / HOST_NO_PROXY
+# for the heredoc below. Logs what was autodetected.
+systemd_setup_proxy_env() {
+    local rc hp ap user_np internal
+    rc=$(detect_host_proxy_systemd) || return 0
+    hp="${rc%%$'\n'*}"; rc="${rc#*$'\n'}"
+    ap="${rc%%$'\n'*}"; rc="${rc#*$'\n'}"
+    user_np="$rc"
+    internal=$(collect_internal_no_proxy_domains_systemd)
+    # Merge user-supplied NO_PROXY + auto-collected internal domains.
+    if [[ -n "$user_np" && -n "$internal" ]]; then
+        HOST_NO_PROXY="$user_np,$internal"
+    elif [[ -n "$internal" ]]; then
+        HOST_NO_PROXY="$internal"
+    else
+        HOST_NO_PROXY="$user_np"
+    fi
+    HOST_NO_PROXY="${HOST_NO_PROXY%,}"   # trim trailing comma
+    HOST_PROXY_HP="$hp"
+    HOST_PROXY_AP="$ap"
+    if [[ -n "$ap$hp" ]]; then
+        log "host proxy detected → will pre-fill ongrid.env (override per-unit via: sudo systemctl edit ongrid)"
+    fi
+    if [[ -n "$internal" ]]; then
+        log "auto-collected internal no_proxy domains from /etc/hosts + resolv.conf + ONGRID_NO_PROXY_EXTRA: ${internal}"
+    fi
+}
 
 # -----------------------------------------------------------------------------
 # system user
@@ -202,6 +328,11 @@ copy_conf "$BUNDLE_DIR/frontier.yaml"             "$ETC_DIR/frontier.yaml"
 
 # manager env file — first install only; subsequent runs preserve.
 ENV_FILE="$ETC_DIR/ongrid.env"
+# Pre-detect host proxy + auto-collect internal no_proxy domains so the
+# heredoc below can inline them. systemd `ongrid.service` reads this file
+# via EnvironmentFile=; a per-unit `systemctl edit ongrid` override wins
+# if the operator later needs to tweak any of these.
+systemd_setup_proxy_env
 if [[ ! -f "$ENV_FILE" ]]; then
     cat > "$ENV_FILE" <<EOF
 # ongrid manager environment — systemd mode.
@@ -243,6 +374,20 @@ ONGRID_EMBEDDING_PROVIDER=local
 ONGRID_EMBEDDING_MODEL=bge-small-zh-v1.5
 ONGRID_EMBEDDING_DIM=512
 ONGRID_EMBEDDING_CACHE_DIR=/var/lib/ongrid/embeddings
+
+# Outbound proxy — autodetected by install-systemd.sh from this shell's
+# HTTP_PROXY / HTTPS_PROXY / NO_PROXY + /etc/environment fallback +
+# auto-collected internal names from /etc/hosts + /etc/resolv.conf +
+# hostname + ONGRID_NO_PROXY_EXTRA (export before running the installer
+# to add extras like `loki.corp.example.com,prom.internal`). systemd's
+# `ongrid.service` reads this file via EnvironmentFile=; per-unit
+# `sudo systemctl edit ongrid` overrides (an `[Service] Environment=`
+# block) win, so leave these blank here if you'd rather manage them
+# at the unit level.
+# To disable: set all three to empty, then `systemctl restart ongrid`.
+ONGRID_HTTP_PROXY=${HOST_PROXY_HP-}
+ONGRID_HTTPS_PROXY=${HOST_PROXY_AP-}
+ONGRID_NO_PROXY=${HOST_NO_PROXY-}
 EOF
     chmod 0640 "$ENV_FILE"
     chown root:ongrid "$ENV_FILE"

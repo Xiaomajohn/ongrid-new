@@ -422,6 +422,11 @@ func (h *Handler) listEdges(w http.ResponseWriter, r *http.Request) {
 		Status: q.Get("status"),
 		Name:   q.Get("name"),
 	}
+	if v := q.Get("device_id"); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 64); err == nil {
+			f.DeviceID = &n
+		}
+	}
 	if s := q.Get("limit"); s != "" {
 		if n, err := strconv.Atoi(s); err == nil {
 			f.Limit = n

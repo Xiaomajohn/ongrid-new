@@ -7,6 +7,14 @@ import (
 	"github.com/ongridio/ongrid/internal/edgeagent/plugins"
 )
 
+// testWorkDir is a stable path the audit-probe in render() sees as
+// missing across every logs renderer test (no <testWorkDir>/audit/
+// audit.jsonl exists in CI), so each render call mirrors the
+// operator-disabled-audit scenario and existing assertions stay
+// authoritative. For audit-aware tests, write the JSONL into a
+// t.TempDir and pass it as workDir instead.
+const testWorkDir = "/tmp/ongrid-edge-test-plugins"
+
 func TestRenderHappyPath(t *testing.T) {
 	cfg := plugins.PluginConfig{
 		Enabled:  true,
@@ -21,7 +29,7 @@ func TestRenderHappyPath(t *testing.T) {
 			"enable_journald": true,
 		},
 	}
-	out, err := render(cfg)
+	out, err := render(testWorkDir, cfg)
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}
@@ -51,14 +59,14 @@ func TestRenderHappyPath(t *testing.T) {
 
 func TestRenderRejectsMissingEndpoint(t *testing.T) {
 	cfg := plugins.PluginConfig{Enabled: true, EdgeID: 1}
-	if _, err := render(cfg); err == nil {
+	if _, err := render(testWorkDir, cfg); err == nil {
 		t.Errorf("render must reject missing endpoint")
 	}
 }
 
 func TestRenderRejectsMissingEdgeID(t *testing.T) {
 	cfg := plugins.PluginConfig{Enabled: true, Endpoint: "https://x/loki/api/v1/push"}
-	if _, err := render(cfg); err == nil {
+	if _, err := render(testWorkDir, cfg); err == nil {
 		t.Errorf("render must reject missing edge_id")
 	}
 }
@@ -73,7 +81,7 @@ func TestRenderEnableJournaldFalse(t *testing.T) {
 			"file_paths":      []interface{}{"/var/log/x.log"},
 		},
 	}
-	out, err := render(cfg)
+	out, err := render(testWorkDir, cfg)
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}
@@ -96,7 +104,7 @@ func TestRenderSingleClient(t *testing.T) {
 		AuthUser: "ak",
 		AuthPass: "sk",
 	}
-	out, err := render(cfg)
+	out, err := render(testWorkDir, cfg)
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}
@@ -122,7 +130,7 @@ func TestRenderJournaldDefaultOn(t *testing.T) {
 			"file_paths": []interface{}{"/var/log/syslog"},
 		},
 	}
-	out, err := render(base)
+	out, err := render(testWorkDir, base)
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}
@@ -131,7 +139,7 @@ func TestRenderJournaldDefaultOn(t *testing.T) {
 	}
 
 	base.Spec["enable_journald"] = false
-	out, err = render(base)
+	out, err = render(testWorkDir, base)
 	if err != nil {
 		t.Fatalf("render with journald off: %v", err)
 	}

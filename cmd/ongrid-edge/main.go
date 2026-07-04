@@ -26,6 +26,7 @@ import (
 	edgecollector "github.com/ongridio/ongrid/internal/edgeagent/collector"
 	edgehostfiles "github.com/ongridio/ongrid/internal/edgeagent/host_files"
 	edgeplugins "github.com/ongridio/ongrid/internal/edgeagent/plugins"
+	edgepluginaudit "github.com/ongridio/ongrid/internal/edgeagent/plugins/audit"
 	edgeplugincustommetrics "github.com/ongridio/ongrid/internal/edgeagent/plugins/custommetrics"
 	edgeplugindatabasemetrics "github.com/ongridio/ongrid/internal/edgeagent/plugins/databasemetrics"
 	edgepluginhostmetrics "github.com/ongridio/ongrid/internal/edgeagent/plugins/hostmetrics"
@@ -191,6 +192,12 @@ func main() {
 
 	registered := []edgeplugins.Plugin{
 		edgepluginlogs.New(pluginBinDir, pluginWorkDir, pluginLog),
+		// audit plugin: subprocess auditbeat (Elastic closed-source). Writes
+		// JSONL to <workDir>/audit/audit.jsonl; the logs plugin's renderer
+		// auto-discovers and tails that path via audit.OutputPath(workDir).
+		// Linux-only — on darwin edges the supervisor will report a missing
+		// binary and operators opt out via the Integrations UI.
+		edgepluginaudit.New(pluginBinDir, pluginWorkDir, pluginLog),
 		// traces plugin: subprocess otelcol-contrib. Stays
 		// disabled until manager pushes a PluginConfig with enabled=true
 		// + Endpoint set to the manager public /v1/traces URL.

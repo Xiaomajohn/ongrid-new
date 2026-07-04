@@ -23,10 +23,26 @@ PACKAGE_TARGET := $(TARGET_OS)-$(TARGET_ARCH)
 # the big size lever: otelcol-contrib alone is ~290M per arch. Override to
 # "linux-amd64 linux-arm64" to fetch/bundle more edge arches. Kept in sync with
 # package.sh's EDGE_TARGETS (the staging side).
-EDGE_PLUGIN_ARCHES ?= linux-amd64
+# Default edge plugin arches shipped with the release tarball.
+# Override on the command line, e.g.
+#   EDGE_PLUGIN_ARCHES="linux-arm64" make package         # arm64-only
+#   EDGE_PLUGIN_ARCHES="linux-amd64 linux-arm64" make package  # both linux
+# Darwin targets were dropped: install-edge.sh no longer installs darwin,
+# the upstream plugin binaries (otelcol-contrib etc.) don't ship darwin
+# builds in the contrib stream anyway, and cross-compiling them just to
+# throw away the result wastes CI time. If a future deployment needs darwin
+# edges, run `make build-edge-all` explicitly.
+EDGE_PLUGIN_ARCHES ?= linux-amd64 linux-arm64
 STAGE       := dist/stage/ongrid-$(VERSION)-$(PACKAGE_TARGET)
 OUT         := dist/out
 PACKAGE_CLEAN ?= 1
+
+# Auditbeat is Elastic closed-source; we never download at build time.
+# Operators drop the binary into resource/auditbeat/<arch>/auditbeat per
+# resource/auditbeat/README.md, then `make stage-auditbeat` mirrors it
+# into bin/<arch>/. Idempotent — overwrites if dest exists.
+AUDITBEAT_VERSION ?= 9.4.2
+RESOURCE_DIR     := resource/auditbeat
 
 DB_DSN     ?= root:root@tcp(127.0.0.1:3306)/ongrid?charset=utf8mb4&parseTime=true&loc=Local
 MIGRATIONS := db/migrations
@@ -130,10 +146,10 @@ migrate-down: ## DB migrate down 1 步
 docker: docker-ongrid docker-ongrid-edge ## 构建全部镜像
 
 docker-ongrid: ## 构建 ongrid 镜像
-	docker build --build-arg VERSION=$(VERSION) -t ongrid:$(VERSION) -f deploy/Dockerfile.ongrid .
+	docker build --build-arg VERSION=$(VERSION) $(DOCKER_BUILD_PROXY_ARGS) -t ongrid:$(VERSION) -f deploy/Dockerfile.ongrid .
 
 docker-ongrid-edge: ## 构建 ongrid-edge 镜像
-	docker build -t ongrid-edge:$(VERSION) -f deploy/Dockerfile.ongrid-edge .
+	docker build $(DOCKER_BUILD_PROXY_ARGS) -t ongrid-edge:$(VERSION) -f deploy/Dockerfile.ongrid-edge .
 
 # ----------------------------------------------------------------------------
 # compose
@@ -179,9 +195,20 @@ build-linux: ## [release] 交叉编译 ongrid linux/amd64
 		-o $(BIN_DIR)/linux-amd64/ongrid ./cmd/ongrid
 	@echo "built $(BIN_DIR)/linux-amd64/ongrid"
 
-.PHONY: build-edge-all
-build-edge-all: build-edge-linux-amd64 build-edge-linux-arm64 build-edge-darwin-amd64 build-edge-darwin-arm64 ## [release] 交叉编译 ongrid-edge 全部 4 个目标
-	@echo "built all edge binaries in $(BIN_DIR)/<os>-<arch>/ongrid-edge"
+.PHONY: build-edge-linux-all build-edge-all
+# Linux-only edge set — default driver for `make package`. Compiles exactly
+# the EDGE_PLUGIN_ARCHES list (default linux-amd64 + linux-arm64), so we
+# never waste cycles on arches the tarball won't ship.
+build-edge-linux-all: ## [release] 交叉编译 EDGE_PLUGIN_ARCHES 列出的 linux edge 目标（默认 amd64+arm64）
+	@for arch in $(EDGE_PLUGIN_ARCHES); do \
+		$(MAKE) --no-print-directory build-edge-$$arch; \
+	done
+	@echo "built edge binaries: $(EDGE_PLUGIN_ARCHES)"
+
+# Explicit full-matrix entry — preserves the legacy "build everything"
+# escape hatch for one-off developer builds that need darwin edges.
+build-edge-all: build-edge-linux-amd64 build-edge-linux-arm64 build-edge-darwin-amd64 build-edge-darwin-arm64 ## [release] 交叉编译 ongrid-edge 全部 4 个目标（含 darwin，显式触发）
+	@echo "built all 4 edge binaries in $(BIN_DIR)/<os>-<arch>/ongrid-edge"
 
 .PHONY: build-edge-linux-amd64
 build-edge-linux-amd64: ## [release] edge linux/amd64
@@ -216,6 +243,7 @@ docker-build: ## [release] 构建 ongrid:$(VERSION) 镜像（默认 linux/amd64�
 	docker buildx build \
 		--platform $(PLATFORM) \
 		--build-arg VERSION=$(VERSION) \
+		$(DOCKER_BUILD_PROXY_ARGS) \
 		-t ongrid:$(VERSION) \
 		-f deploy/Dockerfile.ongrid \
 		--load .
@@ -231,6 +259,7 @@ docker-build-web: ## [release] 构建 ongrid-web:$(VERSION) 镜像（前端 SPA 
 	docker buildx build \
 		--platform $(PLATFORM) \
 		--build-arg VERSION=$(VERSION) \
+		$(DOCKER_BUILD_PROXY_ARGS) \
 		-t ongrid-web:$(VERSION) \
 		-f deploy/Dockerfile.web \
 		--load .
@@ -251,6 +280,7 @@ docker-build-broker: ## [release] 本地构建 singchia/frontier:$(FRONTIER_VERS
 		test -d $(FRONTIER_SRC) || { echo "FRONTIER_SRC=$(FRONTIER_SRC) not found and local image is not for $(PLATFORM)"; exit 1; }; \
 		docker buildx build \
 			--platform $(PLATFORM) \
+			$(DOCKER_BUILD_PROXY_ARGS) \
 			-t singchia/frontier:$(FRONTIER_VERSION) \
 			-f deploy/Dockerfile.frontier \
 			--load $(FRONTIER_SRC); \
@@ -265,7 +295,38 @@ docker-save: ## [release] docker save ongrid:$(VERSION) 到 stage
 # Promtail bundle (ADR-012 / ADR-015 logs plugin).
 # Cached under bin/<os>-<arch>/promtail to avoid re-downloading on every build.
 PROMTAIL_VERSION ?= 3.4.0
-FETCH_CURL_FLAGS ?= -fL --retry 3 --retry-all-errors --retry-delay 3 --connect-timeout 15 --speed-time 60 --speed-limit 1024 --show-error
+# curl flags shared by every fetch-* target. Override on the command line
+# to drop a single flag (e.g. `make fetch-node-exporter FETCH_CURL_FLAGS=-fL`).
+# Proxy is injected via FETCH_PROXY_FLAGS below; set HTTPS_PROXY in the
+# environment to opt in (URL-style auth ok: http://user:pass@proxy:8080).
+FETCH_CURL_FLAGS ?= -fL --retry 3 --retry-all-errors --retry-delay 3 --connect-timeout 15 --speed-time 60 --speed-limit 1024 --show-error $(FETCH_PROXY_FLAGS)
+# Auto-derived: HTTPS_PROXY set → --proxy URL, else empty. Standards
+# HTTP_PROXY/HTTPS_PROXY/NO_PROXY are honored natively by apt/apk/npm/go/
+# docker buildkit; we only need to inject into curl here. Operators can
+# force-off with `make FETCH_PROXY_FLAGS=`.
+FETCH_PROXY_FLAGS := $(if $(HTTPS_PROXY),--proxy $(HTTPS_PROXY),)
+
+# docker buildx proxy plumbing. Mirrors FETCH_PROXY_FLAGS — each env var
+# is forwarded as `--build-arg` so buildkit propagates them into both
+# the builder and runtime stages (apt / apk / go / curl all see them).
+# Empty string is a safe no-op:
+#   --build-arg HTTP_PROXY=  → ARG expands to "" → ENV empty
+#   → tool sees no proxy → direct connect (legacy behavior preserved
+#   byte-for-byte when the operator exports no env vars).
+#
+# URL-style auth is fine: HTTP_PROXY=http://user:pass@proxy:8080.
+# GOPROXY is consumed via ${GOPROXY:-default} inside each Dockerfile,
+# so an empty build-arg here keeps the CN-friendly fallback rather
+# than collapsing to proxy.golang.org-only.
+#
+# Tip: scope any single arg via the shell, e.g.
+#   HTTPS_PROXY=http://user:pw@proxy:8080 make docker-ongrid
+#   make docker-build-web DOCKER_BUILD_PROXY_ARGS='--build-arg HTTPS_PROXY=http://proxy:8080'
+DOCKER_BUILD_PROXY_ARGS = \
+	--build-arg HTTP_PROXY="$${HTTP_PROXY:-}" \
+	--build-arg HTTPS_PROXY="$${HTTPS_PROXY:-}" \
+	--build-arg NO_PROXY="$${NO_PROXY:-}" \
+	--build-arg GOPROXY="$${GOPROXY:-}"
 
 .PHONY: fetch-promtail
 fetch-promtail: ## [release] 下载 promtail 到 bin/<os>-<arch>/promtail (Grafana 只发 linux 版本)
@@ -294,6 +355,29 @@ fetch-promtail: ## [release] 下载 promtail 到 bin/<os>-<arch>/promtail (Grafa
 # swap in a custom OCB build (otel-collector-builder); we ship contrib so
 # default install works without forcing users to compile their own.
 OTELCOL_VERSION ?= 0.118.0
+
+# Auditbeat is Elastic closed-source; offline-only. Mirror from
+# resource/auditbeat/<arch>/auditbeat into bin/<arch>/auditbeat. Missing
+# binaries only warn (no exit non-zero) so other arches can still be
+# packaged; the audit plugin simply won't work on the host where the
+# binary is missing. Operators populate resource/ per
+# resource/auditbeat/README.md.
+.PHONY: stage-auditbeat
+stage-auditbeat: ## [release] 从 resource/auditbeat/ 复制 auditbeat 到 bin/<os>-<arch>/ (linux-only，离线)
+	@for target in $(EDGE_PLUGIN_ARCHES); do \
+		dest=$(BIN_DIR)/$$target/auditbeat; \
+		src=$(RESOURCE_DIR)/$$target/auditbeat; \
+		if [ ! -f $$src ]; then \
+			echo "[auditbeat] $$src missing — drop the binary in per resource/auditbeat/README.md, then re-run"; \
+			echo "[auditbeat]   (or set EDGE_PLUGIN_ARCHES to an arch you have populated)"; \
+			continue; \
+		fi; \
+		mkdir -p $(BIN_DIR)/$$target; \
+		install -m 0755 $$src $$dest; \
+		echo "[auditbeat] staged $$dest (from $$src)"; \
+	done
+	@echo "[auditbeat] note: linux-only (auditd requires Linux kernel audit subsystem)"
+	@echo "[auditbeat] done. Run 'make package' to bake into the release tarball."
 
 .PHONY: fetch-otelcol
 fetch-otelcol: ## [release] 下载 otelcol-contrib 到 bin/<os>-<arch>/otelcol-contrib (linux-only)
@@ -486,7 +570,7 @@ check-release-target:
 		*) echo "unsupported PACKAGE_TARGET=$(PACKAGE_TARGET); expected linux-amd64 or linux-arm64"; exit 2 ;; \
 	esac
 
-# Order matters: fetch-* / build-edge-all populate bin/ → docker-* bake
+# Order matters: fetch-* / stage-auditbeat populate bin/ → docker-* bake
 # the images → recipe-time we rebuild the edge bundle (because dist/out
 # gets wiped first) and only then dist/package.sh assembles the
 # release tarball that includes the bundle as a sibling of the per-arch
@@ -497,11 +581,14 @@ check-release-target:
 # For offline RAG (ONGRID_EMBEDDING_PROVIDER=local) run
 # `make fetch-embedding-model` once before `make package`, otherwise
 # dist/package.sh warns and ships a tarball without the model.
-package: check-release-target fetch-promtail fetch-otelcol fetch-node-exporter fetch-process-exporter fetch-db-exporters build-edge-all docker-build docker-build-broker docker-build-web ## [release] 打单架构 release tarball 到 dist/out/（TARGET_ARCH 可覆盖）
+package: check-release-target stage-auditbeat fetch-promtail fetch-otelcol fetch-node-exporter fetch-process-exporter fetch-db-exporters build-edge-linux-all docker-build docker-build-broker docker-build-web ## [release] 打单架构 release tarball 到 dist/out/（TARGET_ARCH 可覆盖）
 	@if [ "$(PACKAGE_CLEAN)" = "1" ]; then rm -rf dist/stage dist/out; fi
 	@mkdir -p dist/stage dist/out
 	@$(MAKE) --no-print-directory build-edge-bundle
-	PACKAGE_TARGET="$(PACKAGE_TARGET)" DOCKER_PLATFORM="$(PLATFORM)" bash dist/package.sh "$(VERSION)" "$(STAGE)" "$(OUT)"
+	PACKAGE_TARGET="$(PACKAGE_TARGET)" \
+	DOCKER_PLATFORM="$(PLATFORM)" \
+	EDGE_TARGETS="$(EDGE_PLUGIN_ARCHES)" \
+	bash dist/package.sh "$(VERSION)" "$(STAGE)" "$(OUT)"
 	@echo ""
 	@echo "=== release artefact ==="
 	@ls -lh $(OUT)/ongrid-$(VERSION)-$(PACKAGE_TARGET).tar.xz

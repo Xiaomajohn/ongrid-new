@@ -230,6 +230,7 @@ export default function EdgesPage() {
                 <tr>
                   <th className="px-4 py-2.5 text-left">ID</th>
                   <th className="px-4 py-2.5 text-left">{tr('名称', 'Name')}</th>
+                  <th className="px-4 py-2.5 text-left">{tr('所属设备', 'Host device')}</th>
                   <th className="px-4 py-2.5 text-left">{tr('主机名', 'Hostname')}</th>
                   <th className="px-4 py-2.5 text-left">IP</th>
                   <th className="px-4 py-2.5 text-left">{tr('角色', 'Roles')}</th>
@@ -243,13 +244,13 @@ export default function EdgesPage() {
               <tbody className="divide-y divide-zinc-800/40">
                 {loading && edges.length === 0 ? (
                   <tr>
-                    <td colSpan={10} className="px-4 py-10 text-center text-zinc-500">
+                    <td colSpan={11} className="px-4 py-10 text-center text-zinc-500">
                       {tr('加载中…', 'Loading…')}
                     </td>
                   </tr>
                 ) : edges.length === 0 ? (
                   <tr>
-                    <td colSpan={10} className="px-4 py-10 text-center text-zinc-500">
+                    <td colSpan={11} className="px-4 py-10 text-center text-zinc-500">
                       {rolesFilter
                         ? tr(
                             `没有 ${ROLE_FILTER_TITLES[rolesFilter]?.[0] ?? rolesFilter} 设备。点设备名打开详情后可在右上角分配角色。`,
@@ -280,6 +281,20 @@ export default function EdgesPage() {
                       <td className="whitespace-nowrap px-4 py-2.5 text-zinc-100">
                         {e.name || (
                           <span className="italic text-zinc-500">{tr('（待主机上线）', '(waiting for host)')}</span>
+                        )}
+                      </td>
+                      <td
+                        className="cursor-pointer whitespace-nowrap px-4 py-2.5 text-zinc-400"
+                        title={tr('查看所属设备详情', 'View host device')}
+                        onClick={(ev) => {
+                          ev.stopPropagation();
+                          if (e.device_id) navigate(`/hosts/${encodeURIComponent(String(e.device_id))}`);
+                        }}
+                      >
+                        {e.device_id ? (
+                          <DeviceNameCell deviceId={e.device_id} />
+                        ) : (
+                          <span className="italic text-zinc-600">—</span>
                         )}
                       </td>
                       <td className="whitespace-nowrap px-4 py-2.5 text-zinc-400">
@@ -1140,5 +1155,50 @@ function InstallCommandRow({ accessKey, secretKey }: { accessKey: string; secret
       </p>
     </div>
   );
+}
+
+// DeviceNameCell: cache + lazy-fetch device.name by id for the new
+// "所属设备" column on the Edges list. The list already fetches
+// /edges, but the edge DTO embeds device_id only — we follow up with
+// one GET /devices/{id} per unique id (per page) and memoize in a
+// module-level map so re-renders are free.
+const deviceNameCache = new Map<number, string>();
+const deviceNameInflight = new Map<number, Promise<string | null>>();
+async function fetchDeviceName(id: number): Promise<string | null> {
+  const cached = deviceNameCache.get(id);
+  if (cached !== undefined) return cached;
+  const inflight = deviceNameInflight.get(id);
+  if (inflight) return inflight;
+  const p = import('@/api/devices').then(({ getDevice }) => getDevice(id)).then((d) => {
+    const name = d?.name || '';
+    deviceNameCache.set(id, name);
+    deviceNameInflight.delete(id);
+    return name;
+  }).catch(() => {
+    deviceNameInflight.delete(id);
+    return null;
+  });
+  deviceNameInflight.set(id, p);
+  return p;
+}
+
+function DeviceNameCell({ deviceId }: { deviceId: number }) {
+  const [name, setName] = useState<string | null>(deviceNameCache.get(deviceId) ?? null);
+  useEffect(() => {
+    if (deviceNameCache.has(deviceId)) {
+      setName(deviceNameCache.get(deviceId) ?? null);
+      return;
+    }
+    let cancelled = false;
+    void fetchDeviceName(deviceId).then((n) => {
+      if (cancelled) return;
+      setName(n);
+    });
+    return () => { cancelled = true; };
+  }, [deviceId]);
+  if (name) {
+    return <span className="text-zinc-300">{name}</span>;
+  }
+  return <span className="text-zinc-600">#{deviceId}</span>;
 }
 

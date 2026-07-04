@@ -427,6 +427,7 @@ export function Sidebar() {
         </NavSection>
 
         <CollapsibleSection storageKey="devices" title={tr('设备', 'Devices')} defaultOpen={false}>
+          <SidebarNavItem to="/hosts" icon={HardDrive} label={tr('主机', 'Hosts')} />
           <SidebarNavItem to="/devices" icon={HardDrive} label={tr('全部', 'All')} />
           {presentRoles.has('server') && (
             <SidebarNavItem to="/devices?roles=server" icon={Server} label={tr('服务器', 'Servers')} />

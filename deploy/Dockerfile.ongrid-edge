@@ -7,13 +7,45 @@
 #   dials the cloud tunnel (TUNNEL_ADDR) as a client. The EXPOSE 9101 below is
 #   ONLY for the agent's own local /metrics endpoint, useful for local debug
 #   (e.g. `curl localhost:9101/metrics`). Production deployments can ignore it.
+#
+# ── Proxy support (opt-in) ──
+# Same --build-arg contract as deploy/Dockerfile.ongrid:
+#   docker build --build-arg HTTPS_PROXY=http://user:pass@proxy:8080 \
+#                --build-arg HTTP_PROXY=http://user:pass@proxy:8080 \
+#                --build-arg NO_PROXY=localhost,127.0.0.1,.svc,.cluster.local
+# Or just `export HTTPS_PROXY=...` before `docker build` (buildkit ≥ 0.8
+# forwards the standard env vars to RUN commands). When unset the build
+# is byte-for-byte equivalent to the legacy direct-connect path.
 
 ARG VERSION=dev
+ARG HTTP_PROXY=
+ARG HTTPS_PROXY=
+ARG NO_PROXY=localhost,127.0.0.1,.svc,.cluster.local
 
 # ---------- Stage 1: builder ----------
 FROM golang:1.25-alpine AS builder
 
 ARG VERSION
+# Proxy plumbing — see top-of-file. Both upper/lower-case so go (which
+# prefers lower-case) + curl + child processes all see it. Empty ARG
+# defaults keep legacy behavior intact.
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ENV HTTP_PROXY=$HTTP_PROXY \
+    HTTPS_PROXY=$HTTPS_PROXY \
+    http_proxy=$HTTP_PROXY \
+    https_proxy=$HTTPS_PROXY \
+    NO_PROXY=$NO_PROXY \
+    no_proxy=$NO_PROXY
+# Belt-and-braces module proxy. CN-friendly first, with proxy.golang.org
+# and `direct` as fallback. Matches Dockerfile.ongrid so a single
+# build host config covers all three ongrid images.
+# Operator override via `--build-arg GOPROXY=...`; empty value falls
+# back to the CN-friendly chain (so passing an unset env var through
+# the Makefile stays harmless rather than collapsing to proxy.golang.org).
+ARG GOPROXY
+ENV GOPROXY=${GOPROXY:-https://goproxy.cn,https://goproxy.io,https://proxy.golang.org,direct}
 WORKDIR /app
 
 COPY go.mod go.sum ./

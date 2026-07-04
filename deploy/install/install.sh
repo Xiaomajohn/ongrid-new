@@ -122,6 +122,180 @@ ensure_host_gateway_env() {
     log_warn "docker daemon does not support host-gateway; using ONGRID_HOST_GATEWAY=${gateway}"
 }
 
+# ---------- host proxy detection (container egress via host HTTP_PROXY) ----------
+# Composition of host → container proxy propagation:
+#   1. Read HTTP_PROXY/HTTPS_PROXY/NO_PROXY from the current process env.
+#      `sudo -E` (install.sh:262-265) keeps the operator's exported env so a
+#      non-interactive `curl … | bash` install still sees it.
+#   2. Last-resort: parse /etc/environment (Debian/Ubuntu corporate shells
+#      commonly inject a per-host proxy here; without this we'd miss the most
+#      common IT-managed case).
+# Linux env(7): lower-case spellings take precedence over upper-case, but we
+# accept both. URL-style auth is preserved (`http://user:pass@proxy:8080`).
+detect_host_proxy() {
+    local hp ap np f_hp f_ap f_np
+    # Lower-case first per Linux env(7); fall back to upper-case CI-runner.
+    np="${no_proxy:-${NO_PROXY:-}}"
+    hp="${http_proxy:-${HTTP_PROXY:-}}"
+    ap="${https_proxy:-${HTTPS_PROXY:-}}"
+    if [[ -z "$hp$ap" && -r /etc/environment ]]; then
+        f_hp=$(grep -E '^[[:space:]]*http_proxy='  /etc/environment 2>/dev/null | tail -n1 | cut -d= -f2- | tr -d '"' || true)
+        f_ap=$(grep -E '^[[:space:]]*https_proxy=' /etc/environment 2>/dev/null | tail -n1 | cut -d= -f2- | tr -d '"' || true)
+        f_np=$(grep -E '^[[:space:]]*no_proxy='    /etc/environment 2>/dev/null | tail -n1 | cut -d= -f2- | tr -d '"' || true)
+        [[ -z "$hp" ]] && hp="$f_hp"
+        [[ -z "$ap" ]] && ap="$f_ap"
+        [[ -z "$np" ]] && np="$f_np"
+    fi
+    # Trim stray whitespace from /etc/environment's misquoted values.
+    printf '%s\n%s\n%s\n' \
+        "${hp//[[:space:]]/}" "${ap//[[:space:]]/}" "${np//[[:space:]]/}"
+}
+
+# collect_internal_no_proxy_domains: returns the comma-separated list of
+# hostnames the manager MUST reach without traversing the host proxy. This
+# is critical when the operator's DNS maps internal services to names
+# (`loki.corp.example.com`, `prom.internal`) — without appending those
+# here the ongrid container would try to dial the corp proxy for what is
+# in fact a private service. Three sources, in priority order:
+#   1. ONGRID_NO_PROXY_EXTRA (operator-supplied; export BEFORE running
+#      install.sh). Use for any DNS name not discoverable from the host
+#      filesystem (e.g. internal-only DNS zones, split-horizon corp DNS).
+#   2. /etc/hosts non-localhost hostnames (operator's local overrides;
+#      popular pattern is short-name LAN aliases like "loki" → 10.0.0.17).
+#   3. /etc/resolv.conf search/domain directives (this host's DNS path).
+#   4. hostname + `hostname -f` (FQDN).
+# compose's default NO_PROXY in docker-compose.yml already enumerates
+# the docker-internal service names (mysql/prometheus/loki/tempo/qdrant/
+# searxng/grafana/ongrid/nginx/frontier) + .svc/.cluster.local; this
+# function adds the operator/DNS-side entries those covers don't.
+collect_internal_no_proxy_domains() {
+    local parts=() tok p hn fqdn line rest
+    # 1. ONGRID_NO_PROXY_EXTRA — operator overrides (highest priority).
+    if [[ -n "${ONGRID_NO_PROXY_EXTRA:-}" ]]; then
+        IFS=',' read -ra extras <<<"${ONGRID_NO_PROXY_EXTRA}"
+        for e in "${extras[@]}"; do
+            e="${e//[[:space:]]/}"
+            [[ -n "$e" ]] && parts+=("$e")
+        done
+    fi
+    # 2. /etc/hosts non-localhost names (skip comment lines, IPv4/IPv6
+    # literals, and any 'localhost' / 'localhost.*' token).
+    if [[ -r /etc/hosts ]]; then
+        while IFS= read -r line; do
+            [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+            # Parse: ipv4-or-ipv6 + up-to-4 hostnames + # comment. We read
+            # the first 5 fields after the IP and skip anything that looks
+            # like an address literal. awk below keeps it simple.
+            while read -r h; do
+                [[ -z "$h" ]] && continue
+                [[ "$h" == localhost || "$h" == localhost.* || "$h" == *.localhost || "$h" == *.localhost.* ]] && continue
+                [[ "$h" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && continue
+                [[ "$h" == *:* ]] && continue   # IPv6 literal
+                parts+=("$h")
+            done < <(printf '%s\n' "$line" | awk '{
+                # strip trailing comment
+                gsub(/#.*/, "")
+                # first field is the IP
+                ip=$1
+                # everything after is candidate hostnames
+                for (i=2; i<=NF; i++) print $i
+            }')
+        done < /etc/hosts
+    fi
+    # 3. /etc/resolv.conf `search` and `domain` directives.
+    if [[ -r /etc/resolv.conf ]]; then
+        while IFS= read -r line; do
+            [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+            if [[ "$line" =~ ^[[:space:]]*(search|domain)[[:space:]]+ ]]; then
+                rest="${line#${BASH_REMATCH[0]}}"
+                for tok in $rest; do
+                    [[ -n "$tok" ]] && parts+=("$tok")
+                done
+            fi
+        done < /etc/resolv.conf
+    fi
+    # 4. Hostname + FQDN.
+    hn=$(hostname 2>/dev/null || true)
+    [[ -n "$hn" ]] && parts+=("$hn")
+    if command -v hostname >/dev/null 2>&1; then
+        fqdn=$(hostname -f 2>/dev/null || true)
+        [[ -n "$fqdn" && "$fqdn" != "$hn" ]] && parts+=("$fqdn")
+    fi
+    # Dedupe, preserve first-seen order.
+    local seen=""
+    for p in "${parts[@]}"; do
+        [[ -z "$p" ]] && continue
+        case ",${seen}," in *",${p},"*) ;; *) seen="${seen}${seen:+,}${p}" ;; esac
+    done
+    printf '%s' "$seen"
+}
+
+# Appends collect_internal_no_proxy_domains() to the ONGRID_NO_PROXY= line
+# in $ENV_FILE, skipping tokens already present. Idempotent (safe to call
+# repeatedly from install.sh + upgrade.sh back-to-back without growing
+# the value). Logs only the freshly-added tokens so re-runs don't spam.
+# Crucial for the DNS-mapped-internal-services case (see
+# collect_internal_no_proxy_domains() header).
+append_internal_no_proxy_domains() {
+    local extras current current_set extras_set merged added_csv
+    extras=$(collect_internal_no_proxy_domains)
+    [[ -z "$extras" ]] && return 0
+    # Pull existing ONGRID_NO_PROXY value, trim whitespace + trailing comma.
+    current=$(grep -E '^ONGRID_NO_PROXY=' "$ENV_FILE" 2>/dev/null | head -n1 | cut -d= -f2- || true)
+    current="${current#"${current%%[![:space:]]*}"}"
+    current="${current%"${current##*[![:space:]]}"}"
+    current="${current%,}"
+    # Token sets: split on comma, trim, sort, uniq.
+    current_set=$(printf '%s' "$current" | awk 'BEGIN{RS=","} {gsub(/^[[:space:]]+|[[:space:]]+$/,""); if($0!="") print}' | sort -u)
+    extras_set=$(printf '%s' "$extras"  | awk 'BEGIN{RS=","} {gsub(/^[[:space:]]+|[[:space:]]+$/,""); if($0!="") print}' | sort -u)
+    merged=$(printf '%s\n%s\n' "$current_set" "$extras_set" | sort -u | paste -sd, -)
+    if [[ "$merged" == "$current" ]]; then
+        return 0
+    fi
+    set_env_value ONGRID_NO_PROXY "$merged"
+    added_csv=$(comm -23 <(printf '%s\n' "$extras_set") <(printf '%s\n' "$current_set") | paste -sd, -)
+    [[ -n "$added_csv" ]] && log_info "appended internal domains to ONGRID_NO_PROXY: ${added_csv}"
+}
+
+# Writes host proxy into $ENV_FILE as ONGRID_HTTP_PROXY/ONGRID_HTTPS_PROXY/
+# ONGRID_NO_PROXY, then renders the canonical lower- + upper-case + service
+# alias set the agent Go code reads. fill_blank semantics (mirrors the
+# MYSQL password block above): only touches a key if blank — operator
+# hand-tuned .env values win on re-install. docker-compose.yml reads these
+# into the `ongrid` + `searxng` services (the only ones that egress); every
+# other service (mysql / prometheus / loki / tempo / qdrant / grafana /
+# frontier / nginx) stays direct connect, by design (A: only-egress services
+# get the proxy; minimal-privilege).
+apply_host_proxy_to_env() {
+    local rc hp ap np
+    rc=$(detect_host_proxy) || return 0
+    hp="${rc%%$'\n'*}"; rc="${rc#*$'\n'}"
+    ap="${rc%%$'\n'*}"; rc="${rc#*$'\n'}"
+    np="$rc"
+    if [[ -z "$hp" && -z "$ap" ]]; then
+        log_info "no host proxy detected (HTTP_PROXY/HTTPS_PROXY unset)"
+        return 0
+    fi
+    if is_blank ONGRID_HTTPS_PROXY && [[ -n "$ap" ]]; then
+        fill_blank ONGRID_HTTPS_PROXY "$ap"
+        log_info "host proxy → ONGRID_HTTPS_PROXY=$ap"
+    fi
+    if is_blank ONGRID_HTTP_PROXY && [[ -n "$hp" ]]; then
+        fill_blank ONGRID_HTTP_PROXY "$hp"
+        log_info "host proxy → ONGRID_HTTP_PROXY=$hp"
+    fi
+    if is_blank ONGRID_NO_PROXY && [[ -n "$np" ]]; then
+        fill_blank ONGRID_NO_PROXY "$np"
+        log_info "host proxy → ONGRID_NO_PROXY=$np"
+    fi
+    if [[ -n "$ap$hp" ]]; then
+        log_info "containers `ongrid` & `searxng` will use the host proxy (blank ONGRID_*_PROXY= in .env to disable)"
+    fi
+    # Always append internal domains to NO_PROXY so DNS-mapped internal
+    # services (loki.corp.example.com etc.) stay proxy-free. Idempotent.
+    append_internal_no_proxy_domains || true
+}
+
 on_error() {
     local exit_code=$?
     log_error "install failed at line $1 (exit $exit_code)"
@@ -382,10 +556,47 @@ fi
 
 docker compose version >/dev/null 2>&1 || { log_error "docker compose v2 not found (need the 'docker compose' subcommand)"; exit 1; }
 
-# ---------- install dir ----------
-INSTALL_DIR="${ONGRID_INSTALL_DIR:-/opt/ongrid}"
-log_info "install dir: $INSTALL_DIR"
-mkdir -p "$INSTALL_DIR"
+# ---------- install layout (single parent, four subdirs) ----------
+# Every piece of ongrid's on-disk state lives under ONE parent directory
+# (default /opt/ongrid). Operators redirect the parent in one shot via
+# ONGRID_INSTALL_DIR, or per-piece via ONGRID_DATA_DIR / ONGRID_LOG_DIR.
+# The four subdirs split responsibilities cleanly:
+#
+#   <parent>/ongrid/       — install root for the compose stack.
+#                            Holds docker-compose.yml, .env, VERSION,
+#                            frontier.yaml, prometheus.yml, loki-config.yaml,
+#                            tempo-config.yaml, prometheus/, grafana/,
+#                            searxng/, prometheus-rules.yml. compose runs
+#                            `cd <parent>/ongrid && docker compose ...`.
+#   <parent>/ongrid-web/   — bind-mount source for the ongrid-web (nginx)
+#                            container: nginx.conf + TLS certs/ + the /edge
+#                            static-asset tree (one-button edge upgrades).
+#                            Kept separate from the compose root so the
+#                            web tier's lifecycle is decoupled from the
+#                            manager's compose file edits.
+#   <parent>/data/         — bind-mount target for every stateful service
+#                            (mysql, prometheus, loki, tempo, qdrant,
+#                            grafana) + manager-owned runtimes (embeddings,
+#                            skills, pages, workspace, tools).
+#   <parent>/logs/         — manager process stdout + container json-log
+#                            destination (when the operator mounts it
+#                            into the docker log driver).
+#
+# Override semantics: exporting ONGRID_INSTALL_DIR changes the WHOLE tree
+# at once. Exporting just ONGRID_DATA_DIR / ONGRID_LOG_DIR repoints only
+# that subtree (e.g. /mnt/nfs/ongrid/data to put the TSDB on NFS) — the
+# install / web / logs subdirs still land under ONGRID_INSTALL_DIR.
+PARENT_DIR="${ONGRID_INSTALL_DIR:-/opt/ongrid}"
+INSTALL_DIR="$PARENT_DIR/ongrid"
+WEB_DIR="$PARENT_DIR/ongrid-web"
+ONGRID_DATA_DIR="${ONGRID_DATA_DIR:-$PARENT_DIR/data}"
+ONGRID_LOG_DIR="${ONGRID_LOG_DIR:-$PARENT_DIR/logs}"
+log_info "install root: $PARENT_DIR"
+log_info "  ongrid/      → $INSTALL_DIR  (compose + manager config)"
+log_info "  ongrid-web/  → $WEB_DIR      (nginx / ongrid-web inputs)"
+log_info "  data/        → $ONGRID_DATA_DIR  (component state)"
+log_info "  logs/        → $ONGRID_LOG_DIR   (process stdout)"
+mkdir -p "$INSTALL_DIR" "$WEB_DIR" "$ONGRID_DATA_DIR" "$ONGRID_LOG_DIR"
 
 # ---------- copy assets ----------
 log_info "copying assets into $INSTALL_DIR"
@@ -433,10 +644,14 @@ if [[ -d "$SCRIPT_DIR/searxng" ]]; then
     mkdir -p "$INSTALL_DIR/searxng"
     cp -rf "$SCRIPT_DIR/searxng/." "$INSTALL_DIR/searxng/"
 fi
+# Edge artifacts (one-button upgrade bundles + install.sh). nginx serves
+# these at https://<host>/install.sh + /edge/<file>; the ongrid service
+# reads the bundle .sha256 to resolve them. Both containers bind-mount the
+# same host dir ($WEB_DIR/edge/) so a single source of truth.
 if [[ -d "$SCRIPT_DIR/edge" ]]; then
-    mkdir -p "$INSTALL_DIR/edge"
-    cp -rf "$SCRIPT_DIR/edge/." "$INSTALL_DIR/edge/"
-    find "$INSTALL_DIR/edge" -maxdepth 1 -name '*.sh' -exec chmod 755 {} \;
+    mkdir -p "$WEB_DIR/edge"
+    cp -rf "$SCRIPT_DIR/edge/." "$WEB_DIR/edge/"
+    find "$WEB_DIR/edge" -maxdepth 1 -name '*.sh' -exec chmod 755 {} \;
     # Rebuild the ADR-024 one-button upgrade bundle from the loose edge
     # binaries we just staged. The release tarball no longer double-packs a
     # pre-built copy (it duplicated these same binaries at ~120 MB of
@@ -444,33 +659,34 @@ if [[ -d "$SCRIPT_DIR/edge" ]]; then
     # unchanged. Best-effort: a failure here only disables one-button edge
     # upgrade until the next install, so warn and continue.
     _edge_ver=$(tr -d '[:space:]' < "$SCRIPT_DIR/VERSION" 2>/dev/null || true)
-    if [[ -x "$INSTALL_DIR/edge/build-edge-bundle.sh" && -n "$_edge_ver" ]]; then
+    if [[ -x "$WEB_DIR/edge/build-edge-bundle.sh" && -n "$_edge_ver" ]]; then
         # Build a bundle only for the edge arch(es) actually staged. The package
         # may ship amd64-only (see EDGE_TARGETS in package.sh / EDGE_PLUGIN_ARCHES
         # in the Makefile), so we glob the present ongrid-edge-linux-* binaries
         # instead of assuming both arches — otherwise the host-side rebuild warns
         # loudly about the arm64 binaries we deliberately didn't ship.
-        for _edge_bin in "$INSTALL_DIR"/edge/ongrid-edge-linux-*; do
+        for _edge_bin in "$WEB_DIR"/edge/ongrid-edge-linux-*; do
             [[ -f "$_edge_bin" ]] || continue   # no-match glob stays literal; skip
             _edge_arch="${_edge_bin##*/ongrid-edge-}"   # ongrid-edge-linux-amd64 -> linux-amd64
-            "$INSTALL_DIR/edge/build-edge-bundle.sh" "$INSTALL_DIR/edge" "$_edge_ver" "$_edge_arch" \
+            "$WEB_DIR/edge/build-edge-bundle.sh" "$WEB_DIR/edge" "$_edge_ver" "$_edge_arch" \
                 || log_warn "edge upgrade bundle rebuild failed for $_edge_arch; one-button edge upgrade disabled for that arch until next install"
         done
     fi
 fi
 
 # ---------- host data dirs (bind-mount targets) ----------
-# All stateful services bind-mount to host paths instead of docker named
-# volumes. Operators can back up / inspect / replace files without docker
-# gymnastics, and the storage can be redirected at a customer filesystem
-# (NFS / iSCSI / NVMe) by overriding ONGRID_DATA_DIR and ONGRID_LOG_DIR.
-# We chown each subdir to the uid the container image runs as — missing
-# this on first boot makes prom/loki/tempo/grafana crash with "permission
-# denied on /<datadir>".
-ONGRID_DATA_DIR="${ONGRID_DATA_DIR:-/var/lib/ongrid}"
-ONGRID_LOG_DIR="${ONGRID_LOG_DIR:-/var/log/ongrid}"
+# ONGRID_DATA_DIR / ONGRID_LOG_DIR were already resolved in the install
+# layout block above (fall back to $PARENT_DIR/data + $PARENT_DIR/logs so
+# everything sits under the operator's parent). All stateful services
+# bind-mount to host paths instead of docker named volumes so operators
+# can back up / inspect / replace files without docker gymnastics, and
+# the storage can be redirected at a customer filesystem (NFS / iSCSI /
+# NVMe) by overriding ONGRID_DATA_DIR / ONGRID_LOG_DIR. We chown each
+# subdir to the uid the container image runs as — missing this on first
+# boot makes prom/loki/tempo/grafana crash with "permission denied on
+# /<datadir>".
 log_info "data dir: $ONGRID_DATA_DIR  (override via ONGRID_DATA_DIR)"
-log_info "log dir:  $ONGRID_LOG_DIR  (override via ONGRID_LOG_DIR)"
+log_info "log dir:  $ONGRID_LOG_DIR   (override via ONGRID_LOG_DIR)"
 
 # Warn the operator if legacy docker named volumes from pre-bind-mount
 # installs are still around — they're orphaned now and contain the live
@@ -551,23 +767,26 @@ chown -R 472:472       "$ONGRID_DATA_DIR/grafana"    2>/dev/null || true   # gra
 chmod 755 "$ONGRID_DATA_DIR" "$ONGRID_LOG_DIR"
 
 # Export so the docker compose subprocess inherits — compose substitutes
-# ${ONGRID_DATA_DIR:-...} into the bind paths at up time.
-export ONGRID_DATA_DIR ONGRID_LOG_DIR
+# ${ONGRID_DATA_DIR:-...} + ${ONGRID_LOG_DIR:-...} + ${ONGRID_WEB_DIR:-...}
+# into the bind paths at up time. ONGRID_INSTALL_DIR is exported so a
+# compose-derived (or operator-side) override can read the resolved parent.
+export ONGRID_DATA_DIR ONGRID_LOG_DIR ONGRID_WEB_DIR ONGRID_INSTALL_DIR
 
 # ---------- nginx config + TLS certs (ADR-008) ----------
-# nginx.conf is bind-mounted into the nginx container; certs/ holds the
-# TLS material. install.sh always refreshes nginx.conf from the tarball
-# but never overwrites operator-provided certs.
+# nginx.conf + certs/ + edge/ all live under $WEB_DIR (= <parent>/ongrid-web/),
+# the bind-mount source for the ongrid-web (nginx) container. install.sh
+# always refreshes nginx.conf from the tarball but never overwrites
+# operator-provided certs.
 if [[ -f "$SCRIPT_DIR/nginx.conf" ]]; then
-    cp -f "$SCRIPT_DIR/nginx.conf" "$INSTALL_DIR/nginx.conf"
+    cp -f "$SCRIPT_DIR/nginx.conf" "$WEB_DIR/nginx.conf"
 fi
 
-mkdir -p "$INSTALL_DIR/certs"
-chmod 700 "$INSTALL_DIR/certs"
-if [[ ! -f "$INSTALL_DIR/certs/tls.crt" || ! -f "$INSTALL_DIR/certs/tls.key" ]]; then
+mkdir -p "$WEB_DIR/certs"
+chmod 700 "$WEB_DIR/certs"
+if [[ ! -f "$WEB_DIR/certs/tls.crt" || ! -f "$WEB_DIR/certs/tls.key" ]]; then
     log_info "generating self-signed TLS cert (valid 365d, CN=ongrid)"
-    generate_self_signed_tls_cert "$INSTALL_DIR/certs"
-    log_warn "self-signed cert: browsers will warn — replace with a real cert in $INSTALL_DIR/certs/ later"
+    generate_self_signed_tls_cert "$WEB_DIR/certs"
+    log_warn "self-signed cert: browsers will warn — replace with a real cert in $WEB_DIR/certs/ later"
 fi
 
 # ---------- load docker images ----------
@@ -640,6 +859,11 @@ fi
 
 ENV_FILE="$INSTALL_DIR/.env"
 chmod 600 "$ENV_FILE"
+
+# Propagate host HTTP(S)_PROXY → ONGRID_HTTPS_PROXY/ONGRID_HTTP_PROXY/
+# ONGRID_NO_PROXY (read from current env, /etc/environment fallback).
+# Idempotent + respects operator hand-tuned values (uses is_blank).
+apply_host_proxy_to_env
 
 # Fill blanks in-place (portable sed: use .bak suffix then rm).
 fill_blank() {
@@ -856,7 +1080,11 @@ else
     API_URL="https://${HOST_HINT}:${ONGRID_HTTP_PORT}/api/v1"
 fi
 
-echo "${C_BOLD}Install dir:${C_RESET}     $INSTALL_DIR"
+echo "${C_BOLD}Install root:${C_RESET}     $PARENT_DIR"
+echo "${C_BOLD}  ongrid/      ${C_RESET} $INSTALL_DIR"
+echo "${C_BOLD}  ongrid-web/  ${C_RESET} $WEB_DIR"
+echo "${C_BOLD}  data/        ${C_RESET} $ONGRID_DATA_DIR"
+echo "${C_BOLD}  logs/        ${C_RESET} $ONGRID_LOG_DIR"
 echo "${C_BOLD}Version:${C_RESET}         ${VERSION_FROM_FILE}"
 echo ""
 echo "${C_BOLD}Web UI:${C_RESET}          ${WEB_URL}"

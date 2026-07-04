@@ -8,6 +8,11 @@ const HomePage = lazy(() => import('@/pages/Home'));
 const ChatThreadPage = lazy(() => import('@/pages/ChatThread'));
 const EdgesPage = lazy(() => import('@/pages/Edges'));
 const EdgeDetailPage = lazy(() => import('@/pages/EdgeDetail'));
+// Hosts 是实体设备视角的列表 / 详情 / Shell；与 EdgesPage / EdgeDetailPage
+// 并列但面向 Device 实体（而非 Edge 探针）。 /hosts/:hostId/shell 同
+// DeviceShellPage，沿用 Prom label device_id 完成 on-grid 反向连接。
+const HostsPage = lazy(() => import('@/pages/Hosts'));
+const HostDetailPage = lazy(() => import('@/pages/HostDetail'));
 const DeviceShellPage = lazy(() => import('@/pages/DeviceShell'));
 const DashboardPage = lazy(() => import('@/pages/Dashboard'));
 const MonitorPage = lazy(() => import('@/pages/Monitor'));
@@ -102,6 +107,11 @@ export default function App() {
         {/* WebSSH: deviceId is the Prom-label device_id, not the edge.id.
             See DeviceShell.tsx for the rationale. */}
         <Route path="/devices/:deviceId/shell" element={<DeviceShellPage />} />
+        {/* 实体设备视角的 /hosts 路由：与 /devices（探针视角）并列但查询的是 Device 实体。
+            /hosts/:hostId/shell 同样走 DeviceShellPage，仅 path 参数语义从 deviceId → hostId。 */}
+        <Route path="/hosts" element={<HostsPage />} />
+        <Route path="/hosts/:hostId" element={<HostDetailPage />} />
+        <Route path="/hosts/:hostId/shell" element={<DeviceShellPage />} />
         <Route path="/monitor" element={<MonitorPage />} />
         <Route path="/logs" element={<LogsPage />} />
         <Route path="/traces" element={<TracesPage />} />

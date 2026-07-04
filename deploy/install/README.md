@@ -10,6 +10,192 @@
 - 以 root 身份或具备 sudo 权限的用户执行脚本。
 - 可出公网访问 `docker.io`（如需拉取 MySQL、Prometheus 镜像；`prom/prometheus:v2.54.0` 由 docker compose 拉取，未随 tarball 发货）；`ongrid` 镜像已打包在发布包内，无需对外连接私有 registry。
 
+## 代理环境
+
+当打包机、CI runner、目标部署机位于需要走代理的企业内网 / CN 网络 / 离线出口时，本项目所有「外网下载」点都遵守标准的 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` 环境变量。**默认 Opt-in**——不设任何环境变量时，构建 / 安装行为与之前完全一致；设了就走代理。
+
+### 1. 打包机侧（执行 `make package` 时）
+
+所有 `Makefile` 中的 `fetch-*` target 会自动从 `HTTPS_PROXY` 派生 `--proxy` 参数；Dockerfile 的 builder / runtime 阶段通过 `--build-arg` 接收代理设置，buildkit ≥ 0.8 也自动透传 host 上的同名环境变量。
+
+```bash
+# 方式 1：在 shell 里 export（推荐）
+export HTTPS_PROXY=http://user:pass@proxy.corp.example.com:8080
+export HTTP_PROXY=http://user:pass@proxy.corp.example.com:8080
+export NO_PROXY=localhost,127.0.0.1,.svc,.cluster.local,10.0.0.0/8
+
+make package-all          # 或 make package / make fetch-promtail / ...
+```
+
+```bash
+# 方式 2：一次性为某条命令设环境变量
+HTTPS_PROXY=http://proxy:8080 make docker-ongrid
+
+# 方式 3：显式传给 docker build（buildkit 优先采用 --build-arg）
+docker buildx build \
+  --build-arg HTTPS_PROXY=http://user:pass@proxy:8080 \
+  --build-arg HTTP_PROXY=http://user:pass@proxy:8080 \
+  --build-arg NO_PROXY=localhost,127.0.0.1,.svc,.cluster.local \
+  --platform linux/amd64 --load -t ongrid:dev -f deploy/Dockerfile.ongrid .
+```
+
+覆盖的下载点：
+
+| 文件 / target | 下载目标 | 走代理的方式 |
+|---|---|---|
+| `Makefile` 全部 `fetch-promtail` / `fetch-otelcol` / `fetch-node-exporter` / `fetch-process-exporter` / `fetch-db-exporters` | promtail / otelcol / 4 个 exporter 二进制（github.com） | curl `--proxy` 参数 |
+| `dist/fetch-embedding-model.sh` | BGE embedding 模型（storage.googleapis.com） | curl 环境变量 |
+| `dist/package.sh` | prometheus / loki / tempo / qdrant 二进制（github.com） | curl 环境变量 |
+| `deploy/Dockerfile.ongrid` builder | go mod download | `GOPROXY` + HTTPS_PROXY |
+| `deploy/Dockerfile.ongrid` runtime | apt-get + onnxruntime tgz/nupkg | apt `90proxy.conf` + curl 环境变量 |
+| `deploy/Dockerfile.ongrid-edge` builder | go mod download | `GOPROXY` + HTTPS_PROXY |
+| `deploy/Dockerfile.web` builder | npm ci | `/root/.npmrc` 的 `proxy=` + HTTPS_PROXY |
+| `deploy/Dockerfile.frontier` builder | go mod download + apk add | `GOPROXY` + alpine apk 环境变量 |
+
+### 2. URL 内嵌认证
+
+代理需要认证时直接在 URL 里写用户名密码：
+
+```bash
+export HTTPS_PROXY=http://alice:s3cr3t@proxy.corp.example.com:8080
+```
+
+curl / wget / apt / apk / npm / go modules / docker buildkit 全部原生支持 URL 内嵌凭据。`@` 和 `:` 是 URL 保留字符，需保证整个 URL 作为一个 shell 参数传递（用 export / 单引号 / 命令前缀都行；避免在 make 命令行里不加分号拆开）。
+
+### 3. 诊断
+
+- `make package` 在 build 阶段挂了：`docker buildx build ... --progress=plain` 看具体哪个 RUN 失败；99% 是某层下载超时。
+- `go mod download` 明明有代理还是超时：检查 `HTTPS_PROXY` 是不是只设了大写——Go 原生偏好小写 `https_proxy`。Dockerfile 里同时设了两个大小写版本。
+- 不想让某层走代理：传 `--build-arg HTTPS_PROXY=`（空字符串）或 `make FETCH_PROXY_FLAGS=` 关掉 curl 的 `--proxy`。
+- 想看 build 过程中代理是否生效：在 Dockerfile 里 `RUN set -x; env | grep -i proxy` 临时验证。
+
+## 容器代理上网（运行期）
+
+`Makefile` / Dockerfile 只管“构建期”（打包机、CI runner、运行时 image 的 apt）。**运行期**——上线后 `ongrid` 容器需要访问 LLM API / 嵌入 / 外部 webhook，SearXNG 容器需要联动上游的 Bing / DDG / Brave / Baidu——这里的代理与宿主机有关，不会自动透传到容器。
+
+### 自动透传
+
+`install.sh` / `upgrade.sh` 启动时会在宿主机上探测代理设置，按 Linux `env(7)` 标准优先小写。来源（优先级降序）：
+
+| 来源 | 例子 |
+|---|---|
+| 当前 shell 环境变量 | `HTTPS_PROXY=http://user:pass@proxy.corp:8080 sudo -E ./install.sh` |
+| `/etc/environment`（企业壳常在这里声明全局代理）| `https_proxy="http://proxy:8080"` |
+| 已编辑过的 `${INSTALL_DIR}/.env` | 运维手动写的值（仅是在安装脚本走 fill_blank 之后填进去的才会被覆盖） |
+
+探测到的三个值 (`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`) 会被写入 `/opt/ongrid/.env` 的 `ONGRID_HTTP_PROXY` / `ONGRID_HTTPS_PROXY` / `ONGRID_NO_PROXY`。然后 `docker-compose.yml` 只给 `ongrid` + `searxng` 两个服务注入（范围 A：只跟外网中转的服务，mysql / prom / loki / tempo / qdrant / grafana / frontier / nginx 纯本地，不走代理）。
+
+### 内部域名 NO_PROXY 自动收集
+
+公司环境经常会把内部组件用**域名**而不是 IP 暴露给 ongrid（例如 `loki.corp.example.com`、`prom.internal`、`tempo.k8s.svc.cluster.local`）。如果这些名字不在 `NO_PROXY` 里，ongrid 会拿着 corp 代理去走，本来该走内网的服务被强行中转一次。
+
+`install.sh` / `upgrade.sh` 默认会从以下来源自动收集内部域名并附加到 `ONGRID_NO_PROXY`：
+
+1. `$ONGRID_NO_PROXY_EXTRA` env / `.env`（运维手工逗号分隔追加的额外名单）
+2. `/etc/hosts` 非 localhost 条目（例如运维给 `loki` → `10.0.0.17` 的 LAN 别名）
+3. `/etc/resolv.conf` 的 `search` / `domain` 行（本机 DNS 搜索路径）
+4. 本机 `hostname` 与 `hostname -f`（FQDN）
+
+`docker-compose.yml` 默认 `NO_PROXY` 里面会包含所有 compose 服务名（`mysql`/`prometheus`/`loki`/`tempo`/`qdrant`/`searxng`/`grafana`/`ongrid`/`nginx`/`frontier`）+ `.svc` + `.cluster.local`——这些不需要运维重复加。
+
+要加额外名字（如公司 corp DNS 才能解析的内部服务）：
+
+```bash
+# 装前先 export（最简单）：
+ONGRID_NO_PROXY_EXTRA="loki.corp.example.com,prom.internal,tempo.k8s.svc" \
+    sudo -E ./install.sh
+
+# 或装后手工加到 /opt/ongrid/.env：
+sudo nano /opt/ongrid/.env        # 在 ONGRID_NO_PROXY= 那行追加名字
+sudo docker compose -f /opt/ongrid/docker-compose.yml --env-file /opt/ongrid/.env up -d
+```
+
+### 调出不快 / 关掉
+
+```bash
+# 调出（看是什么被插件/agent 试着用代理访问外部，错误会在 manager stdout 看到
+# `dial tcp ...: i/o timeout` 或 `proxyconnect tcp ... `）：
+sudo docker logs --tail=200 ongrid | grep -i -E 'proxy|no_proxy'
+
+# 关掉：去掉 .env 里三个变量的值、restart ongrid，不重新跑安装
+sudo sed -i -E 's/^ONGRID_(HTTP|HTTPS|NO)_PROXY=.*//' /opt/ongrid/.env
+sudo docker compose -f /opt/ongrid/docker-compose.yml --env-file /opt/ongrid/.env up -d ongrid
+```
+
+## 统一安装目录（单父目录 + 四子目录）
+
+默认 `install.sh` / `upgrade.sh` 把 ongrid 的所有 on-disk 内容放在 **一个父目录**（默认 `/opt/ongrid`）下四个并列子目录中，避免数据、配置、日志、前端静态资源散落在 FHS 各个角落（之前 `/var/lib/ongrid` + `/var/log/ongrid` + `/etc/ongrid` + `/usr/local/bin` 的拆分，运维 dump 排错时互相引用很痛苦）。默认布局如下：
+
+```text
+/opt/ongrid/                    ← 父目录（ONGRID_INSTALL_DIR）
+├── ongrid/                     ← ONGRID_INSTALL_DIR/ongrid/
+│   ├── docker-compose.yml      ← compose 根入口
+│   ├── .env                    ← 运行期配置
+│   ├── VERSION
+│   ├── frontier.yaml
+│   ├── nginx.conf             ← 镜像里也有，host bind-mount 用于运维覆盖
+│   ├── loki-config.yaml / tempo-config.yaml / prometheus.yml / prometheus-rules.yml
+│   ├── prometheus/ / grafana/ / searxng/
+│   └── ...
+├── ongrid-web/                 ← ONGRID_INSTALL_DIR/ongrid-web/（nginx 容器专用）
+│   ├── nginx.conf             ← install.sh 拷贝、operator 可改
+│   ├── certs/                 ← TLS cert；operator 真实的证书会跨升级保留
+│   └── edge/                  ← 一键边缘升级资源 + install.sh
+├── data/                       ← ONGRID_INSTALL_DIR/data/（各组件状态）
+│   ├── mysql/ / prometheus/ / loki/ / tempo/ / qdrant/ / grafana/
+│   └── embeddings/ skills/ pages/ workspace/ tools/   ← manager-owned runtimes
+└── logs/                       ← ONGRID_INSTALL_DIR/logs/（进程 stdout）
+```
+
+四个环境变量（都可在 shell 里 export 后再跑安装，也可以在 `.env` 里手改）控制这个布局，优先级 shell > .env > 默认值：
+
+| 变量 | 含义 | 默认值 |
+|---|---|---|
+| `ONGRID_INSTALL_DIR` | 父目录；设了就整体迁 | `/opt/ongrid` |
+| `ONGRID_WEB_DIR` | ongrid-web 容器专用目录（nginx.conf/certs/edge） | `$ONGRID_INSTALL_DIR/ongrid-web` |
+| `ONGRID_DATA_DIR` | 组件状态目录 | `$ONGRID_INSTALL_DIR/data` |
+| `ONGRID_LOG_DIR` | manager 进程日志目录 | `$ONGRID_INSTALL_DIR/logs` |
+
+**示例 1：整套迁到 `/srv/ongrid`**
+
+```bash
+sudo ONGRID_INSTALL_DIR=/srv/ongrid ./install.sh
+# 结果：
+#   /srv/ongrid/ongrid/         docker-compose.yml + .env + 配置
+#   /srv/ongrid/ongrid-web/     nginx.conf + certs + edge
+#   /srv/ongrid/data/           mysql + prom + loki + tempo + qdrant + grafana + ...
+#   /srv/ongrid/logs/           ongrid 进程 stdout
+```
+
+**示例 2：装位置不变，把数据放到独立 SSD**
+
+```bash
+sudo ONGRID_INSTALL_DIR=/opt/ongrid \
+     ONGRID_DATA_DIR=/mnt/ssd/ongrid \
+     ./install.sh
+# /opt/ongrid/{ongrid,ongrid-web,logs} 不变；/mnt/ssd/ongrid 是 mysql/prom/loki/...
+```
+
+**示例 3：systemd 模式同样收敛到 `/opt/ongrid`**
+
+```bash
+sudo ONGRID_INSTALL_PREFIX=/opt/ongrid ./install.sh --mode=systemd
+# 结果（与 compose 同构）：
+#   /opt/ongrid/bin/             ongrid + ongrid-frontier + 依赖二进制
+#   /opt/ongrid/ongrid/          etc/ongrid（systemd 模式下等同 /etc/ongrid）
+#   /opt/ongrid/data/            state 数据（mysql/prom/loki/tempo/qdrant/embeddings）
+#   /opt/ongrid/logs/            manager + frontier 日志
+```
+
+**升级路径**：从老的 `/var/lib/ongrid` + `/var/log/ongrid` 升到这套布局，步骤：
+
+1. 升级前 `docker compose down` 停栈。
+2. 拷贝数据到新位置：`sudo cp -a /var/lib/ongrid/* /opt/ongrid/data/`。
+3. 编辑 `/opt/ongrid/.env`（升级脚本写到新位置）：把 `ONGRID_DATA_DIR` 改成 `/opt/ongrid/data`，把 `ONGRID_LOG_DIR` 改成 `/opt/ongrid/logs`。`upgrade.sh` 后续启动会按新值 bind-mount。
+4. 老目录保留一周观察期，确认无访问后 `sudo rm -rf /var/lib/ongrid /var/log/ongrid`。
+
+注意 `ONGRID_*_PROXY` 段（上一节 容器代理上网）也通过这套路径变量读取 — 所有四条 `${ONGRID_*_PROXY:-}` 配合 `${ONGRID_DATA_DIR:-...}` 一起从 `.env` 读到，install.sh 的 host proxy 自动探测会跟着新布局跑。
+
 ## 两种安装形态
 
 | | `--mode=compose`（默认） | `--mode=systemd` |

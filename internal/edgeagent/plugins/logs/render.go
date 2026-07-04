@@ -3,11 +3,13 @@ package logs
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"text/template"
 
 	"github.com/ongridio/ongrid/internal/edgeagent/plugins"
+	"github.com/ongridio/ongrid/internal/edgeagent/plugins/audit"
 )
 
 // promtailTemplate is the Promtail config we render per edge. Stays
@@ -100,7 +102,11 @@ scrape_configs:
 //	journald_units : []string (default all units when journald enabled)
 //	file_paths : []string (default empty; add app-specific log files here)
 //	extra_labels : map[string]string (allow-list policed by manager;
-func render(cfg plugins.PluginConfig) ([]byte, error) {
+//
+// workDir is the edge agent's plugin work root (parent of every
+// <plugin>/ subdir); it lets the renderer auto-tail audit plugin
+// output (audit.OutputPath) without operator wiring.
+func render(workDir string, cfg plugins.PluginConfig) ([]byte, error) {
 	if cfg.Endpoint == "" {
 		return nil, fmt.Errorf("logs plugin: endpoint required")
 	}
@@ -141,6 +147,19 @@ func render(cfg plugins.PluginConfig) ([]byte, error) {
 	if len(filePaths) == 0 && !enableJournald {
 		filePaths = []string{"/var/log/syslog", "/var/log/messages"}
 	}
+
+	// Auto-tail audit.jsonl when the audit plugin is enabled — single-
+	// direction dependency: logs knows about audit, audit does NOT know
+	// about logs. Probe is best-effort: file absent (audit disabled,
+	// binary missing, not yet created) is a no-op — no spurious scrape
+	// jobs surface to Loki. The probe runs after the syslog fallback so
+	// disabled-audit edges still get the operator's chosen sources.
+	if workDir != "" {
+		if _, err := os.Stat(audit.OutputPath(workDir)); err == nil {
+			filePaths = append(filePaths, audit.OutputPath(workDir))
+		}
+	}
+
 	extra := stringMap(cfg.Spec, "extra_labels")
 
 	data := map[string]any{

@@ -130,6 +130,7 @@ var pluginDefaultEnabled = map[string]bool{
 	model.PluginNameProcMetrics: true,
 	model.PluginNameLogs:        true,
 	model.PluginNameTraces:      true,
+	model.PluginNameAudit:       true,
 }
 
 // ListForUI returns every plugin config row for an edge, decoding the
@@ -148,6 +149,7 @@ func (uc *PluginConfigUC) ListForUI(ctx context.Context, edgeID uint64) ([]Plugi
 	knownPlugins := []string{
 		model.PluginNameMetrics,
 		model.PluginNameLogs,
+		model.PluginNameAudit,
 		model.PluginNameTraces,
 		model.PluginNameProfiles,
 		model.PluginNameHostMetrics,
@@ -268,6 +270,7 @@ func (uc *PluginConfigUC) FetchForEdge(ctx context.Context, edgeID uint64) (*Wir
 	knownPlugins := []string{
 		model.PluginNameMetrics,
 		model.PluginNameLogs,
+		model.PluginNameAudit,
 		model.PluginNameTraces,
 		model.PluginNameProfiles,
 		model.PluginNameHostMetrics,

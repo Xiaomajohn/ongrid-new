@@ -11,13 +11,16 @@ import (
 //
 // All filters are optional. Status is exact-match ("", "online", "offline").
 // Name is a substring match (LIKE %name%). CreatedBy, when non-nil,
-// restricts to edges created by that user id. Limit / Offset apply after
-// filtering. Roles filtering moved to model/device.Device after the May
-// 2026 split — query the device repo for that.
+// restricts to edges created by that user id. DeviceID, when non-nil,
+// restricts to edges linked to that host device via the edge_devices
+// junction (delete_marker = 0). Limit / Offset apply after filtering.
+// Roles filtering moved to model/device.Device after the May 2026
+// split — query the device repo for that.
 type ListFilter struct {
 	Status    string
 	Name      string
 	CreatedBy *uint64
+	DeviceID  *uint64
 	Limit     int
 	Offset    int
 }

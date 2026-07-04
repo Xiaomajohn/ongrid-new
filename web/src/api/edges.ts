@@ -130,11 +130,12 @@ export type MetricsResponse = {
   points: MetricPoint[];
 };
 
-export function listEdges(params?: { roles?: string }) {
-  const qs = params?.roles
-    ? `?${new URLSearchParams({ roles: params.roles }).toString()}`
-    : '';
-  return request<{ items: Edge[]; total: number }>('GET', `/edges${qs}`);
+export function listEdges(params?: { roles?: string; device_id?: number | string }) {
+  const usp = new URLSearchParams();
+  if (params?.roles) usp.set('roles', params.roles);
+  if (params?.device_id != null) usp.set('device_id', String(params.device_id));
+  const qs = usp.toString();
+  return request<{ items: Edge[]; total: number }>('GET', `/edges${qs ? `?${qs}` : ''}`);
 }
 
 export function getEdge(id: string | number) {

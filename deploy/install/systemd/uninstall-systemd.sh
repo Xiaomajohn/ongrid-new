@@ -2,7 +2,9 @@
 # ongrid pure-systemd uninstaller. Mirror of install-systemd.sh.
 #
 # Default: stop + disable + remove unit files; preserve data dirs + env.
-# --purge: also nuke /var/lib/ongrid* and the service users.
+# --purge: also nuke data/log/config roots (driven by ONGRID_INSTALL_*,
+#          same dual-mode layout as install-systemd.sh) + the four
+#          fixed systemd-managed StateDirectory= subdirs + service users.
 
 set -euo pipefail
 
@@ -26,7 +28,13 @@ usage() {
 Usage: sudo uninstall-systemd.sh [OPTIONS]
 
 Options:
-  --purge   Also delete /var/lib/ongrid* + /var/log/ongrid + service users.
+  --purge   Also delete the manager / dep data dirs, log dir, config dir
+            (paths resolved from ONGRID_INSTALL_PREFIX / ONGRID_INSTALL_BIN
+            / ONGRID_INSTALL_ETC / ONGRID_INSTALL_STATE / ONGRID_INSTALL_LOG
+            — same layout as install-systemd.sh) plus the four fixed
+            systemd-managed StateDirectory= subdirs (/var/lib/ongrid-prometheus,
+            /var/lib/ongrid-loki, /var/lib/ongrid-tempo, /var/lib/ongrid-qdrant)
+            and the ongrid service users.
             Manager + dep data (DB, vectors, metrics, logs) is lost.
   --yes     Skip the confirmation prompt (only with --purge).
   -h        Print this help.
@@ -50,6 +58,36 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+# -----------------------------------------------------------------------------
+# paths — same dual-mode resolution as install-systemd.sh so --purge cleans
+# whatever install-systemd.sh wrote. Override any of the four ONGRID_INSTALL_*
+# vars before invoking this script to match a non-default layout.
+#
+# Default (FHS, ONGRID_INSTALL_PREFIX=/usr/local):
+#   PREFIX_BIN=/usr/local/bin   ETC_DIR=/etc/ongrid
+#   STATE_DIR=/var/lib/ongrid   LOG_DIR=/var/log/ongrid
+#
+# Collapsed (ONGRID_INSTALL_PREFIX=/opt/ongrid, matches compose mode):
+#   PREFIX_BIN=$PREFIX/bin      ETC_DIR=$PREFIX/ongrid
+#   STATE_DIR=$PREFIX/data      LOG_DIR=$PREFIX/logs
+#
+# The four per-dep StateDirectory= subdirs (/var/lib/ongrid-prometheus /
+# -loki / -tempo / -qdrant) are managed by systemd, not by us — they always
+# map to /var/lib/<name> regardless of mode and are purged separately below.
+# -----------------------------------------------------------------------------
+PREFIX="${ONGRID_INSTALL_PREFIX:-/usr/local}"
+if [[ "$PREFIX" == "/usr/local" ]]; then
+    PREFIX_BIN="${ONGRID_INSTALL_BIN:-/usr/local/bin}"
+    ETC_DIR="${ONGRID_INSTALL_ETC:-/etc/ongrid}"
+    STATE_DIR="${ONGRID_INSTALL_STATE:-/var/lib/ongrid}"
+    LOG_DIR="${ONGRID_INSTALL_LOG:-/var/log/ongrid}"
+else
+    PREFIX_BIN="${ONGRID_INSTALL_BIN:-$PREFIX/bin}"
+    ETC_DIR="${ONGRID_INSTALL_ETC:-$PREFIX/ongrid}"
+    STATE_DIR="${ONGRID_INSTALL_STATE:-$PREFIX/data}"
+    LOG_DIR="${ONGRID_INSTALL_LOG:-$PREFIX/logs}"
+fi
+
 UNITS=(ongrid.service ongrid-frontier.service \
        prometheus.service loki.service tempo.service qdrant.service)
 SYSTEMD_DIR=/etc/systemd/system
@@ -71,7 +109,7 @@ done
 # -----------------------------------------------------------------------------
 # stragglers — manager + frontier might be wedged outside systemd's view
 # -----------------------------------------------------------------------------
-for proc in /usr/local/bin/ongrid /usr/local/bin/ongrid-frontier; do
+for proc in "$PREFIX_BIN/ongrid" "$PREFIX_BIN/ongrid-frontier"; do
     pids=$(pgrep -f "^$proc" 2>/dev/null || true)
     if [[ -n "$pids" ]]; then
         warn "killing straggler $proc (pids: $pids)"
@@ -95,9 +133,9 @@ for u in "${UNITS[@]}"; do
     fi
 done
 for bin in ongrid ongrid-frontier; do
-    if [[ -f "/usr/local/bin/$bin" ]]; then
-        rm -f "/usr/local/bin/$bin"
-        log "removed /usr/local/bin/$bin"
+    if [[ -f "$PREFIX_BIN/$bin" ]]; then
+        rm -f "$PREFIX_BIN/$bin"
+        log "removed $PREFIX_BIN/$bin"
     fi
 done
 systemctl daemon-reload
@@ -109,9 +147,9 @@ if [[ $PURGE -eq 0 ]]; then
     echo ""
     echo "${C_BOLD}${C_GREEN}stop-only uninstall complete${C_RESET}"
     echo "  - units stopped + removed"
-    echo "  - data dirs preserved (/var/lib/ongrid*, /var/log/ongrid)"
+    echo "  - data dirs preserved (STATE=$STATE_DIR, LOG=$LOG_DIR)"
+    echo "  - configs preserved (ETC=$ETC_DIR)"
     echo "  - service users preserved (ongrid, ongrid-prometheus, ...)"
-    echo "  - configs preserved (/etc/ongrid/)"
     echo ""
     echo "Re-install with: sudo bash install-systemd.sh"
     echo "Wipe data with:  sudo bash uninstall-systemd.sh --purge"
@@ -123,9 +161,10 @@ fi
 # -----------------------------------------------------------------------------
 if [[ $ASSUME_YES -eq 0 ]]; then
     printf "%sThis deletes ALL ongrid data:\n" "$C_YELLOW"
-    printf "  - /var/lib/ongrid* (manager state, prom TSDB, loki/tempo store, qdrant vectors)\n"
-    printf "  - /var/log/ongrid (all logs)\n"
-    printf "  - /etc/ongrid (configs, secrets)\n"
+    printf "  - STATE_DIR=%s (manager state + embedding cache)\n" "$STATE_DIR"
+    printf "  - systemd-managed dep data: /var/lib/ongrid-prometheus, /var/lib/ongrid-loki, /var/lib/ongrid-tempo, /var/lib/ongrid-qdrant\n"
+    printf "  - LOG_DIR=%s (all logs)\n" "$LOG_DIR"
+    printf "  - ETC_DIR=%s (configs, secrets, unit-bundled prometheus/loki/tempo configs)\n" "$ETC_DIR"
     printf "  - service users (ongrid, ongrid-prometheus, ongrid-loki, ongrid-tempo, ongrid-qdrant)\n"
     printf "Continue? [y/N] %s" "$C_RESET"
     read -r answer
@@ -135,12 +174,22 @@ if [[ $ASSUME_YES -eq 0 ]]; then
     esac
 fi
 
-for d in /var/lib/ongrid /var/lib/ongrid-prometheus /var/lib/ongrid-loki \
-         /var/lib/ongrid-tempo /var/lib/ongrid-qdrant /var/log/ongrid \
-         /etc/ongrid; do
+# Config root (etc), state root (data), log root — resolved from
+# ONGRID_INSTALL_* so non-FHS installs clean up where they wrote.
+for d in "$STATE_DIR" "$LOG_DIR" "$ETC_DIR"; do
     if [[ -d "$d" ]]; then
         rm -rf "$d"
         log "removed $d"
+    fi
+done
+# systemd-managed StateDirectory= subdirs — fixed paths regardless of
+# install mode (StateDirectory= maps to /var/lib/<name> in FHS even when
+# the rest of the install is collapsed under a custom prefix).
+for d in /var/lib/ongrid-prometheus /var/lib/ongrid-loki \
+         /var/lib/ongrid-tempo /var/lib/ongrid-qdrant; do
+    if [[ -d "$d" ]]; then
+        rm -rf "$d"
+        log "removed $d (systemd StateDirectory=)"
     fi
 done
 
@@ -154,9 +203,10 @@ done
 echo ""
 echo "${C_BOLD}${C_GREEN}purge complete${C_RESET}"
 echo "  - units removed"
-echo "  - data dirs removed"
+echo "  - data + log + config roots removed (STATE=$STATE_DIR, LOG=$LOG_DIR, ETC=$ETC_DIR)"
+echo "  - systemd-managed dep StateDirectory= subdirs removed"
 echo "  - service users removed"
 echo ""
 echo "Note: OS-package deps (mariadb-server, nginx, grafana, the prom/loki/"
-echo "tempo/qdrant binaries you may have placed in /usr/local/bin) were NOT"
+echo "tempo/qdrant binaries you may have placed in $PREFIX_BIN) were NOT"
 echo "touched. Remove with your package manager if no longer needed."

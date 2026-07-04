@@ -31,6 +31,15 @@ VERSION="$1"
 STAGE_DIR="$2"
 OUT_DIR="$3"
 
+# Proxy support: every `curl` invocation in this script honors the standard
+# HTTP_PROXY / HTTPS_PROXY / NO_PROXY env vars natively (libcurl default).
+# Operators on a corporate egress / CN network just export before invoking
+# make / package.sh:
+#   HTTPS_PROXY=http://user:pass@proxy:8080 \
+#     make package
+# NO_PROXY is comma-separated. Same env feeds `make fetch-*` via the
+# Makefile FETCH_PROXY_FLAGS auto-derivation. URL-style auth is supported.
+
 # Resolve repo root: script lives in <repo>/dist/.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -426,6 +435,23 @@ for target in ${EDGE_TARGETS}; do
         log "  + edge/otelcol-contrib-${target}"
     else
         warn "otelcol-contrib binary ${src} missing; traces plugin won't work on ${target}. Run 'make fetch-otelcol'."
+    fi
+done
+
+# auditbeat (audit plugin) ships next to ongrid-edge so install-edge.sh
+# can install it under /usr/local/lib/ongrid-edge/auditbeat. Linux-only:
+# auditd requires the Linux kernel audit subsystem. Binary comes from
+# resource/auditbeat/<arch>/auditbeat via `make stage-auditbeat` (no
+# network fetch in this script).
+for target in ${EDGE_TARGETS}; do
+    src="${REPO_ROOT}/bin/${target}/auditbeat"
+    dst="${STAGE_DIR}/edge/auditbeat-${target}"
+    if [ -f "$src" ]; then
+        cp "$src" "$dst"
+        chmod 755 "$dst"
+        log "  + edge/auditbeat-${target}"
+    else
+        warn "auditbeat binary ${src} missing; audit plugin won't work on ${target}. Run 'make stage-auditbeat' after dropping the binary into resource/auditbeat/${target}/."
     fi
 done
 

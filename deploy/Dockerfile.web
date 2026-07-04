@@ -4,13 +4,50 @@
 # at runtime by docker-compose, so operators can edit them without rebuilding.
 # Build context MUST be the repo root (Dockerfile lives in deploy/, but it
 # COPYs `web/` from the root).
+#
+# ── Proxy support (opt-in) ──
+# Same --build-arg contract as the other Dockerfiles. npm natively honors
+# HTTP_PROXY/HTTPS_PROXY/NO_PROXY for the registry fetch, and we also drop
+# a `proxy=` line into /root/.npmrc so npm's transitive tooling (tarballs,
+# postinstall scripts) picks it up too.
+#   docker build --build-arg HTTPS_PROXY=http://user:pass@proxy:8080 ...
+# Or `export HTTPS_PROXY=...` before `docker build` (buildkit ≥ 0.8
+# propagates the standard env vars automatically). Unset ⇒ legacy behavior.
 
 ARG VERSION=dev
+ARG HTTP_PROXY=
+ARG HTTPS_PROXY=
+ARG NO_PROXY=localhost,127.0.0.1,.svc,.cluster.local
 
 # ---------- Stage 1: build the SPA ----------
 FROM node:20-alpine AS builder
 
 ARG VERSION
+# Proxy plumbing — npm honors HTTP_PROXY/HTTPS_PROXY natively, and we
+# also write /root/.npmrc so the post-install / tarball fetch layer
+# (`npm ci`, `npm run build` -> vite -> rollup -> ...) all go through
+# the same proxy. Empty ARG defaults = legacy direct-connect behavior.
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ENV HTTP_PROXY=$HTTP_PROXY \
+    HTTPS_PROXY=$HTTPS_PROXY \
+    http_proxy=$HTTP_PROXY \
+    https_proxy=$HTTPS_PROXY \
+    NO_PROXY=$NO_PROXY \
+    no_proxy=$NO_PROXY
+RUN set -eux; \
+    if [ -n "$HTTP_PROXY$HTTPS_PROXY" ]; then \
+        { \
+            printf 'proxy=%s\n' "${HTTPS_PROXY:-$HTTP_PROXY}"; \
+            printf 'https-proxy=%s\n' "${HTTPS_PROXY:-$HTTP_PROXY}"; \
+            if [ -n "$NO_PROXY" ]; then printf 'noproxy=%s\n' "$NO_PROXY"; fi; \
+        } > /root/.npmrc; \
+        echo "[ongrid] npm proxy configured (${HTTPS_PROXY:-$HTTP_PROXY})"; \
+    else \
+        rm -f /root/.npmrc; \
+        echo "[ongrid] no npm proxy — direct connect"; \
+    fi
 WORKDIR /app
 
 # Cache dependency install layer separately from the source tree.

@@ -204,6 +204,19 @@ else
     log_warn "otelcol-contrib-${OS}-${ARCH} not bundled; traces plugin will fail to start until present"
 fi
 
+# auditbeat (audit plugin). Linux-only; on darwin edges the plugin
+# will simply fail to start (binary missing) and supervisor reports
+# StateCrashed — no install-time abort because darwin support is
+# future work, not a hard requirement. Binary comes from
+# resource/auditbeat/<arch>/auditbeat via `make stage-auditbeat`.
+AUDITBEAT_SRC="${SCRIPT_DIR}/auditbeat-${OS}-${ARCH}"
+if [[ -f "$AUDITBEAT_SRC" ]]; then
+    log_info "installing auditbeat to ${PLUGIN_BIN_DIR}/auditbeat"
+    install -m 0755 -o root -g root "$AUDITBEAT_SRC" "${PLUGIN_BIN_DIR}/auditbeat"
+else
+    log_warn "auditbeat-${OS}-${ARCH} not bundled; audit plugin will fail to start until present"
+fi
+
 # node_exporter + process_exporter — bundled exporter binaries used by
 # the hostmetrics / procmetrics edge plugins. Install-edge.sh just
 # drops them under ${PLUGIN_BIN_DIR}; the ongrid-edge plugin

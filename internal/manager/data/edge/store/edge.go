@@ -81,6 +81,10 @@ func (r *Repo) GetByName(ctx context.Context, name string) (*model.Edge, error) 
 // edges through the edge_devices junction.
 func (r *Repo) List(ctx context.Context, f biz.ListFilter) ([]*model.Edge, error) {
 	tx := r.db.WithContext(ctx).Model(&model.Edge{})
+	if f.DeviceID != nil {
+		tx = tx.Joins("JOIN edge_devices ed ON ed.edge_id = edges.id AND ed.delete_marker = 0").
+			Where("ed.device_id = ?", *f.DeviceID)
+	}
 	if f.Status != "" {
 		tx = tx.Where("status = ?", f.Status)
 	}

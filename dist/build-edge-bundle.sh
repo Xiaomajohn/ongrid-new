@@ -16,6 +16,7 @@
 #   bin/<arch>/mongodb_exporter
 #   bin/<arch>/promtail
 #   bin/<arch>/otelcol-contrib
+#   bin/<arch>/auditbeat
 #   deploy/install/apply-pending-upgrade.sh
 #
 # Outputs:
@@ -45,6 +46,7 @@ ENTRIES=(
   "mongodb_exporter       0755 /usr/local/lib/ongrid-edge/mongodb_exporter           $BIN_DIR/mongodb_exporter"
   "promtail               0755 /usr/local/lib/ongrid-edge/promtail                   $BIN_DIR/promtail"
   "otelcol-contrib        0755 /usr/local/lib/ongrid-edge/otelcol-contrib            $BIN_DIR/otelcol-contrib"
+  "auditbeat              0755 /usr/local/lib/ongrid-edge/auditbeat                  $BIN_DIR/auditbeat"
   "apply-pending-upgrade.sh 0755 /usr/local/lib/ongrid-edge/apply-pending-upgrade.sh $APPLY_SCRIPT"
 )
 

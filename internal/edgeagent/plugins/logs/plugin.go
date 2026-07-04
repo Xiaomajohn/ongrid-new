@@ -26,11 +26,17 @@ const Name = "logs"
 // registered with the Supervisor by ongrid-edge main.
 func New(binDir, workDir string, log *slog.Logger) plugins.Plugin {
 	return plugins.NewSubprocess(plugins.SubprocessOpts{
-		Name:         Name,
-		Binary:       filepath.Join(binDir, "promtail"),
-		WorkDir:      filepath.Join(workDir, Name),
-		ConfigFile:   filepath.Join(workDir, Name, "promtail.yaml"),
-		ConfigRender: render,
+		Name:       Name,
+		Binary:     filepath.Join(binDir, "promtail"),
+		WorkDir:    filepath.Join(workDir, Name),
+		ConfigFile: filepath.Join(workDir, Name, "promtail.yaml"),
+		// Promtail's renderer probes the audit plugin's JSONL output
+		// path so a manager-enabled audit plugin is auto-tailed into
+		// Loki without operator wiring. workDir is captured here at
+		// construction; reconcile reuses the same closure.
+		ConfigRender: func(cfg plugins.PluginConfig) ([]byte, error) {
+			return render(workDir, cfg)
+		},
 		Args: func(_ plugins.PluginConfig, configFile string) []string {
 			return []string{
 				"-config.file=" + configFile,

@@ -59,6 +59,9 @@ const (
 	PluginNameProcMetrics     = "procmetrics"
 	PluginNameCustomMetrics   = "custommetrics"
 	PluginNameDatabaseMetrics = "databasemetrics"
+	// audit: subprocess auditbeat, Linux-only. Output JSONL is
+	// auto-tailed by the logs plugin (no separate push channel).
+	PluginNameAudit = "audit"
 )
 
 // IsKnownPluginName reports whether n is a plugin the manager knows
@@ -69,7 +72,8 @@ func IsKnownPluginName(n string) bool {
 	switch n {
 	case PluginNameMetrics, PluginNameLogs, PluginNameTraces, PluginNameProfiles,
 		PluginNameHostMetrics, PluginNameProcMetrics,
-		PluginNameCustomMetrics, PluginNameDatabaseMetrics:
+		PluginNameCustomMetrics, PluginNameDatabaseMetrics,
+		PluginNameAudit:
 		return true
 	}
 	return false
