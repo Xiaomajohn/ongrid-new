@@ -299,7 +299,14 @@ PROMTAIL_VERSION ?= 3.4.0
 # to drop a single flag (e.g. `make fetch-node-exporter FETCH_CURL_FLAGS=-fL`).
 # Proxy is injected via FETCH_PROXY_FLAGS below; set HTTPS_PROXY in the
 # environment to opt in (URL-style auth ok: http://user:pass@proxy:8080).
-FETCH_CURL_FLAGS ?= -fL --retry 3 --retry-all-errors --retry-delay 3 --connect-timeout 15 --speed-time 60 --speed-limit 1024 --show-error $(FETCH_PROXY_FLAGS)
+# --retry-all-errors is curl 7.71.0+ (2020-06-29). Older releases
+# (e.g. CentOS 7 stock curl 7.29.0) reject the flag and abort every
+# fetch-* target. Probe at parse time and drop it when unsupported so
+# the legacy --retry (5xx/408) semantics still apply. Operators can
+# still override FETCH_CURL_FLAGS=... on the command line to pin a
+# specific flag set.
+FETCH_RETRY_ALL_ERRORS_FLAG := $(shell curl --help all 2>/dev/null | grep -F -q -- '--retry-all-errors' && echo --retry-all-errors)
+FETCH_CURL_FLAGS ?= -fL --retry 3 $(FETCH_RETRY_ALL_ERRORS_FLAG) --retry-delay 3 --connect-timeout 15 --speed-time 60 --speed-limit 1024 --show-error $(FETCH_PROXY_FLAGS)
 # Auto-derived: HTTPS_PROXY set → --proxy URL, else empty. Standards
 # HTTP_PROXY/HTTPS_PROXY/NO_PROXY are honored natively by apt/apk/npm/go/
 # docker buildkit; we only need to inject into curl here. Operators can
