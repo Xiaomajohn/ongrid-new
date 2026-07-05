@@ -251,6 +251,11 @@ upgrade_apply_host_proxy() {
 # don't share a sourced file. See the install.sh definition for the full
 # rationale; the only material change here is `upgrade.sh` calls it with
 # $NEW_VERSION instead of $VERSION_FROM_FILE.
+#
+# Same file-vs-directory awareness as install.sh: /ongrid is a single
+# binary (Dockerfile.ongrid:183 `COPY --from=builder /out/ongrid /ongrid`)
+# while /skills, /agents, /usr/share/nginx/html are directories. We try
+# the dir form first (with /. suffix), then fall back to the file form.
 extract_image_dist() {
     local image="$1" dst_dir="$2"; shift 2
     local tmp_name="ongrid-extract-$$-$(date +%s%N)"
@@ -260,20 +265,24 @@ extract_image_dist() {
         return 1
     fi
     mkdir -p "$dst_dir"
-    local rc=0 src name sub
+    local rc=0 src name sub kind
     for src in "$@"; do
         name="${src##*/}"
         name="${name:-root}"
         sub="${dst_dir}/${name}"
         rm -rf "$sub"
-        mkdir -p "$sub"
-        if ! docker cp "$tmp_name:$src/." "$sub/" 2>/dev/null; then
-            log_error "failed to copy $src from $image into $sub"
+        if docker cp "$tmp_name:$src/." "$sub/" 2>/dev/null; then
+            chmod -R a+rX "$sub"
+            kind="dir"
+        elif docker cp "$tmp_name:$src" "$sub" 2>/dev/null; then
+            chmod a+rX "$sub"
+            kind="file"
+        else
+            log_error "failed to copy $src from $image into $sub (tried as both dir and file)"
             rc=1
             break
         fi
-        chmod -R a+rX "$sub"
-        log_info "  + $src → $sub ($(find "$sub" -type f 2>/dev/null | wc -l) files)"
+        log_info "  + $src → $sub ($kind, $(find "$sub" -type f 2>/dev/null | wc -l) files)"
     done
     docker rm -f "$tmp_name" >/dev/null 2>&1 || true
     return $rc

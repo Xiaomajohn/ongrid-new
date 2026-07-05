@@ -864,20 +864,37 @@ extract_image_dist() {
         return 1
     fi
     mkdir -p "$dst_dir"
-    local rc=0 src name sub
+    local rc=0 src name sub kind
     for src in "$@"; do
         name="${src##*/}"            # /ongrid → ongrid, /usr/share/nginx/html → html
         name="${name:-root}"         # bare '/' edge case
         sub="${dst_dir}/${name}"
+        # Baked-in assets come in two shapes:
+        #   - DIRECTORY: /skills, /agents, /usr/share/nginx/html — sub must
+        #     land as a directory whose CONTENTS mirror the image path.
+        #     `docker cp container:SRC/. sub/` strips the SRC top-level name
+        #     so we get sub/<files…>, matching the bind-mount source layout
+        #     in docker-compose.yml (e.g. ${WEB_DIR}/html/html/index.html).
+        #   - FILE: /ongrid — Dockerfile.ongrid:183 is
+        #     `COPY --from=builder /out/ongrid /ongrid`, so /ongrid is a
+        #     single manager binary, not a directory. The `/.` syntax is
+        #     invalid for files, and the compose mount expects sub to BE the
+        #     file (`${ONGRID_APP_DIR}/ongrid:/ongrid:ro`), so we fall back
+        #     to `docker cp container:SRC sub` which creates `sub` as a
+        #     regular file at the bind-mount source path.
         rm -rf "$sub"
-        mkdir -p "$sub"
-        if ! docker cp "$tmp_name:$src/." "$sub/" 2>/dev/null; then
-            log_error "failed to copy $src from $image into $sub"
+        if docker cp "$tmp_name:$src/." "$sub/" 2>/dev/null; then
+            chmod -R a+rX "$sub"
+            kind="dir"
+        elif docker cp "$tmp_name:$src" "$sub" 2>/dev/null; then
+            chmod a+rX "$sub"
+            kind="file"
+        else
+            log_error "failed to copy $src from $image into $sub (tried as both dir and file)"
             rc=1
             break
         fi
-        chmod -R a+rX "$sub"
-        log_info "  + $src → $sub ($(find "$sub" -type f 2>/dev/null | wc -l) files)"
+        log_info "  + $src → $sub ($kind, $(find "$sub" -type f 2>/dev/null | wc -l) files)"
     done
     docker rm -f "$tmp_name" >/dev/null 2>&1 || true
     return $rc
