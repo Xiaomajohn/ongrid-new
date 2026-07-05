@@ -260,24 +260,56 @@ sudo ./install.sh
 
 ## 升级
 
-新版本发布包同样包含 `upgrade.sh`：
+新版本发布包同样包含 `upgrade.sh`。**升级流程的关键变化是：升级前必须先把已安装的 `.env` 拷到升级包所在目录**。upgrade.sh 以这份拷贝为唯一真相源完成所有路径解析与 `docker compose --env-file` 操作。
 
 ```bash
-scp ongrid-v0.2.0-linux-<arch>.tar.xz user@vps:~/
+scp ongrid-v0.2.0-linux-<arch>.tar.xz user@vps:~
 ssh user@vps
 tar xf ongrid-v0.2.0-linux-<arch>.tar.xz
 cd ongrid-v0.2.0-linux-<arch>
+
+# ★升级前必须：把已安装的 .env 拷到升级包所在目录。
+#   不拷这步脚本会直接报 "no operator .env found" 并退出。
+sudo cp /opt/ongrid/ongrid/.env .env
+
 sudo ./upgrade.sh
 ```
 
-升级脚本会：
+### upgrade 脚本内部运作
 
-1. 先 `docker compose down`（保留命名卷，数据不丢）。
-2. 覆盖 `docker-compose.yml`、`nginx.conf`、`prometheus.yml`、`grafana/`、`edge/`、`VERSION`。
-3. **不触碰 `.env` 和 `certs/`**，运维之前的自定义配置 / 真证书全部保留。
-4. `docker load` 新镜像（`ongrid` / `frontier` / `ongrid-web`），修改 `.env` 中的 `ONGRID_VERSION`。
-5. `docker compose up -d` 启动新版。
-6. 轮询 `https://localhost:${ONGRID_HTTP_PORT}/healthz`（`-k` 跳过自签校验）最多 90 秒（库迁移可能稍慢）。
+| 阶段 | 动作 | 读写谁 |
+|---|---|---|
+| 启动 | 读 `$ENV_FILE = $SCRIPT_DIR/.env`；不存在则报错提示运行上面那行 `cp` | $ENV_FILE |
+| 路径解析 | 四个 `ONGRID_*` 变量按"shell env > $ENV_FILE > 默认值"优先级链解析 | shell env / $ENV_FILE |
+| docker compose down | `-f $INSTALL_DIR/docker-compose.yml --env-file $ENV_FILE down` | $ENV_FILE |
+| 拷贝资源 | docker-compose.yml / nginx.conf / prometheus.yml / grafana/ / edge/ / VERSION | 写到 $INSTALL_DIR/，与 ENV_FILE 解耦 |
+| sed / set_env_value backfill | ONGRID_VERSION、GRAFANA_ADMIN_PASSWORD 等 | **写到 `$ENV_FILE`**，不碰 `$INSTALL_DIR/.env` |
+| docker compose up | `-f $INSTALL_DIR/docker-compose.yml --env-file $ENV_FILE up -d` | $ENV_FILE |
+| healthz 检查 | 最多 90 秒；失败则 `$INSTALL_DIR/.env` 保持不动 | - |
+| 同步回 INSTALL_DIR | 仅在 health 通过后：`install -m 600 $ENV_FILE $INSTALL_DIR/.env` | $ENV_FILE → $INSTALL_DIR/.env |
+| post-success cleanup | 清理 /tmp/ongrid-v*/ 老 images / 老 tarballs | - |
+
+中间任何阶段失败，`$INSTALL_DIR/.env` 都会保持 operator 原状不动；`$SCRIPT_DIR/.env` 记录了 upgrade.sh 中间修改的内容，可重新 `sudo ./upgrade.sh` 重试（不需要重新 `cp`）。
+
+### 环境变量优先级（同一个 ONGRID_* key 取哪个）
+
+| 来源 | 适用场景 |
+|---|---|
+| shell `export ONGRID_DATA_DIR=/mnt/nfs/ongrid` | 紧急重定向某个子目录（如临时把数据挪到 NFS 抢救磁盘）|
+| `$SCRIPT_DIR/.env`（你刚 `cp` 过来的）| 常态唯一真相源；包含所有你改过的密码 / 端口 / 代理 / ONGRID_* 路径 |
+| 默认值（如 `$PARENT_DIR/data`）| 仅在前两处都未设时生效——主要是 v0.7.45 之前的老 `.env` 没写 `ONGRID_INSTALL_DIR` 时 |
+
+### 从老 `/var/lib/ongrid` 升上来
+
+老版本（≤ v0.7.44）默认数据落在 `/var/lib/ongrid`  / `/var/log/ongrid`，新 release 默认 `/opt/ongrid/{data,logs}`。如果你这次是从未上过 v0.7.45 的老安装升级：
+
+- 老 `.env` 里只写 `ONGRID_DATA_DIR=/var/lib/ongrid`、不写 `ONGRID_INSTALL_DIR` 也没问题——upgrade 的优先级链会从 shell env / `$ENV_FILE` / 默认值逐级 fallback。
+- 路径仍然会被尊重：`mkdir -p $ONGRID_DATA_DIR/{mysql,prometheus,...}` 仍然是 `/var/lib/ongrid/...`。upgrade 不动你的老数据路径，除非你自己手动迁移。
+
+### 回滚
+
+- **Half-state**（升级失败但 operator 已 `cp` .env 过去了）：再跑一次 `sudo ./upgrade.sh`，使用同一份 `$SCRIPT_DIR/.env` 即可。
+- **完整回滚到 v0.7.44-**：需要重装（v0.7.45 的 bind-mount 与 v0.7.44- 的 named volume 不兼容）。但既然你已经在 v0.7.45+ 上 bind-mount 了，新升级只会让你往上走——这是单向迁移。
 
 数据库 schema 由 gorm AutoMigrate 在 ongrid 启动时自动处理。
 

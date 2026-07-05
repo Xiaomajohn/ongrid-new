@@ -254,7 +254,7 @@ services:
       # (terraform .tf/state, scratch files). Same bind-mount rationale as
       # skills — must survive image upgrades / `compose up`, else a tool's
       # files written in one command vanish before the next.
-      - ${ONGRID_DATA_DIR:-/opt/ongrid/data}/workspace:/var/lib/ongrid/workspace
+      - ${ONGRID_WEB_DIR:-/opt/ongrid}/web:/usr/share/nginx/html
       # cloud_bash runtime tools (cloudBashToolsDir = /var/lib/ongrid/tools):
       # PYTHONUSERBASE + PATH for runtime-installed CLIs (tccli, awscli, …) and
       # their bin entrypoints. WITHOUT this mount the manager container can't see

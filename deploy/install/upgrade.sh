@@ -256,30 +256,62 @@ command -v docker >/dev/null 2>&1 || { log_error "docker CLI not found"; exit 1;
 docker info >/dev/null 2>&1 || { log_error "docker daemon not reachable"; exit 1; }
 docker compose version >/dev/null 2>&1 || { log_error "docker compose v2 required"; exit 1; }
 
-# ---------- install layout (mirror of install.sh: single parent, four subdirs) ----------
-# Same four-subdir layout as install.sh: ongrid/ (compose stack root),
-# ongrid-web/ (nginx container inputs), data/ (component state), logs/.
-# On an in-place upgrade we don't move operator data around — we resolve
-# the path the operator's existing .env points at, and only fall back to
-# the new parent-dir defaults when the key is unset. Operators running an
-# older release that shipped ONGRID_DATA_DIR=/var/lib/ongrid keep their
-# data where it is until they explicitly move it (and edit .env).
-PARENT_DIR="${ONGRID_INSTALL_DIR:-/opt/ongrid}"
-INSTALL_DIR="$PARENT_DIR/ongrid"
-WEB_DIR="${ONGRID_WEB_DIR:-$PARENT_DIR/ongrid-web}"
-ENV_FILE="$INSTALL_DIR/.env"
+# ---------- install layout (single source of truth: $SCRIPT_DIR/.env) ----------
+# Operator workflow (enforced by the check below):
+#
+#   $ tar -xzf ongrid-v<NEW>-linux-<arch>.tar.gz -C /tmp/
+#   $ cp /opt/ongrid/ongrid/.env  /tmp/ongrid-v<NEW>-linux-<arch>/.env
+#   $ sudo ./upgrade.sh
+#
+# $ENV_FILE is therefore $SCRIPT_DIR/.env (the file the operator copied
+# their existing install's .env into). All ONGRID_* path variables are
+# resolved from that file — no more mix-and-match between INSTALL_DIR/.env
+# and shell env. INSTALL_DIR/.env is resynced only at the very end, after
+# health check passes (systemd / ongrid-edge / next upgrade all start from
+# INSTALL_DIR/ and need the upgraded .env).
+ENV_FILE="$SCRIPT_DIR/.env"
 
 if [[ ! -f "$ENV_FILE" ]]; then
-    log_error "no existing install found at $ENV_FILE"
-    log_error "run install.sh for a fresh install, not upgrade.sh"
+    log_error "no operator .env found at $ENV_FILE"
+    log_error "before running upgrade.sh, copy your existing install's .env next to this script:"
+    log_error "    cp <install-dir>/ongrid/.env  $SCRIPT_DIR/.env"
+    log_error "  (replace <install-dir> with the parent of your ongrid/ install, e.g. /opt/ongrid)"
     exit 1
 fi
 
-log_info "upgrading ongrid at $INSTALL_DIR"
-log_info "  ongrid/      → $INSTALL_DIR"
-log_info "  ongrid-web/  → $WEB_DIR"
-log_info "  data/        → ${ONGRID_DATA_DIR:-$PARENT_DIR/data}"
-log_info "  logs/        → ${ONGRID_LOG_DIR:-$PARENT_DIR/logs}"
+# Resolve every ONGRID_* layout var through ONE precedence chain:
+#   1. shell-exported env wins (operator override at run time, e.g. emergency
+#      redirect of one subdir to free disk)
+#   2. $ENV_FILE — operator's actual install state. A pre-bind-mount install
+#      that shipped ONGRID_DATA_DIR=/var/lib/ongrid keeps it pointed there
+#      until the operator manually moves it + edits .env (we don't move
+#      data across upgrades silently — it's the operator's call).
+#   3. built-in default ($PARENT_DIR/{ongrid,ongrid-web,data,logs}) when
+#      neither shell nor .env supplied. Pre-bind-mount releases' .env
+#      files don't carry ONGRID_INSTALL_DIR (it was implicit /opt/ongrid);
+#      the fallback keeps the upgrade from being a chicken-and-egg dance.
+# Resolving here (rather than via ${VAR:-...} at each callsite) means the
+# rest of the script can rely on a defined variable — `set -u` (line 5)
+# would otherwise abort with "unbound variable" before mkdir ever runs.
+for _k in ONGRID_INSTALL_DIR ONGRID_WEB_DIR ONGRID_DATA_DIR ONGRID_LOG_DIR; do
+    if [[ -z "${!_k:-}" ]] && grep -qE "^${_k}=" "$ENV_FILE" 2>/dev/null; then
+        printf -v "$_k" '%s' "$(grep -E "^${_k}=" "$ENV_FILE" | tail -n1 | cut -d= -f2- | tr -d '"')"
+    fi
+done
+
+PARENT_DIR="${ONGRID_INSTALL_DIR:-/opt/ongrid}"
+INSTALL_DIR="$PARENT_DIR/ongrid"
+WEB_DIR="${ONGRID_WEB_DIR:-$PARENT_DIR/ongrid-web}"
+ONGRID_DATA_DIR="${ONGRID_DATA_DIR:-$PARENT_DIR/data}"
+ONGRID_LOG_DIR="${ONGRID_LOG_DIR:-$PARENT_DIR/logs}"
+
+log_info "upgrading ongrid"
+log_info "  ENV_FILE         = $ENV_FILE"
+log_info "  PARENT_DIR       = $PARENT_DIR   (override via ONGRID_INSTALL_DIR)"
+log_info "  ongrid/          → $INSTALL_DIR"
+log_info "  ongrid-web/      → $WEB_DIR      (override via ONGRID_WEB_DIR)"
+log_info "  data/            → $ONGRID_DATA_DIR  (override via ONGRID_DATA_DIR)"
+log_info "  logs/            → $ONGRID_LOG_DIR   (override via ONGRID_LOG_DIR)"
 
 NEW_VERSION=""
 if [[ -f "$SCRIPT_DIR/VERSION" ]]; then
@@ -304,7 +336,12 @@ log_info "stopping stack"
     # dropped operator env overrides (the 2026-05-19 ONGRID_INVESTIGATOR_ENABLED
     # regression where the structured RCA investigator was unwired after every
     # upgrade and only the legacy investigator ran).
-    docker compose --env-file .env down || true
+    # -f points at the new docker-compose.yml just copied into $INSTALL_DIR/
+    # above. --env-file points at $ENV_FILE = $SCRIPT_DIR/.env (the file the
+    # operator copied in); we never read .env from $INSTALL_DIR/ while the
+    # upgrade is in flight — that's the file we're about to overwrite once
+    # health check passes (see cp $ENV_FILE $INSTALL_DIR/.env further down).
+    docker compose -f "$INSTALL_DIR/docker-compose.yml" --env-file "$ENV_FILE" down || true
 )
 
 # ---------- host data dirs (bind-mount targets) ----------
@@ -602,10 +639,14 @@ upgrade_apply_host_proxy
 chmod 600 "$ENV_FILE"
 
 # Bring stack back up; gorm AutoMigrate handles schema diff.
+# -f → new docker-compose.yml in $INSTALL_DIR; --env-file → $ENV_FILE
+# (= $SCRIPT_DIR/.env). Same reasoning as the `down` call above: we never
+# read INSTALL_DIR/.env during the upgrade, only at the very end after
+# health passes.
 log_info "starting stack with new version"
 (
     cd "$INSTALL_DIR"
-    docker compose --env-file .env up -d
+    docker compose -f "$INSTALL_DIR/docker-compose.yml" --env-file "$ENV_FILE" up -d
 )
 
 # v0.7.20+: existing Grafana volumes from older installs predate
@@ -654,6 +695,23 @@ printf '\n'
 if [[ $HEALTH_OK -eq 0 ]]; then
     log_warn "ongrid did not become healthy within 90s"
     log_warn "check: docker compose -f $INSTALL_DIR/docker-compose.yml logs ongrid"
+fi
+
+# ---------- sync upgraded .env back to INSTALL_DIR/ ----------
+# Deliberately placed AFTER health check, not before:
+#   on success — INSTALL_DIR/.env needs the new ONGRID_VERSION + any
+#     backfilled secrets (GRAFANA_ADMIN_PASSWORD etc.) so the next
+#     upgrade / install.sh re-run / systemd unit / ongrid-edge all read
+#     the right state.
+#   on failure — leaving INSTALL_DIR/.env untouched lets the operator
+#     retry (or roll back) without their original config being clobbered
+#     mid-upgrade. Stale $INSTALL_DIR/.env is a feature here, not a bug.
+# `$ENV_FILE != $INSTALL_DIR/.env` is mostly a no-op guard: in the rare
+# case someone ran `cp .env /opt/ongrid/ongrid/.env` before invoke, the
+# upgrade path collapses but doesn't break anything.
+if [[ "$ENV_FILE" != "$INSTALL_DIR/.env" ]]; then
+    log_info "syncing upgraded .env → $INSTALL_DIR/.env"
+    install -m 600 "$ENV_FILE" "$INSTALL_DIR/.env"
 fi
 
 # ---------- post-success cleanup (only when healthy) ----------
