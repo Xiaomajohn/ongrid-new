@@ -318,7 +318,7 @@ services:
       #                                          /usr/share/ongrid/edge-bundles)
       - ${ONGRID_WEB_DIR:-/opt/ongrid/ongrid-web}/nginx.conf:/etc/nginx/nginx.conf:ro
       - ${ONGRID_WEB_DIR:-/opt/ongrid/ongrid-web}/certs:/etc/nginx/certs:ro
-      - ${ONGRID_WEB_DIR:-/opt/ongrid}:/usr/share/nginx/html
+      - ${ONGRID_WEB_DIR:-/opt/ongrid}/html:/usr/share/nginx/html
 
     ports:
       - "${ONGRID_HTTP_PORT:-443}:443"
