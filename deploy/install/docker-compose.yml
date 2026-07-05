@@ -254,7 +254,6 @@ services:
       # (terraform .tf/state, scratch files). Same bind-mount rationale as
       # skills — must survive image upgrades / `compose up`, else a tool's
       # files written in one command vanish before the next.
-      - ${ONGRID_WEB_DIR:-/opt/ongrid}/web:/usr/share/nginx/html
       # cloud_bash runtime tools (cloudBashToolsDir = /var/lib/ongrid/tools):
       # PYTHONUSERBASE + PATH for runtime-installed CLIs (tccli, awscli, …) and
       # their bin entrypoints. WITHOUT this mount the manager container can't see
@@ -319,7 +318,8 @@ services:
       #                                          /usr/share/ongrid/edge-bundles)
       - ${ONGRID_WEB_DIR:-/opt/ongrid/ongrid-web}/nginx.conf:/etc/nginx/nginx.conf:ro
       - ${ONGRID_WEB_DIR:-/opt/ongrid/ongrid-web}/certs:/etc/nginx/certs:ro
-      - ${ONGRID_WEB_DIR:-/opt/ongrid/ongrid-web}/edge:/usr/share/nginx/html/edge:ro
+      - ${ONGRID_WEB_DIR:-/opt/ongrid}:/usr/share/nginx/html
+
     ports:
       - "${ONGRID_HTTP_PORT:-443}:443"
       - "${ONGRID_HTTP_REDIRECT_PORT:-80}:80"
