@@ -800,11 +800,12 @@ func main() {
 	}
 	deviceHandler := managerserverdevice.NewHandler(deviceUC)
 	// deviceHandler reads edge-online reachability for the SSH-info
-	// endpoint. The biz/edge junction repo (edgeDeviceRepo here, the
-	// same dependency edgeUC uses) satisfies the narrow interface
-	// via a 4-line adapter below. nil-safe — endpoint still works
+	// endpoint. The biz/edge repo (edgeRepo) backs the narrow interface
+	// via a 4-line adapter below; the ListFilter.DeviceID path joins
+	// through the edge_devices junction internally, so the adapter does
+	// not need edgeDeviceRepo directly. nil-safe — endpoint still works
 	// without it, just reports edge_online=false.
-	deviceHandler.SetEdgeLookup(deviceEdgeLookupAdapter{links: edgeDeviceRepo})
+	deviceHandler.SetEdgeLookup(deviceEdgeLookupAdapter{repo: edgeRepo})
 	_ = deviceHandler // keep import alive in dev where the line above is the only reference
 
 	// D1-Wire: per-device SSH + SFTP + install-job routes. A3/A4 biz
@@ -852,6 +853,46 @@ func main() {
 		return nil
 	}
 
+	// Frontierbound service-end SDK: opens a long-lived service connection
+	// to the upstream frontier broker (a separate docker container) and
+	// installs lifecycle callbacks + reverse-call handlers. aiops tools
+	// reuse fbClient.Call to dispatch back to specific edges.
+	//
+	// ONGRID_FRONTIER_DISABLED=true bypasses the dial entirely — the
+	// resulting Client errors all Call/OpenStream/NotifyX with
+	// frontierbound.ErrDisabled and is a no-op for Register. Used by the
+	// e2e harness so manager can come up without a real broker. The HTTP
+	// surface and DB stack are unaffected; edge-tunnel-only features
+	// (webssh, edge reverse calls) surface ErrDisabled at the call site.
+	//
+	// Hoisted above the SSH-router wiring because streamerForTunnelAdapter
+	// captures fbClient by pointer; deferring init until later would leave
+	// every tunnel-mode SSH/SFTP call with a nil streamer.
+	var fbClient *managersvcfb.Client
+	if cfg.FrontierClient.Disabled {
+		log.Warn("frontierbound: disabled (ONGRID_FRONTIER_DISABLED=true) — edge-tunnel features will error at call site")
+		fbClient = managersvcfb.NewDisabled(log.With(slog.String("comp", "frontierbound")))
+	} else {
+		c, err := managersvcfb.New(managersvcfb.Config{
+			Addr:        cfg.FrontierClient.Addr,
+			ServiceName: cfg.FrontierClient.ServiceName,
+		}, log.With(slog.String("comp", "frontierbound")))
+		if err != nil {
+			log.Error("frontierbound: new client", slog.Any("err", err))
+			os.Exit(1)
+		}
+		fbClient = c
+	}
+	defer func() {
+		if err := fbClient.Close(); err != nil {
+			log.Warn("frontierbound: close", slog.Any("err", err))
+		}
+	}()
+	// Back-fill the edge service's tunnel dispatcher now that fbClient
+	// exists. Done early (before the SSH router) for the same reason as
+	// the var hoist above — edgeSvc.SetEdgeCaller is a plain assignment.
+	edgeSvc.SetEdgeCaller(fbClient)
+
 	// streamersForTunnel bridges *managersvcfb.Client.OpenStream(ctx, edgeID)
 	// → devicessh.TunnelStreamOpener.OpenTunnelStream(ctx, edgeID, target).
 	// The target string is ignored today (frontierbound's OpenStream
@@ -883,7 +924,7 @@ func main() {
 	)
 
 	pathGuard := managerbizdevicessh.NewPathGuard()
-	auditLogger := managerbizdevicessh.NewAuditLogger(db)
+	auditLogger := managerbizdevicessh.NewAuditLogger(db, log)
 
 	sftpSvc := managerbizdevicessh.NewSFTPService(sshRouter, pathGuard, auditLogger)
 	devicesshShellSvc := managerbizdevicessh.NewShellService(sshRouter, deviceRepo, log)
@@ -1117,42 +1158,6 @@ func main() {
 		// Tempo disabled — handler installs but every route returns 503.
 		tracesHandler = managerservertraces.NewHandler(nil)
 	}
-
-	// Frontierbound service-end SDK: opens a long-lived service connection
-	// to the upstream frontier broker (a separate docker container) and
-	// installs lifecycle callbacks + reverse-call handlers. aiops tools
-	// reuse fbClient.Call to dispatch back to specific edges.
-	//
-	// ONGRID_FRONTIER_DISABLED=true bypasses the dial entirely — the
-	// resulting Client errors all Call/OpenStream/NotifyX with
-	// frontierbound.ErrDisabled and is a no-op for Register. Used by the
-	// e2e harness so manager can come up without a real broker. The HTTP
-	// surface and DB stack are unaffected; edge-tunnel-only features
-	// (webssh, edge reverse calls) surface ErrDisabled at the call site.
-	var fbClient *managersvcfb.Client
-	if cfg.FrontierClient.Disabled {
-		log.Warn("frontierbound: disabled (ONGRID_FRONTIER_DISABLED=true) — edge-tunnel features will error at call site")
-		fbClient = managersvcfb.NewDisabled(log.With(slog.String("comp", "frontierbound")))
-	} else {
-		c, err := managersvcfb.New(managersvcfb.Config{
-			Addr:        cfg.FrontierClient.Addr,
-			ServiceName: cfg.FrontierClient.ServiceName,
-		}, log.With(slog.String("comp", "frontierbound")))
-		if err != nil {
-			log.Error("frontierbound: new client", slog.Any("err", err))
-			os.Exit(1)
-		}
-		fbClient = c
-	}
-	defer func() {
-		if err := fbClient.Close(); err != nil {
-			log.Warn("frontierbound: close", slog.Any("err", err))
-		}
-	}()
-	// Back-fill the edge service's tunnel dispatcher now that fbClient
-	// exists. Until this point UpgradeAgent surfaced a "not wired" error
-	// — by design, because we don't accept HTTP traffic until later.
-	edgeSvc.SetEdgeCaller(fbClient)
 
 	// promIngester for the Wiring is typed as the interface; passing a
 	// typed-nil *Ingester would be a non-nil interface, so explicitly hand
