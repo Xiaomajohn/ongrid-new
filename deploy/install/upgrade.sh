@@ -245,6 +245,40 @@ upgrade_apply_host_proxy() {
     upgrade_append_internal_no_proxy_domains || true
 }
 
+# extract_image_dist <image-ref> <dst-dir> <src-path> [<src-path>...]
+# Mirror of install.sh — single-source copy kept per-script because both
+# install.sh + upgrade.sh run standalone from inside the tarball and we
+# don't share a sourced file. See the install.sh definition for the full
+# rationale; the only material change here is `upgrade.sh` calls it with
+# $NEW_VERSION instead of $VERSION_FROM_FILE.
+extract_image_dist() {
+    local image="$1" dst_dir="$2"; shift 2
+    local tmp_name="ongrid-extract-$$-$(date +%s%N)"
+    docker rm -f "$tmp_name" >/dev/null 2>&1 || true
+    if ! docker create --name "$tmp_name" "$image" >/dev/null 2>&1; then
+        log_error "failed to create extract container from $image"
+        return 1
+    fi
+    mkdir -p "$dst_dir"
+    local rc=0 src name sub
+    for src in "$@"; do
+        name="${src##*/}"
+        name="${name:-root}"
+        sub="${dst_dir}/${name}"
+        rm -rf "$sub"
+        mkdir -p "$sub"
+        if ! docker cp "$tmp_name:$src/." "$sub/" 2>/dev/null; then
+            log_error "failed to copy $src from $image into $sub"
+            rc=1
+            break
+        fi
+        chmod -R a+rX "$sub"
+        log_info "  + $src → $sub ($(find "$sub" -type f 2>/dev/null | wc -l) files)"
+    done
+    docker rm -f "$tmp_name" >/dev/null 2>&1 || true
+    return $rc
+}
+
 trap 'log_error "upgrade failed at line $LINENO"' ERR
 
 if [[ $EUID -ne 0 ]]; then
@@ -260,7 +294,7 @@ docker compose version >/dev/null 2>&1 || { log_error "docker compose v2 require
 # Operator workflow (enforced by the check below):
 #
 #   $ tar -xzf ongrid-v<NEW>-linux-<arch>.tar.gz -C /tmp/
-#   $ cp /opt/ongrid/ongrid/.env  /tmp/ongrid-v<NEW>-linux-<arch>/.env
+#   $ cp /opt/ongrid/.env  /tmp/ongrid-v<NEW>-linux-<arch>/.env
 #   $ sudo ./upgrade.sh
 #
 # $ENV_FILE is therefore $SCRIPT_DIR/.env (the file the operator copied
@@ -274,8 +308,8 @@ ENV_FILE="$SCRIPT_DIR/.env"
 if [[ ! -f "$ENV_FILE" ]]; then
     log_error "no operator .env found at $ENV_FILE"
     log_error "before running upgrade.sh, copy your existing install's .env next to this script:"
-    log_error "    cp <install-dir>/ongrid/.env  $SCRIPT_DIR/.env"
-    log_error "  (replace <install-dir> with the parent of your ongrid/ install, e.g. /opt/ongrid)"
+    log_error "    cp <install-dir>/.env  $SCRIPT_DIR/.env"
+    log_error "  (replace <install-dir> with the ongrid install root, e.g. /opt/ongrid)"
     exit 1
 fi
 
@@ -286,30 +320,31 @@ fi
 #      that shipped ONGRID_DATA_DIR=/var/lib/ongrid keeps it pointed there
 #      until the operator manually moves it + edits .env (we don't move
 #      data across upgrades silently — it's the operator's call).
-#   3. built-in default ($PARENT_DIR/{ongrid,ongrid-web,data,logs}) when
+#   3. built-in default ($INSTALL_DIR/{ongrid-web,ongrid-app,data,logs}) when
 #      neither shell nor .env supplied. Pre-bind-mount releases' .env
 #      files don't carry ONGRID_INSTALL_DIR (it was implicit /opt/ongrid);
 #      the fallback keeps the upgrade from being a chicken-and-egg dance.
 # Resolving here (rather than via ${VAR:-...} at each callsite) means the
 # rest of the script can rely on a defined variable — `set -u` (line 5)
 # would otherwise abort with "unbound variable" before mkdir ever runs.
-for _k in ONGRID_INSTALL_DIR ONGRID_WEB_DIR ONGRID_DATA_DIR ONGRID_LOG_DIR; do
+for _k in ONGRID_INSTALL_DIR ONGRID_WEB_DIR ONGRID_APP_DIR ONGRID_DATA_DIR ONGRID_LOG_DIR; do
     if [[ -z "${!_k:-}" ]] && grep -qE "^${_k}=" "$ENV_FILE" 2>/dev/null; then
         printf -v "$_k" '%s' "$(grep -E "^${_k}=" "$ENV_FILE" | tail -n1 | cut -d= -f2- | tr -d '"')"
     fi
 done
 
-PARENT_DIR="${ONGRID_INSTALL_DIR:-/opt/ongrid}"
-INSTALL_DIR="$PARENT_DIR/ongrid"
-WEB_DIR="${ONGRID_WEB_DIR:-$PARENT_DIR/ongrid-web}"
-ONGRID_DATA_DIR="${ONGRID_DATA_DIR:-$PARENT_DIR/data}"
-ONGRID_LOG_DIR="${ONGRID_LOG_DIR:-$PARENT_DIR/logs}"
+INSTALL_DIR="${ONGRID_INSTALL_DIR:-/opt/ongrid}"
+WEB_DIR="${ONGRID_WEB_DIR:-$INSTALL_DIR/ongrid-web}"
+ONGRID_APP_DIR="${ONGRID_APP_DIR:-$INSTALL_DIR/ongrid-app}"
+ONGRID_DATA_DIR="${ONGRID_DATA_DIR:-$INSTALL_DIR/data}"
+ONGRID_LOG_DIR="${ONGRID_LOG_DIR:-$INSTALL_DIR/logs}"
 
 log_info "upgrading ongrid"
 log_info "  ENV_FILE         = $ENV_FILE"
-log_info "  PARENT_DIR       = $PARENT_DIR   (override via ONGRID_INSTALL_DIR)"
-log_info "  ongrid/          → $INSTALL_DIR"
-log_info "  ongrid-web/      → $WEB_DIR      (override via ONGRID_WEB_DIR)"
+log_info "  install root     = $INSTALL_DIR   (override via ONGRID_INSTALL_DIR)"
+log_info "  ongrid/          → $INSTALL_DIR   (compose + .env)"
+log_info "  ongrid-web/      → $WEB_DIR       (override via ONGRID_WEB_DIR)"
+log_info "  ongrid-app/      → $ONGRID_APP_DIR  (override via ONGRID_APP_DIR)"
 log_info "  data/            → $ONGRID_DATA_DIR  (override via ONGRID_DATA_DIR)"
 log_info "  logs/            → $ONGRID_LOG_DIR   (override via ONGRID_LOG_DIR)"
 
@@ -346,7 +381,7 @@ log_info "stopping stack"
 
 # ---------- host data dirs (bind-mount targets) ----------
 # ONGRID_DATA_DIR / ONGRID_LOG_DIR resolved in the install layout block
-# above — they fall back to $PARENT_DIR/data + $PARENT_DIR/logs (matching
+# above — they fall back to $INSTALL_DIR/data + $INSTALL_DIR/logs (matching
 # the new four-subdir default layout) only when unset. If the operator's
 # existing .env has them pointing at a legacy path (e.g. /var/lib/ongrid),
 # we honour it — moving data across upgrades is the operator's call.
@@ -498,7 +533,15 @@ chown -R 10001:10001   "$ONGRID_DATA_DIR/tempo"      2>/dev/null || true
 chown -R 472:472       "$ONGRID_DATA_DIR/grafana"    2>/dev/null || true
 chmod 755 "$ONGRID_DATA_DIR" "$ONGRID_LOG_DIR"
 
-export ONGRID_DATA_DIR ONGRID_LOG_DIR ONGRID_WEB_DIR ONGRID_INSTALL_DIR
+# Export so the docker compose subprocess inherits — compose substitutes
+# ${ONGRID_DATA_DIR:-...} + ${ONGRID_LOG_DIR:-...} + ${ONGRID_WEB_DIR:-...}
+# + ${ONGRID_APP_DIR:-...} into the bind paths at `up` time. ONGRID_INSTALL_DIR
+# is exported so a compose-derived (or operator-side) override can read the
+# resolved parent. Skipping ONGRID_APP_DIR here would mean an operator's
+# override in .env is honoured by upgrade.sh (extract destination) but NOT
+# by compose (mount source) — the two would drift and the ongrid container
+# would mount an empty dir from /opt/ongrid/ongrid-app.
+export ONGRID_DATA_DIR ONGRID_LOG_DIR ONGRID_WEB_DIR ONGRID_INSTALL_DIR ONGRID_APP_DIR
 
 # Overwrite shipped assets. Do NOT touch .env or certs/.
 log_info "copying new docker-compose.yml / frontier.yaml / nginx.conf / prometheus / edge / VERSION"
@@ -606,6 +649,31 @@ docker image inspect "ongrid:${NEW_VERSION}" >/dev/null 2>&1 || {
     log_error "ongrid:${NEW_VERSION} not present after docker load"
     exit 1
 }
+
+# ---------- extract baked-in image assets to host bind-mount sources ----------
+# Same contract as install.sh — see the long block comment in install.sh for
+# the full design rationale. Briefly: bind-mounts in docker-compose.yml point
+# at image-baked-in assets; without these calls the host bind-mounts are
+# empty and the running stack silently serves stale / empty content.
+mkdir -p "$ONGRID_APP_DIR"
+
+log_info "extracting ongrid runtime snapshot → $ONGRID_APP_DIR"
+if ! extract_image_dist "ongrid:${NEW_VERSION}" "$ONGRID_APP_DIR" \
+        /ongrid /skills /agents; then
+    log_error "ongrid runtime snapshot extraction failed."
+    log_error "the bind-mounts ${ONGRID_APP_DIR}/{ongrid,skills,agents} would be empty."
+    log_error "refusing to continue (host bind-mount is the single source of truth)."
+    exit 1
+fi
+
+log_info "extracting ongrid-web SPA dist → $WEB_DIR/html"
+if ! extract_image_dist "ongrid-web:${NEW_VERSION}" "$WEB_DIR/html" \
+        /usr/share/nginx/html; then
+    log_error "ongrid-web dist extraction failed."
+    log_error "the nginx bind-mount ${WEB_DIR}/html/html would be empty."
+    log_error "refusing to continue (host bind-mount is the single source of truth)."
+    exit 1
+fi
 
 # Bump ONGRID_VERSION in .env only.
 sed -i.bak -E "s|^ONGRID_VERSION=.*|ONGRID_VERSION=${NEW_VERSION}|" "$ENV_FILE"

@@ -265,6 +265,15 @@ services:
       # serve_page hosted reports — must survive `compose up` / image upgrades,
       # else a generated page 404s the moment the manager container is
       # recreated and its "open generated page" link goes dead.
+      # Runtime snapshot — install.sh / upgrade.sh extract /ongrid,
+      # /skills, /agents from the ongrid:${ONGRID_VERSION} image into
+      # ${ONGRID_APP_DIR}/{ongrid,skills,agents}/ via `docker create`
+      # + `docker cp`; bind-mount each sub-path read-only so an operator
+      # can hot-swap a binary or persona bundle on the host and
+      # `docker compose restart ongrid` picks it up.
+      - ${ONGRID_APP_DIR:-/opt/ongrid/ongrid-app}/ongrid:/ongrid:ro
+      - ${ONGRID_APP_DIR:-/opt/ongrid/ongrid-app}/skills:/skills:ro
+      - ${ONGRID_APP_DIR:-/opt/ongrid/ongrid-app}/agents:/agents:ro
       - ${ONGRID_DATA_DIR:-/opt/ongrid/data}/pages:/var/lib/ongrid/pages
     logging:
       driver: json-file
@@ -305,7 +314,7 @@ services:
       ongrid:
         condition: service_started
     volumes:
-      # All three bind sources live under $ONGRID_WEB_DIR (= <parent>/ongrid-web),
+      # All four bind sources live under $ONGRID_WEB_DIR (= <parent>/ongrid-web),
       # the dedicated dir for the ongrid-web container's host inputs:
       #   nginx.conf  → /etc/nginx/nginx.conf  (always refreshed from tarball;
       #                                          operators can also edit in place)
@@ -318,7 +327,14 @@ services:
       #                                          /usr/share/ongrid/edge-bundles)
       - ${ONGRID_WEB_DIR:-/opt/ongrid/ongrid-web}/nginx.conf:/etc/nginx/nginx.conf:ro
       - ${ONGRID_WEB_DIR:-/opt/ongrid/ongrid-web}/certs:/etc/nginx/certs:ro
-      - ${ONGRID_WEB_DIR:-/opt/ongrid}/html:/usr/share/nginx/html
+      - ${ONGRID_WEB_DIR:-/opt/ongrid/ongrid-web}/edge:/usr/share/nginx/html/edge
+      # ongrid-web SPA dist. install.sh / upgrade.sh extract /usr/share/nginx/html
+      # from the ongrid-web:${ONGRID_VERSION} image into ${ONGRID_WEB_DIR}/html/
+      # via `docker create` + `docker cp`; the function's basename bucket `html`
+      # lands the files under html/html/. Bind-mount that sub-path read-only so
+      # nginx serves the freshly-staged SPA and an operator can hot-swap by
+      # editing files on the host + `docker compose restart nginx`.
+      - ${ONGRID_WEB_DIR:-/opt/ongrid/ongrid-web}/html/html:/usr/share/nginx/html:ro
 
     ports:
       - "${ONGRID_HTTP_PORT:-443}:443"

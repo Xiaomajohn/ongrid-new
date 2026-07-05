@@ -244,6 +244,45 @@ extract_bin_from_image() {
     fi
     return $rc
 }
+
+# extract_image_dist: multi-source variant of extract_bin_from_image for
+# directories. Used at install / upgrade time (NOT in this package.sh path —
+# kept here for documentation + so install.sh / upgrade.sh can be sourced
+# against a shared lib if we ever consolidate). Multi-source means one call
+# can pull /ongrid + /skills + /agents in a single `docker create` round-trip
+# instead of three. dst/<basename(src-path)> is the landing bucket
+# (e.g. /ongrid → dst/ongrid, /usr/share/nginx/html → dst/html) so the
+# bind-mount source layout matches the source layout 1:1.
+extract_image_dist() {
+    # extract_image_dist <image-ref> <dst-dir> <src-path> [<src-path>...]
+    local image="$1" dst_dir="$2"; shift 2
+    local cid
+    cid=$(docker create --platform="$DOCKER_PLATFORM" "$image" 2>/dev/null) \
+        || cid=$(docker create "$image" 2>/dev/null)
+    if [[ -z "$cid" ]]; then
+        warn "could not create container for $image; skipping dst=$dst_dir"
+        return 1
+    fi
+    mkdir -p "$dst_dir"
+    local rc=0 src name sub
+    for src in "$@"; do
+        name="${src##*/}"            # /ongrid → ongrid, /usr/share/nginx/html → html
+        name="${name:-root}"         # bare '/' edge case
+        sub="${dst_dir}/${name}"
+        rm -rf "$sub"
+        mkdir -p "$sub"
+        if ! docker cp "$cid:$src/." "$sub/" 2>/dev/null; then
+            warn "failed to copy $src from $image into $sub"
+            rc=1
+            break
+        fi
+        chmod -R a+rX "$sub"
+        log "  + $src → $sub ($(find "$sub" -type f 2>/dev/null | wc -l) files)"
+    done
+    docker rm "$cid" >/dev/null 2>&1 || true
+    return $rc
+}
+
 extract_bin_from_image "${IMAGE_REF}"    "${STAGE_DIR}/bin/ongrid" \
     "/ongrid"
 extract_bin_from_image "${FRONTIER_REF}" "${STAGE_DIR}/bin/ongrid-frontier" \

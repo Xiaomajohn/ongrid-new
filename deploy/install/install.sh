@@ -582,21 +582,26 @@ docker compose version >/dev/null 2>&1 || { log_error "docker compose v2 not fou
 #                            destination (when the operator mounts it
 #                            into the docker log driver).
 #
-# Override semantics: exporting ONGRID_INSTALL_DIR changes the WHOLE tree
-# at once. Exporting just ONGRID_DATA_DIR / ONGRID_LOG_DIR repoints only
-# that subtree (e.g. /mnt/nfs/ongrid/data to put the TSDB on NFS) — the
-# install / web / logs subdirs still land under ONGRID_INSTALL_DIR.
-PARENT_DIR="${ONGRID_INSTALL_DIR:-/opt/ongrid}"
-INSTALL_DIR="$PARENT_DIR/ongrid"
-WEB_DIR="$PARENT_DIR/ongrid-web"
-ONGRID_DATA_DIR="${ONGRID_DATA_DIR:-$PARENT_DIR/data}"
-ONGRID_LOG_DIR="${ONGRID_LOG_DIR:-$PARENT_DIR/logs}"
-log_info "install root: $PARENT_DIR"
-log_info "  ongrid/      → $INSTALL_DIR  (compose + manager config)"
+# Install layout: ONGRID_INSTALL_DIR is the install root itself; every
+# subdir (compose + .env, nginx inputs, ongrid runtime snapshot, state,
+# logs) hangs off it directly. There is no separate PARENT_DIR/ongrid
+# nesting — operators shouldn't have to remember two levels of nesting,
+# and the install/web/data/logs dirs already share a parent in practice.
+# Override semantics: set the whole tree via ONGRID_INSTALL_DIR, or
+# repoint just one subtree via ONGRID_DATA_DIR / ONGRID_LOG_DIR /
+# ONGRID_WEB_DIR / ONGRID_APP_DIR.
+INSTALL_DIR="${ONGRID_INSTALL_DIR:-/opt/ongrid}"
+WEB_DIR="${ONGRID_WEB_DIR:-$INSTALL_DIR/ongrid-web}"
+ONGRID_APP_DIR="${ONGRID_APP_DIR:-$INSTALL_DIR/ongrid-app}"
+ONGRID_DATA_DIR="${ONGRID_DATA_DIR:-$INSTALL_DIR/data}"
+ONGRID_LOG_DIR="${ONGRID_LOG_DIR:-$INSTALL_DIR/logs}"
+log_info "install root: $INSTALL_DIR"
+log_info "  ongrid/      → $INSTALL_DIR  (compose + .env + VERSION)"
 log_info "  ongrid-web/  → $WEB_DIR      (nginx / ongrid-web inputs)"
+log_info "  ongrid-app/  → $ONGRID_APP_DIR  (ongrid runtime snapshot: /ongrid, /skills, /agents from the ongrid image)"
 log_info "  data/        → $ONGRID_DATA_DIR  (component state)"
 log_info "  logs/        → $ONGRID_LOG_DIR   (process stdout)"
-mkdir -p "$INSTALL_DIR" "$WEB_DIR" "$ONGRID_DATA_DIR" "$ONGRID_LOG_DIR"
+mkdir -p "$INSTALL_DIR" "$WEB_DIR" "$ONGRID_APP_DIR" "$ONGRID_DATA_DIR" "$ONGRID_LOG_DIR"
 
 # ---------- copy assets ----------
 log_info "copying assets into $INSTALL_DIR"
@@ -676,8 +681,8 @@ fi
 
 # ---------- host data dirs (bind-mount targets) ----------
 # ONGRID_DATA_DIR / ONGRID_LOG_DIR were already resolved in the install
-# layout block above (fall back to $PARENT_DIR/data + $PARENT_DIR/logs so
-# everything sits under the operator's parent). All stateful services
+# layout block above (fall back to $INSTALL_DIR/data + $INSTALL_DIR/logs so
+# everything sits under the operator's install root). All stateful services
 # bind-mount to host paths instead of docker named volumes so operators
 # can back up / inspect / replace files without docker gymnastics, and
 # the storage can be redirected at a customer filesystem (NFS / iSCSI /
@@ -768,9 +773,13 @@ chmod 755 "$ONGRID_DATA_DIR" "$ONGRID_LOG_DIR"
 
 # Export so the docker compose subprocess inherits — compose substitutes
 # ${ONGRID_DATA_DIR:-...} + ${ONGRID_LOG_DIR:-...} + ${ONGRID_WEB_DIR:-...}
-# into the bind paths at up time. ONGRID_INSTALL_DIR is exported so a
-# compose-derived (or operator-side) override can read the resolved parent.
-export ONGRID_DATA_DIR ONGRID_LOG_DIR ONGRID_WEB_DIR ONGRID_INSTALL_DIR
+# + ${ONGRID_APP_DIR:-...} into the bind paths at up time. ONGRID_INSTALL_DIR
+# is exported so a compose-derived (or operator-side) override can read the
+# resolved parent. Skipping ONGRID_APP_DIR here would mean an operator's
+# override in .env is honoured by install.sh (extract destination) but NOT
+# by compose (mount source) — the two would drift and the ongrid container
+# would mount an empty dir from /opt/ongrid/ongrid-app.
+export ONGRID_DATA_DIR ONGRID_LOG_DIR ONGRID_WEB_DIR ONGRID_INSTALL_DIR ONGRID_APP_DIR
 
 # ---------- nginx config + TLS certs (ADR-008) ----------
 # nginx.conf + certs/ + edge/ all live under $WEB_DIR (= <parent>/ongrid-web/),
@@ -828,6 +837,36 @@ if ! docker image inspect "ongrid:${VERSION_FROM_FILE}" >/dev/null 2>&1; then
 fi
 log_info "ongrid:${VERSION_FROM_FILE} image ready"
 
+# ---------- extract baked-in image assets to host bind-mount sources ----------
+# Bind-mounts in docker-compose.yml that point at image-baked-in assets
+# (`/usr/share/nginx/html` in ongrid-web + `/ongrid`, `/skills`, `/agents`
+# in ongrid) have NO content on the host unless we copy it there. We use
+# `docker create` + `docker cp` so the install/upgrade contract is "host
+# bind-mount = single source of truth"; the image's baked-in copy becomes
+# a literal read-only fallback that nothing in the running stack ever reads.
+#
+# extract_image_dist is defined further down (next to gen_secret). Each call
+# below hard-fails (exit 1) on any failure — there is no fallback. If a
+# future change relaxes this, audit the bind-mount contract first: nginx
+# + ongrid will silently serve stale / empty content otherwise.
+log_info "extracting ongrid runtime snapshot → $ONGRID_APP_DIR"
+if ! extract_image_dist "ongrid:${VERSION_FROM_FILE}" "$ONGRID_APP_DIR" \
+        /ongrid /skills /agents; then
+    log_error "ongrid runtime snapshot extraction failed."
+    log_error "the bind-mounts ${ONGRID_APP_DIR}/{ongrid,skills,agents} would be empty."
+    log_error "refusing to continue (host bind-mount is the single source of truth)."
+    exit 1
+fi
+
+log_info "extracting ongrid-web SPA dist → $WEB_DIR/html"
+if ! extract_image_dist "ongrid-web:${VERSION_FROM_FILE}" "$WEB_DIR/html" \
+        /usr/share/nginx/html; then
+    log_error "ongrid-web dist extraction failed."
+    log_error "the nginx bind-mount ${WEB_DIR}/html/html would be empty."
+    log_error "refusing to continue (host bind-mount is the single source of truth)."
+    exit 1
+fi
+
 # ---------- secret generator ----------
 gen_secret() {
     local len="${1:-24}"
@@ -842,6 +881,44 @@ gen_secret() {
         out=$(hexdump -n 32 -e '"%02x"' /dev/urandom | cut -c1-"$len")
     fi
     printf '%s' "$out"
+}
+
+# extract_image_dist <image-ref> <dst-dir> <src-path> [<src-path>...]
+# Extracts one or more baked-in directories from <image-ref> into <dst-dir>
+# via `docker create` + `docker cp`. Each <src-path> inside the image lands
+# at <dst-dir>/<basename(src-path)> so the bind-mount source layout mirrors
+# the source layout 1:1 (/ongrid → dst/ongrid, /usr/share/nginx/html →
+# dst/html, …). Fails fast on any individual cp — caller decides whether
+# to `exit 1` or continue. chmod -R a+rX lets the nginx worker (uid nginx)
+# and any non-root mount consumer read the files; for the ongrid binary
+# itself the conditional-X is harmless because the manager runs as
+# nonroot (uid 65532) and only the X bit matters for execution.
+extract_image_dist() {
+    local image="$1" dst_dir="$2"; shift 2
+    local tmp_name="ongrid-extract-$$-$(date +%s%N)"
+    docker rm -f "$tmp_name" >/dev/null 2>&1 || true
+    if ! docker create --name "$tmp_name" "$image" >/dev/null 2>&1; then
+        log_error "failed to create extract container from $image"
+        return 1
+    fi
+    mkdir -p "$dst_dir"
+    local rc=0 src name sub
+    for src in "$@"; do
+        name="${src##*/}"            # /ongrid → ongrid, /usr/share/nginx/html → html
+        name="${name:-root}"         # bare '/' edge case
+        sub="${dst_dir}/${name}"
+        rm -rf "$sub"
+        mkdir -p "$sub"
+        if ! docker cp "$tmp_name:$src/." "$sub/" 2>/dev/null; then
+            log_error "failed to copy $src from $image into $sub"
+            rc=1
+            break
+        fi
+        chmod -R a+rX "$sub"
+        log_info "  + $src → $sub ($(find "$sub" -type f 2>/dev/null | wc -l) files)"
+    done
+    docker rm -f "$tmp_name" >/dev/null 2>&1 || true
+    return $rc
 }
 
 # ---------- .env: create or reuse ----------
@@ -1080,9 +1157,10 @@ else
     API_URL="https://${HOST_HINT}:${ONGRID_HTTP_PORT}/api/v1"
 fi
 
-echo "${C_BOLD}Install root:${C_RESET}     $PARENT_DIR"
-echo "${C_BOLD}  ongrid/      ${C_RESET} $INSTALL_DIR"
+echo "${C_BOLD}Install root:${C_RESET}     $INSTALL_DIR"
+echo "${C_BOLD}  ongrid/      ${C_RESET} $INSTALL_DIR  (compose + .env)"
 echo "${C_BOLD}  ongrid-web/  ${C_RESET} $WEB_DIR"
+echo "${C_BOLD}  ongrid-app/  ${C_RESET} $ONGRID_APP_DIR"
 echo "${C_BOLD}  data/        ${C_RESET} $ONGRID_DATA_DIR"
 echo "${C_BOLD}  logs/        ${C_RESET} $ONGRID_LOG_DIR"
 echo "${C_BOLD}Version:${C_RESET}         ${VERSION_FROM_FILE}"
