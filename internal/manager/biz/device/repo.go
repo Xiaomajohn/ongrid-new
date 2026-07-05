@@ -5,6 +5,7 @@ package device
 
 import (
 	"context"
+	"time"
 
 	model "github.com/ongridio/ongrid/internal/manager/model/device"
 )
@@ -65,6 +66,22 @@ type Repo interface {
 	// UpdateNameDescription updates operator-editable display fields.
 	UpdateNameDescription(ctx context.Context, id uint64, name, description string) error
 
+	// SetSSHCredentials writes the SSH credentials block for a device.
+	// Implementing both password and key in one call lets the UI
+	// "set both" without a follow-up request. Empty user clears the
+	// block; an empty auth kind rejected here is the caller's bug.
+	SetSSHCredentials(ctx context.Context, id uint64, creds SSHCredentials) error
+
+	// ClearSSHCredentialsField wipes one of the SSH secret fields so the
+	// operator can rotate just the password (or just the key) without
+	// touching the other. Kind must be "password" or "key".
+	ClearSSHCredentialsField(ctx context.Context, id uint64, kind string) error
+
+	// SetSSHCredentialsIAW — installed-agent-written fields (last-seen,
+	// last-error, host-key). The agent emits these on every SSH probe;
+	// the web layer never reads them, the install worker + audit page do.
+	SetSSHCredentialsIAW(ctx context.Context, id uint64, iaw SSHCredentialsIAW) error
+
 	// SetNodeID writes Device.NodeID — the link to the topology
 	// `nodes` table. Called from the edge register flow (via NodeMirror)
 	// after a fresh device is created or from the topology migration
@@ -98,6 +115,35 @@ type Repo interface {
 	// Returns the number of rows flipped. Run periodically by the
 	// presence reconciler.
 	ReconcileOfflineOrphans(ctx context.Context) (int64, error)
+
+	// TouchSSHSuccess 标记 SSH 最近成功时间并清空 last_error。
+	// 由 SSH dialer 在一次成功 connect/auth 之后调用。
+	TouchSSHSuccess(ctx context.Context, id uint64) error
+
+	// TouchSSHError 记录 SSH 最近失败时间 + 错误信息（截断 512 字符）。
+	// errMsg 在 store 层会被截断到 500 字符以适配 VARCHAR(512) 列。
+	TouchSSHError(ctx context.Context, id uint64, errMsg string) error
+}
+
+// SSHCredentials is the operator-supplied block. Plaintext by design —
+// see the comment on devicemodel.Device.SSHHost. SSHPassword / SSHKey
+// may be empty when the operator only wants to set one; the usecase
+// rejects empty user + empty kind.
+type SSHCredentials struct {
+	Host     string // optional default host (agent will fall back to "127.0.0.1" on the local edge)
+	Port     int    // 0 → default 22
+	User     string // required
+	AuthKind string // "password" | "key"
+	Password string // set when AuthKind=="password"
+	Key      string // set when AuthKind=="key"
+	HostKey  string // optional expected host-key fingerprint
+}
+
+// SSHCredentialsIAW is the agent-written tail of the SSH block (kept
+// here so the repo contract doesn't grow per-field setters).
+type SSHCredentialsIAW struct {
+	LastSeenAt *time.Time
+	LastError  string
 }
 
 // HostFacts is the subset of Device columns updated on register.

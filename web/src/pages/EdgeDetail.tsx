@@ -21,9 +21,11 @@ import {
 } from '@/api/integrations';
 import { ApiError } from '@/api/client';
 import { getDevice } from '@/api/devices';
+import { DeviceMetricsPanels } from '@/components/DeviceMetricsPanels';
+import { DeviceTopology } from '@/components/DeviceTopology';
 import { tr as trInline, useI18n } from '@/i18n/locale';
 
-type Tab = 'plugins' | 'host' | 'meta';
+type Tab = 'plugins' | 'host' | 'metrics' | 'topology' | 'meta';
 
 export default function EdgeDetailPage() {
   const { tr } = useI18n();
@@ -128,6 +130,20 @@ export default function EdgeDetailPage() {
         <div className="flex items-center gap-1 border-b border-zinc-800 px-6">
           <TabBtn active={tab === 'plugins'} onClick={() => setTab('plugins')} label={tr('插件', 'Plugins')} />
           <TabBtn active={tab === 'host'} onClick={() => setTab('host')} label={tr('主机', 'Host')} />
+          <TabBtn
+            active={tab === 'metrics'}
+            onClick={() => setTab('metrics')}
+            label={tr('指标', 'Metrics')}
+            disabled={edge?.device_id == null}
+            title={edge?.device_id == null ? tr('此 edge 未绑定设备', 'Edge not bound to a device') : undefined}
+          />
+          <TabBtn
+            active={tab === 'topology'}
+            onClick={() => setTab('topology')}
+            label={tr('拓扑', 'Topology')}
+            disabled={edge?.device_id == null}
+            title={edge?.device_id == null ? tr('此 edge 未绑定设备', 'Edge not bound to a device') : undefined}
+          />
           <TabBtn active={tab === 'meta'} onClick={() => setTab('meta')} label={tr('元数据', 'Metadata')} />
         </div>
 
@@ -151,6 +167,14 @@ export default function EdgeDetailPage() {
 
           {tab === 'plugins' && edge && <PluginsTab edgeId={edge.id} />}
 
+          {tab === 'metrics' && edge?.device_id != null && (
+            <DeviceMetricsPanels deviceId={String(edge.device_id)} />
+          )}
+
+          {tab === 'topology' && edge?.device_id != null && (
+            <DeviceTopology deviceId={edge.device_id} />
+          )}
+
           {tab === 'meta' && edge && (
             <JsonCard
               title={tr('元数据', 'Metadata')}
@@ -159,6 +183,7 @@ export default function EdgeDetailPage() {
                 name: edge.name,
                 status: edge.status,
                 access_key_id: edge.access_key_id,
+                device_id: edge.device_id,
                 last_seen_at: edge.last_seen_at,
                 created_at: edge.created_at,
                 updated_at: edge.updated_at,
@@ -175,21 +200,28 @@ function TabBtn({
   active,
   onClick,
   label,
+  disabled,
+  title,
 }: {
   active: boolean;
   onClick(): void;
   label: string;
+  disabled?: boolean;
+  title?: string;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
+      title={title}
       aria-pressed={active}
       className={cn(
         'border-b-2 px-3 py-2.5 text-sm transition-colors',
         active
           ? 'border-zinc-100 text-zinc-100'
           : 'border-transparent text-zinc-400 hover:text-zinc-200',
+        disabled && 'cursor-not-allowed opacity-50 hover:text-zinc-400',
       )}
     >
       {label}

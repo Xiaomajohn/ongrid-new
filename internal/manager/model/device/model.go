@@ -86,6 +86,22 @@ type Device struct {
 	Online     bool       `gorm:"not null;default:false"`
 	LastSeenAt *time.Time `gorm:"column:last_seen_at"`
 
+	// SSH credentials (plaintext, internal-only system). The web SSH +
+	// SFTP + one-click install flows read these directly (no secret-box
+	// envelope) — ongrid is an internal ops platform and the trade-off
+	// (operator UX vs envelope crypto) is deliberately in favour of UX.
+	// Response shapes must still scrub these fields before serialization;
+	// the wire contract is documented in server/device/credentials.go.
+	SSHHost       string     `gorm:"size:255;column:ssh_host"`
+	SSHPort       int        `gorm:"not null;default:22;column:ssh_port"`
+	SSHUser       string     `gorm:"size:64;column:ssh_user"`
+	SSHAuthKind   string     `gorm:"size:16;not null;default:'password';column:ssh_auth_kind"`
+	SSHPassword   string     `gorm:"size:255;column:ssh_password"`
+	SSHKey        string     `gorm:"type:mediumtext;column:ssh_key"`
+	SSHHostKey    string     `gorm:"type:text;column:ssh_host_key"`
+	SSHLastSeenAt *time.Time `gorm:"column:ssh_last_seen_at"`
+	SSHLastError  string     `gorm:"size:512;column:ssh_last_error"`
+
 	// NodeID links this device to its row in the `nodes` table.
 	// Nullable during the migration window (legacy rows backfilled by
 	// topology Migrate; new rows get it written by the edge register

@@ -6,6 +6,8 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -297,6 +299,127 @@ func (r *Repo) Count(ctx context.Context) (int64, error) {
 // Delete soft-deletes a device by id.
 func (r *Repo) Delete(ctx context.Context, id uint64) error {
 	res := r.db.WithContext(ctx).Delete(&model.Device{}, id)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return errs.ErrNotFound
+	}
+	return nil
+}
+
+// SetSSHCredentials writes the operator-supplied SSH block. Uses
+// Updates (not Save) so columns not in the map keep their existing
+// value — preserving e.g. the IAW half (last_seen_at, last_error) the
+// edge writes when it probes the host. RowsAffected==0 == device gone.
+func (r *Repo) SetSSHCredentials(ctx context.Context, id uint64, c biz.SSHCredentials) error {
+	host := strings.TrimSpace(c.Host)
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	authKind := c.AuthKind
+	if authKind != "password" && authKind != "key" {
+		authKind = "password"
+	}
+	res := r.db.WithContext(ctx).Model(&model.Device{}).Where("id = ?", id).Updates(map[string]any{
+		"ssh_host":      host,
+		"ssh_port":      c.Port,
+		"ssh_user":      strings.TrimSpace(c.User),
+		"ssh_auth_kind": authKind,
+		// Caller must have validated: value matches the kind.
+		"ssh_password": c.Password,
+		"ssh_key":      c.Key,
+		"ssh_host_key": strings.TrimSpace(c.HostKey),
+	})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return errs.ErrNotFound
+	}
+	return nil
+}
+
+// ClearSSHCredentialsField wipes one of the secret columns. Non-secret
+// columns (host/port/user/host_key) are untouched on purpose — the
+// operator may be rotating one password while leaving the rest.
+func (r *Repo) ClearSSHCredentialsField(ctx context.Context, id uint64, kind string) error {
+	col := ""
+	switch kind {
+	case "password":
+		col = "ssh_password"
+	case "key":
+		col = "ssh_key"
+	default:
+		return fmt.Errorf("%w: kind must be password or key", errs.ErrInvalid)
+	}
+	res := r.db.WithContext(ctx).Model(&model.Device{}).Where("id = ?", id).Update(col, "")
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return errs.ErrNotFound
+	}
+	return nil
+}
+
+// SetSSHCredentialsIAW is the probe-feedback half of the SSH block.
+// Both fields are optional: nil LastSeenAt skips the timestamp, but
+// we always write LastError (an empty string means "last probe had no
+// error" and clears the previous error column).
+func (r *Repo) SetSSHCredentialsIAW(ctx context.Context, id uint64, iaw biz.SSHCredentialsIAW) error {
+	updates := map[string]any{
+		"ssh_last_error": iaw.LastError,
+	}
+	if iaw.LastSeenAt != nil {
+		updates["ssh_last_seen_at"] = *iaw.LastSeenAt
+	}
+	res := r.db.WithContext(ctx).Model(&model.Device{}).Where("id = ?", id).Updates(updates)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return errs.ErrNotFound
+	}
+	return nil
+}
+
+// TouchSSHSuccess stamps ssh_last_seen_at and clears ssh_last_error.
+// Cheap, idempotent; called on every successful SSH dial by the
+// devicessh package. RowsAffected==0 (device gone) is reported as
+// ErrNotFound so the dialer can distinguish "logging failed because the
+// device was just deleted" from "logging failed because the DB is sick"
+// — the former is a normal race, the latter deserves attention.
+func (r *Repo) TouchSSHSuccess(ctx context.Context, id uint64) error {
+	now := time.Now().UTC()
+	res := r.db.WithContext(ctx).Model(&model.Device{}).Where("id = ?", id).Updates(map[string]any{
+		"ssh_last_seen_at": now,
+		"ssh_last_error":   "",
+	})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return errs.ErrNotFound
+	}
+	return nil
+}
+
+// TouchSSHError stamps ssh_last_seen_at and stores the (truncated)
+// error message in ssh_last_error. errMsg is cut to 500 chars here so
+// callers don't have to repeat the cap at every call site — the column
+// is VARCHAR(512) so a 500-char payload always fits even with some
+// DB-side growth. RowsAffected==0 is reported as ErrNotFound for the
+// same reason as TouchSSHSuccess.
+func (r *Repo) TouchSSHError(ctx context.Context, id uint64, errMsg string) error {
+	if len(errMsg) > 500 {
+		errMsg = errMsg[:500]
+	}
+	now := time.Now().UTC()
+	res := r.db.WithContext(ctx).Model(&model.Device{}).Where("id = ?", id).Updates(map[string]any{
+		"ssh_last_seen_at": now,
+		"ssh_last_error":   errMsg,
+	})
 	if res.Error != nil {
 		return res.Error
 	}

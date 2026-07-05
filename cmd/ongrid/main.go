@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	neturl "net/url"
@@ -50,6 +51,7 @@ import (
 	"github.com/ongridio/ongrid/internal/pkg/logger"
 	"github.com/ongridio/ongrid/internal/pkg/runner"
 	"github.com/ongridio/ongrid/internal/pkg/secretbox"
+	"github.com/ongridio/ongrid/internal/pkg/tenantctx"
 	"github.com/ongridio/ongrid/internal/pkg/workspace"
 
 	"encoding/json"
@@ -80,7 +82,9 @@ import (
 	iamservice "github.com/ongridio/ongrid/internal/iam/service"
 
 	managerbizdevice "github.com/ongridio/ongrid/internal/manager/biz/device"
+	managerbizdevicessh "github.com/ongridio/ongrid/internal/manager/biz/devicessh"
 	managerbizedge "github.com/ongridio/ongrid/internal/manager/biz/edge"
+	managerbizinstalljob "github.com/ongridio/ongrid/internal/manager/biz/installjob"
 	managerbizmetric "github.com/ongridio/ongrid/internal/manager/biz/metric"
 	managerbizpromwrite "github.com/ongridio/ongrid/internal/manager/biz/promwrite"
 	managerbiztopology "github.com/ongridio/ongrid/internal/manager/biz/topology"
@@ -145,9 +149,11 @@ import (
 	managerserverapproval "github.com/ongridio/ongrid/internal/manager/server/approval"
 	managerserveraudit "github.com/ongridio/ongrid/internal/manager/server/audit"
 	managerserverdevice "github.com/ongridio/ongrid/internal/manager/server/device"
+	managerserverdevicessh "github.com/ongridio/ongrid/internal/manager/server/devicessh"
 	managerserveredge "github.com/ongridio/ongrid/internal/manager/server/edge"
 	managerserveredgeauth "github.com/ongridio/ongrid/internal/manager/server/edgeauth"
 	managerserverflow "github.com/ongridio/ongrid/internal/manager/server/flow"
+	managerserverinstalljob "github.com/ongridio/ongrid/internal/manager/server/installjob"
 	managerserverintegration "github.com/ongridio/ongrid/internal/manager/server/integration"
 	managerserverlogs "github.com/ongridio/ongrid/internal/manager/server/logs"
 	managerservermarketplace "github.com/ongridio/ongrid/internal/manager/server/marketplace"
@@ -793,6 +799,129 @@ func main() {
 			slog.String("dir", edgeBundleDir), slog.Any("err", err))
 	}
 	deviceHandler := managerserverdevice.NewHandler(deviceUC)
+	// deviceHandler reads edge-online reachability for the SSH-info
+	// endpoint. The biz/edge junction repo (edgeDeviceRepo here, the
+	// same dependency edgeUC uses) satisfies the narrow interface
+	// via a 4-line adapter below. nil-safe — endpoint still works
+	// without it, just reports edge_online=false.
+	deviceHandler.SetEdgeLookup(deviceEdgeLookupAdapter{links: edgeDeviceRepo})
+	_ = deviceHandler // keep import alive in dev where the line above is the only reference
+
+	// D1-Wire: per-device SSH + SFTP + install-job routes. A3/A4 biz
+	// layers landed — wire the real concretes instead of the A5 stubs.
+	//
+	// The devicessh.Router picks tunnel vs direct per (Device, Purpose);
+	// the SSHInstaller (below) reuses the same router so install
+	// ALWAYS routes via direct (Router enforces this for
+	// PurposeInstallEdge).
+	//
+	// `cfg.ServerEdgeAddr` / `cfg.ServerHTTPAddr` don't exist in the
+	// current config struct. Derive them from `cfg.PublicURL` when set
+	// (the canonical externally-reachable manager URL), otherwise fall
+	// back to ONGRID_INSTALL_EDGE_ADDR / ONGRID_INSTALL_HTTP_ADDR env
+	// overrides, otherwise leave empty (the SSHInstaller enforces
+	// non-empty so install jobs fail fast rather than reach the remote
+	// with a broken script call).
+	installEdgeAddr := os.Getenv("ONGRID_INSTALL_EDGE_ADDR")
+	installHTTPAddr := os.Getenv("ONGRID_INSTALL_HTTP_ADDR")
+	if installEdgeAddr == "" || installHTTPAddr == "" {
+		if cfg.PublicURL != "" {
+			if installEdgeAddr == "" {
+				installEdgeAddr = cfg.PublicURL
+			}
+			if installHTTPAddr == "" {
+				installHTTPAddr = cfg.PublicURL
+			}
+		}
+	}
+	// TODO(D1-Wire+config): add explicit `ServerEdgeAddr` / `ServerHTTPAddr`
+	// fields to internal/pkg/config.Config once the install-worker
+	// feature graduates from "wire it up" to "operator-facing knob".
+	// For now the install script inherits the manager's PublicURL
+	// when set; deployments that need distinct tunnel-vs-http
+	// hostnames set the env overrides above.
+
+	// hostKeySaver persists the wire-encoded host key into the device
+	// row on first-connect (ToFU). v1 wires a no-op so a future deploy
+	// can swap in deviceUC.SetSSHCredentialsIAW (already exposed on
+	// devicebiz.Repo) without touching the dialer.
+	hostKeySaver := func(host string, port int, wireKey string) error {
+		_ = host
+		_ = port
+		_ = wireKey
+		return nil
+	}
+
+	// streamersForTunnel bridges *managersvcfb.Client.OpenStream(ctx, edgeID)
+	// → devicessh.TunnelStreamOpener.OpenTunnelStream(ctx, edgeID, target).
+	// The target string is ignored today (frontierbound's OpenStream
+	// doesn't yet propagate a Meta target; the edge default
+	// 127.0.0.1:22 is what tunnelTarget computes too).
+	streamersForTunnel := streamerForTunnelAdapter{fb: fbClient}
+
+	// linksForTunnel satisfies devicessh.LinksLookup /
+	// devicessh.TunnelEdgeResolver with *devicebiz.Usecase
+	// (LookupEdgeForDevice). Already a method on the existing usecase.
+	linksForTunnel := linksLookupAdapter{uc: deviceUC}
+
+	// edgesForStatus satisfies devicessh.EdgesGet by projecting
+	// (*edgebiz.Usecase.Get).Status onto a string.
+	edgesForStatus := edgesGetAdapter{edgeUC: edgeUC}
+
+	sshRouter := managerbizdevicessh.NewRouter(
+		managerbizdevicessh.NewDirectDialer(10*time.Second).WithHostKeySaver(hostKeySaver),
+		managerbizdevicessh.NewTunnelDialer(
+			streamersForTunnel,
+			linksForTunnel,
+			managerbizdevicessh.SSHTimeout{
+				Connect:   10 * time.Second,
+				Handshake: 10 * time.Second,
+			},
+		),
+		linksForTunnel,
+		edgesForStatus,
+	)
+
+	pathGuard := managerbizdevicessh.NewPathGuard()
+	auditLogger := managerbizdevicessh.NewAuditLogger(db)
+
+	sftpSvc := managerbizdevicessh.NewSFTPService(sshRouter, pathGuard, auditLogger)
+	devicesshShellSvc := managerbizdevicessh.NewShellService(sshRouter, deviceRepo, log)
+
+	// --- Install job worker + runner ---
+	installScript := readInstallScript(log)
+	issuer := managerbizedge.NewInstallEdgeIssuer(edgeUC, log)
+	softDeleter := managerbizedge.NewSSHBulkSoftDelete(db, log)
+	presence := managerbizedge.NewDBEdgePresence(db, log)
+	installer := managerbizinstalljob.NewSSHInstaller(
+		sshRouter,
+		installScript,
+		installEdgeAddr,
+		installHTTPAddr,
+		log,
+	)
+
+	installjobRepo := managerbizinstalljob.NewRepo(db)
+	worker := managerbizinstalljob.NewWorker(
+		installjobRepo,
+		issuer,
+		softDeleter,
+		installer,
+		presence,
+		managerbizinstalljob.WorkerConfig{
+			ServerEdgeAddr: installEdgeAddr,
+			ServerHTTPAddr: installHTTPAddr,
+			// Timeout / WaitOnline zero → default (10m / 20s).
+		},
+		log,
+	)
+	installRunner := managerbizinstalljob.NewRunner(worker, 2, log)
+	installRunner.Start(rootCtx)
+	defer installRunner.Stop()
+
+	devicesshShellHandler := managerserverdevicessh.NewShellHandler(devicesshShellAdapter{svc: devicesshShellSvc}, log.With(slog.String("comp", "devicessh")))
+	devicesshFSHandler := managerserverdevicessh.NewFSHandler(devicesshFSAdapter{svc: sftpSvc, repo: deviceRepo}, log.With(slog.String("comp", "devicessh-fs")))
+	installJobHandler := managerserverinstalljob.NewHandler(installjobUsecaseAdapter{repo: installjobRepo}, log.With(slog.String("comp", "installjob")))
 
 	// topology layer: nodes / relations / relation types. PR-1
 	// stands up CRUD + 6 built-in relation type seeds; later PRs hook
@@ -2267,6 +2396,12 @@ func main() {
 			edgeHandler.Register(protected)
 			webshellHandler.Register(protected)
 			deviceHandler.Register(protected)
+			// A5 per-device SSH / SFTP / install-job routes — same
+			// auth surface as webshell (uses the per-device token
+			// model the SPA already understands).
+			devicesshShellHandler.Register(protected)
+			devicesshFSHandler.Register(protected)
+			installJobHandler.Register(protected)
 			topologyHandler.Register(protected)
 			metricHandler.Register(protected)
 			monitorHandler.Register(protected)
@@ -3487,6 +3622,329 @@ type hostDeviceResolverAdapter struct {
 
 func (a hostDeviceResolverAdapter) ResolveHostDeviceID(ctx context.Context, edgeID uint64) (uint64, error) {
 	return a.repo.LookupHostDevice(ctx, edgeID)
+}
+
+// deviceEdgeLookupAdapter bridges biz/edge.Repo (the persistence
+// handle wired above as edgeRepo) to the narrow managerserverdevice.
+// EdgeLookup. The server-side handler only cares about ID + Status
+// per edge, so the adapter joins across the junction table via the
+// edge repo's List(DeviceID=…) filter and projects the two columns.
+type deviceEdgeLookupAdapter struct {
+	repo managerbizedge.Repo
+}
+
+func (a deviceEdgeLookupAdapter) ListEdgesForDevice(ctx context.Context, deviceID uint64) ([]managerserverdevice.EdgeLink, error) {
+	rows, err := a.repo.List(ctx, managerbizedge.ListFilter{DeviceID: &deviceID, Limit: 1000})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]managerserverdevice.EdgeLink, 0, len(rows))
+	for _, e := range rows {
+		out = append(out, managerserverdevice.EdgeLink{ID: e.ID, Status: e.Status})
+	}
+	return out, nil
+}
+
+// streamerForTunnelAdapter bridges *managersvcfb.Client.OpenStream to
+// devicessh.TunnelStreamOpener. The extra `target` argument is ignored
+// today — frontierbound's OpenStream does not yet propagate a Meta
+// target; the edge side defaults the dial to 127.0.0.1:22 which matches
+// devicessh.tunnelTarget's "" branch.
+type streamerForTunnelAdapter struct {
+	fb *managersvcfb.Client
+}
+
+func (a streamerForTunnelAdapter) OpenTunnelStream(ctx context.Context, edgeID uint64, target string) (io.ReadWriteCloser, error) {
+	_ = target // reserved for a future fbsvc.Meta target descriptor
+	return a.fb.OpenStream(ctx, edgeID)
+}
+
+// linksLookupAdapter satisfies devicessh.LinksLookup /
+// devicessh.TunnelEdgeResolver with the existing *managerbizdevice.Usecase
+// (its LookupEdgeForDevice matches the contract 1:1).
+type linksLookupAdapter struct {
+	uc *managerbizdevice.Usecase
+}
+
+func (a linksLookupAdapter) LookupEdgeForDevice(ctx context.Context, deviceID uint64) (uint64, error) {
+	return a.uc.LookupEdgeForDevice(ctx, deviceID)
+}
+
+// edgesGetAdapter satisfies devicessh.EdgesGet by projecting
+// (*managerbizedge.Usecase.Get).Status onto a string. The router reads
+// the string to decide tunnel-vs-direct.
+type edgesGetAdapter struct {
+	edgeUC *managerbizedge.Usecase
+}
+
+func (a edgesGetAdapter) Get(ctx context.Context, id uint64) (string, error) {
+	e, err := a.edgeUC.Get(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	return e.Status, nil
+}
+
+// devicesshShellAdapter bridges the biz-side ShellService (which exposes
+// biz/devicessh.ShellOpts / biz/devicessh.ShellHandle) to the server-side
+// DevicesshService contract. The two parallel types are structurally
+// identical — a manual field copy on the request and a direct return on
+// the handle is enough because Go interface satisfaction is structural.
+type devicesshShellAdapter struct {
+	svc *managerbizdevicessh.ShellService
+}
+
+func (a devicesshShellAdapter) OpenShell(ctx context.Context, deviceID uint64, user *tenantctx.Tenant, opts managerserverdevicessh.ShellOpts) (managerserverdevicessh.ShellHandle, error) {
+	return a.svc.OpenShell(ctx, deviceID, user, managerbizdevicessh.ShellOpts{
+		Cols:    opts.Cols,
+		Rows:    opts.Rows,
+		Term:    opts.Term,
+		SSHUser: opts.SSHUser,
+		SSHPass: opts.SSHPass,
+	})
+}
+
+// devicesshFSAdapter bridges the biz-side SFTPService (which takes a
+// *device.Device and an io.Writer for read paths) to the server-side
+// SFTPService contract (which takes a deviceID and returns io.ReadCloser).
+// The biz layer's Entry / Stat wire shapes differ from the server
+// layer's Entry, so each method does an explicit translation. Mtime is
+// projected from the biz-side unix seconds onto an RFC3339 string for
+// the SPA; Mode is rendered as a 4-char zero-padded octal string.
+type devicesshFSAdapter struct {
+	svc  *managerbizdevicessh.SFTPService
+	repo managerbizdevice.Repo
+}
+
+func (a devicesshFSAdapter) List(ctx context.Context, deviceID uint64, path string, userID uint64) ([]managerserverdevicessh.Entry, error) {
+	dev, err := a.repo.Get(ctx, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := a.svc.List(ctx, dev, path, userID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]managerserverdevicessh.Entry, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, devicesshEntryFromBiz(r.Name, r.Size, r.Mode, r.IsDir, r.MTime))
+	}
+	return out, nil
+}
+
+func (a devicesshFSAdapter) Stat(ctx context.Context, deviceID uint64, path string, userID uint64) (managerserverdevicessh.Entry, error) {
+	dev, err := a.repo.Get(ctx, deviceID)
+	if err != nil {
+		return managerserverdevicessh.Entry{}, err
+	}
+	s, err := a.svc.Stat(ctx, dev, path, userID)
+	if err != nil {
+		return managerserverdevicessh.Entry{}, err
+	}
+	return devicesshEntryFromBiz(s.Name, s.Size, s.Mode, s.IsDir, s.MTime), nil
+}
+
+func (a devicesshFSAdapter) Read(ctx context.Context, deviceID uint64, path string, userID uint64) (io.ReadCloser, string, error) {
+	dev, err := a.repo.Get(ctx, deviceID)
+	if err != nil {
+		return nil, "", err
+	}
+	pr, pw := io.Pipe()
+	go func() {
+		_, werr := a.svc.Read(ctx, dev, path, userID, pw, 0)
+		_ = pw.CloseWithError(werr)
+	}()
+	return pr, filepath.Base(path), nil
+}
+
+func (a devicesshFSAdapter) Write(ctx context.Context, deviceID uint64, path string, content io.Reader, userID uint64) error {
+	dev, err := a.repo.Get(ctx, deviceID)
+	if err != nil {
+		return err
+	}
+	data, err := io.ReadAll(content)
+	if err != nil {
+		return err
+	}
+	return a.svc.Write(ctx, dev, path, data, 0, userID)
+}
+
+func (a devicesshFSAdapter) Mkdir(ctx context.Context, deviceID uint64, path string, mode uint32, userID uint64) error {
+	dev, err := a.repo.Get(ctx, deviceID)
+	if err != nil {
+		return err
+	}
+	return a.svc.Mkdir(ctx, dev, path, fs.FileMode(mode), userID)
+}
+
+func (a devicesshFSAdapter) Rmdir(ctx context.Context, deviceID uint64, path string, userID uint64) error {
+	dev, err := a.repo.Get(ctx, deviceID)
+	if err != nil {
+		return err
+	}
+	return a.svc.Rmdir(ctx, dev, path, userID)
+}
+
+func (a devicesshFSAdapter) Rm(ctx context.Context, deviceID uint64, path string, userID uint64) error {
+	dev, err := a.repo.Get(ctx, deviceID)
+	if err != nil {
+		return err
+	}
+	return a.svc.Rm(ctx, dev, path, userID)
+}
+
+func (a devicesshFSAdapter) Rename(ctx context.Context, deviceID uint64, oldPath, newPath string, userID uint64) error {
+	dev, err := a.repo.Get(ctx, deviceID)
+	if err != nil {
+		return err
+	}
+	return a.svc.Rename(ctx, dev, oldPath, newPath, userID)
+}
+
+func (a devicesshFSAdapter) Chmod(ctx context.Context, deviceID uint64, path string, mode uint32, userID uint64) error {
+	dev, err := a.repo.Get(ctx, deviceID)
+	if err != nil {
+		return err
+	}
+	return a.svc.Chmod(ctx, dev, path, fs.FileMode(mode), userID)
+}
+
+func (a devicesshFSAdapter) Upload(ctx context.Context, deviceID uint64, path string, r io.Reader, size int64, userID uint64) (int64, error) {
+	dev, err := a.repo.Get(ctx, deviceID)
+	if err != nil {
+		return 0, err
+	}
+	return a.svc.Upload(ctx, dev, path, r, userID)
+}
+
+func (a devicesshFSAdapter) Download(ctx context.Context, deviceID uint64, path string, userID uint64) (io.ReadCloser, int64, string, error) {
+	dev, err := a.repo.Get(ctx, deviceID)
+	if err != nil {
+		return nil, 0, "", err
+	}
+	pr, pw := io.Pipe()
+	var (
+		n       int64
+		werr    error
+	)
+	go func() {
+		n, werr = a.svc.Download(ctx, dev, path, userID, pw)
+		_ = pw.CloseWithError(werr)
+	}()
+	return pr, n, filepath.Base(path), nil
+}
+
+// devicesshEntryFromBiz projects one biz/devicessh.{Entry,Stat} row onto
+// the server-side Entry wire shape. The biz-side Mode is a uint32 of unix
+// perm bits (incl. type bits like os.ModeDir); we mask off the lower 12
+// perm bits and render them as a 4-char zero-padded octal string. Mtime
+// is unix-seconds in biz, RFC3339 string in the server shape.
+func devicesshEntryFromBiz(name string, size int64, mode uint32, isDir bool, mtimeUnix int64) managerserverdevicessh.Entry {
+	return managerserverdevicessh.Entry{
+		Name:  name,
+		Size:  size,
+		Mode:  fmt.Sprintf("%04o", mode&0o7777),
+		IsDir: isDir,
+		Mtime: time.Unix(mtimeUnix, 0).UTC().Format(time.RFC3339),
+	}
+}
+
+// installjobUsecaseAdapter bridges installjob.Repo (the biz-layer
+// persistence handle) to the server-side installjob.Usecase contract.
+// The two Job types are parallel but not identical: biz carries the
+// credential snapshot + log output (which must NEVER cross to the SPA),
+// server carries Progress / Message / LastError which the biz row
+// doesn't expose directly. The adapter maps Status → Progress and
+// leaves the message / last_error columns empty until A6 ships a richer
+// error-event stream.
+type installjobUsecaseAdapter struct {
+	repo managerbizinstalljob.Repo
+}
+
+func (a installjobUsecaseAdapter) Get(ctx context.Context, id uint64) (*managerserverinstalljob.Job, error) {
+	j, err := a.repo.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return bizInstallJobToServerJob(j), nil
+}
+
+func (a installjobUsecaseAdapter) ListByDevice(ctx context.Context, deviceID uint64, limit int) ([]*managerserverinstalljob.Job, error) {
+	rows, err := a.repo.ListByDevice(ctx, deviceID, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*managerserverinstalljob.Job, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, bizInstallJobToServerJob(r))
+	}
+	return out, nil
+}
+
+func (a installjobUsecaseAdapter) Cancel(ctx context.Context, id uint64) error {
+	return a.repo.UpdateStatus(ctx, id, managerbizinstalljob.StatusCancelled, nil)
+}
+
+// bizInstallJobToServerJob maps one biz-layer InstallJob row onto the
+// server-side wire DTO. Credential columns + log buffer are dropped on
+// purpose — the server contract is presentation-only, secrets live in
+// transient worker memory + audit only.
+//
+// Progress is a coarse status mapping:
+//   - queued    → 0
+//   - running   → 50
+//   - success   → 100
+//   - failed    / cancelled / timeout → 100 (terminal)
+//
+// The SPA renders 100 as a complete-bar; finer-grained progress is a
+// future A6 deliverable that pulls from install_job_events.
+func bizInstallJobToServerJob(j *managerbizinstalljob.InstallJob) *managerserverinstalljob.Job {
+	if j == nil {
+		return nil
+	}
+	progress := 0
+	switch j.Status {
+	case managerbizinstalljob.StatusRunning:
+		progress = 50
+	case managerbizinstalljob.StatusSuccess,
+		managerbizinstalljob.StatusFailed,
+		managerbizinstalljob.StatusCancelled,
+		managerbizinstalljob.StatusTimeout:
+		progress = 100
+	}
+	return &managerserverinstalljob.Job{
+		ID:         j.ID,
+		DeviceID:   j.DeviceID,
+		Kind:       "edge_install",
+		Status:     string(j.Status),
+		Progress:   progress,
+		CreatedAt:  j.CreatedAt,
+		StartedAt:  j.StartedAt,
+		FinishedAt: j.FinishedAt,
+	}
+}
+
+// readInstallScript loads deploy/install/edge/install.sh from disk for
+// the SSHInstaller. v1 always reads from disk; a future phase may embed
+// the script via //go:embed once the install job feature graduates
+// from "wire it up" to "operator-facing knob" and the script stops
+// changing between commits.
+func readInstallScript(log *slog.Logger) []byte {
+	const rel = "deploy/install/edge/install.sh"
+	data, err := os.ReadFile(rel)
+	if err != nil {
+		if log != nil {
+			log.Warn("installjob: install script not found at " + rel + " — installer will run with empty script and fail at the remote end")
+		}
+		return nil
+	}
+	if log != nil {
+		log.Info("installjob: loaded install script",
+			slog.String("path", rel),
+			slog.Int("bytes", len(data)),
+		)
+	}
+	return data
 }
 
 type webshellStreamerAdapter struct {

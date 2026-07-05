@@ -17,7 +17,18 @@
 //   - 不要写单元测试。
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Plus, Trash2, Copy, Check, ExternalLink, TerminalSquare } from 'lucide-react';
+import {
+  Plus,
+  Trash2,
+  Copy,
+  Check,
+  ExternalLink,
+  TerminalSquare,
+  Download,
+  Folder,
+  ScrollText,
+  Power,
+} from 'lucide-react';
 import { StatusPill } from '@/components/StatusPill';
 import { Modal } from '@/components/Modal';
 import { cn } from '@/lib/cn';
@@ -25,7 +36,10 @@ import { relativeTime } from '@/lib/format';
 import { usePoll } from '@/lib/usePoll';
 import {
   listDevices,
+  deleteDevice,
+  listInstallJobsByDevice,
   type Device,
+  type InstallJob,
 } from '@/api/devices';
 import {
   listEdges,
@@ -41,6 +55,14 @@ import { request } from '@/api/client';
 import { usePermissions } from '@/store/me';
 import { notifyDevicesChanged } from '@/lib/events';
 import { useI18n } from '@/i18n/locale';
+import { CreateDeviceModal } from '@/components/CreateDeviceModal';
+import { InstallEdgeModal } from '@/components/InstallEdgeModal';
+import { ConfirmDeleteModal } from '@/components/ConfirmDeleteModal';
+import { InstallLogPanel } from '@/components/InstallLogPanel';
+import {
+  HostsFilterBar,
+  type HostsFilterValue,
+} from '@/components/HostsFilterBar';
 
 // HostDevice — 真实在用的 device 字段集合。devices.ts 当前的 `Device` 只
 // 暴露了最小集；其他字段由其他 agent 落地后端模型。这里本地扩展 + cast
@@ -60,10 +82,12 @@ type HostDevice = Device & {
   disk_usage_pct?: number;
   fingerprint?: string;
   created_by?: string;
+  // 软删除标记 — 当 include_deleted=true 时由后端填充
+  deleted_at?: string | null;
 };
 
 // ----- local wrappers around API functions not yet exported from devices.ts -----
-// 等其他 agent 把 updateDeviceRoles / deleteDevice / listDeviceEdges 加进
+// 等其他 agent 把 updateDeviceRoles / listDeviceEdges 加进
 // devices.ts 之后，这些 wrapper 换成命名 import 即可，调用方代码不动。
 
 async function updateDeviceRolesLocal(
@@ -77,13 +101,6 @@ async function updateDeviceRolesLocal(
   );
 }
 
-async function deleteDeviceLocal(deviceId: string | number): Promise<void> {
-  return request<void>(
-    'DELETE',
-    `/devices/${encodeURIComponent(String(deviceId))}`,
-  );
-}
-
 async function listDeviceEdgesLocal(
   deviceId: string | number,
 ): Promise<Edge[]> {
@@ -94,19 +111,31 @@ async function listDeviceEdgesLocal(
   return r.items ?? [];
 }
 
+const INITIAL_FILTER: HostsFilterValue = {
+  name: '',
+  role: '',
+  online: 'all',
+  edge: 'all',
+  includeDeleted: false,
+};
+
 export default function HostsPage() {
   const navigate = useNavigate();
   const { tr } = useI18n();
   const { canMutate } = usePermissions();
 
+  const [filter, setFilter] = useState<HostsFilterValue>(INITIAL_FILTER);
   const [hosts, setHosts] = useState<HostDevice[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   // 每行 host 的探针数（key=host.id），mount 时拉一次，之后刷新时不重拉
   // — 单独缓存避免每次 refresh 都打 N+1 个接口。
   const [edgesPerHost, setEdgesPerHost] = useState<Record<number, number>>({});
+  // 每行 host 的"是否有在线 edge"（用于一键安装按钮的 disabled 规则）。
+  const [edgeOnlinePerHost, setEdgeOnlinePerHost] = useState<Record<number, boolean>>({});
 
-  const [createOpen, setCreateOpen] = useState(false);
+  const [createProbeOpen, setCreateProbeOpen] = useState(false);
+  const [createDeviceOpen, setCreateDeviceOpen] = useState(false);
   const [secretReveal, setSecretReveal] = useState<{
     title: string;
     accessKey: string;
@@ -114,37 +143,105 @@ export default function HostsPage() {
   } | null>(null);
   const [rolesEditTarget, setRolesEditTarget] = useState<HostDevice | null>(null);
 
+  // Install + log panel state. We keep them as a single tuple so the
+  // modal-close path can promote a jobId into the log panel without
+  // racing the InstallEdgeModal's onClose.
+  const [installTarget, setInstallTarget] = useState<HostDevice | null>(null);
+  const [activeInstallJob, setActiveInstallJob] = useState<{ deviceId: number; jobId: number } | null>(null);
+  const [installJobHistory, setInstallJobHistory] = useState<Record<number, InstallJob>>({});
+
+  // Confirm-delete state.
+  const [deleteTarget, setDeleteTarget] = useState<HostDevice | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
   const refresh = useCallback(async () => {
     try {
-      const r = await listDevices();
+      const r = await listDevices({
+        name: filter.name || undefined,
+        roles: filter.role || undefined,
+        online:
+          filter.online === 'all'
+            ? undefined
+            : filter.online === 'online',
+        include_deleted: filter.includeDeleted || undefined,
+      });
       const items = (r.items ?? []) as HostDevice[];
       setHosts(items);
       setError(null);
       // 后台拉探针数（best effort，失败就保持旧值 / 默认 0）
       void listEdges().then((edgesResp) => {
         const map: Record<number, number> = {};
+        const onlineMap: Record<number, boolean> = {};
         for (const e of edgesResp.items ?? []) {
           if (e.device_id != null) {
             map[e.device_id] = (map[e.device_id] ?? 0) + 1;
+            if (e.status === 'online') onlineMap[e.device_id] = true;
           }
         }
         setEdgesPerHost(map);
+        setEdgeOnlinePerHost(onlineMap);
       });
     } catch (err) {
       setError((err as Error).message || tr('加载失败', 'Load failed'));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [filter]);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
   usePoll(refresh, 10_000);
 
+  // Client-side "在线 / 离线" filter on the freshly fetched list. The
+  // backend's `online` query is a bool — using the dropdown we
+  // additionally constrain by edge status if a non-`all` value is set.
+  const visibleHosts = (() => {
+    if (filter.online === 'all' && filter.edge === 'all' && !filter.role) return hosts;
+    return hosts.filter((h) => {
+      if (filter.role && !(h.roles ?? []).includes(filter.role)) return false;
+      if (filter.online !== 'all') {
+        const want = filter.online === 'online';
+        if (!!h.online !== want) return false;
+      }
+      if (filter.edge !== 'all') {
+        const edgeOn = !!edgeOnlinePerHost[h.id];
+        const want = filter.edge === 'online';
+        if (edgeOn !== want) return false;
+      }
+      return true;
+    });
+  })();
+
+  // Lazy-fetch the most recent install job per device once. We need the
+  // id to open the log panel from the "日志" button without an extra
+  // round-trip; one map keyed by deviceId is enough.
+  useEffect(() => {
+    if (hosts.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      const next: Record<number, InstallJob> = {};
+      await Promise.all(
+        hosts.map(async (h) => {
+          try {
+            const r = await listInstallJobsByDevice(h.id, 1);
+            const j = r.items?.[0];
+            if (j) next[h.id] = j;
+          } catch {
+            /* ignore — device has no install jobs yet */
+          }
+        }),
+      );
+      if (!cancelled) setInstallJobHistory(next);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [hosts]);
+
   // ----- 创建 / 删除 handlers -----
 
-  async function onCreate(name: string) {
+  async function onCreateProbe(name: string) {
     const created: CreateEdgeResponse = await createEdge({ name });
     setSecretReveal({
       title: tr('已创建探针', 'Probe created'),
@@ -155,20 +252,16 @@ export default function HostsPage() {
   }
 
   async function onDeleteHost(h: HostDevice) {
-    if (
-      !confirm(
-        tr(
-          `确定要删除 ${h.name || `host #${h.id}`}？此操作不可恢复。`,
-          `Delete ${h.name || `host #${h.id}`}? This cannot be undone.`,
-        ),
-      )
-    )
-      return;
+    setDeleting(true);
     try {
-      await deleteDeviceLocal(h.id);
+      await deleteDevice(h.id);
+      setDeleteTarget(null);
       void refresh();
+      notifyDevicesChanged();
     } catch (err) {
       alert((err as Error).message || tr('删除失败', 'Delete failed'));
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -182,8 +275,8 @@ export default function HostsPage() {
             </h1>
             <p className="mt-0.5 text-xs text-zinc-500">
               {tr(
-                `${hosts.length} 台主机 · 每 10 秒自动刷新`,
-                `${hosts.length} host(s) · auto-refresh every 10s`,
+                `${visibleHosts.length} 台主机 · 每 10 秒自动刷新`,
+                `${visibleHosts.length} host(s) · auto-refresh every 10s`,
               )}
             </p>
           </div>
@@ -196,14 +289,25 @@ export default function HostsPage() {
               <TerminalSquare size={12} /> {tr('WebSSH 会话', 'WebSSH sessions')}
             </Link>
             {canMutate && (
-              <button
-                type="button"
-                onClick={() => setCreateOpen(true)}
-                aria-label={tr('添加探针', 'New probe')}
-                className="inline-flex items-center gap-1.5 rounded-md bg-accent px-2.5 py-1.5 text-xs font-medium text-accent-fg hover:bg-accent/90"
-              >
-                <Plus size={12} /> {tr('添加探针', 'New probe')}
-              </button>
+              <>
+                <button
+                  type="button"
+                  onClick={() => setCreateDeviceOpen(true)}
+                  aria-label={tr('添加设备', 'Add device')}
+                  data-testid="add-device"
+                  className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800"
+                >
+                  <Plus size={12} /> {tr('添加设备', 'Add device')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCreateProbeOpen(true)}
+                  aria-label={tr('添加探针', 'New probe')}
+                  className="inline-flex items-center gap-1.5 rounded-md bg-accent px-2.5 py-1.5 text-xs font-medium text-accent-fg hover:bg-accent/90"
+                >
+                  <Plus size={12} /> {tr('添加探针', 'New probe')}
+                </button>
+              </>
             )}
           </div>
         </header>
@@ -218,6 +322,12 @@ export default function HostsPage() {
             </div>
           )}
 
+          <HostsFilterBar
+            value={filter}
+            total={visibleHosts.length}
+            onChange={setFilter}
+          />
+
           <div className="overflow-hidden rounded-xl border border-zinc-800/60 bg-zinc-900/40">
             <table className="w-full text-sm">
               <thead className="border-b border-zinc-800/60 bg-zinc-950/40 text-[11px] uppercase tracking-wider text-zinc-500">
@@ -230,30 +340,36 @@ export default function HostsPage() {
                   <th className="px-4 py-2.5 text-left">{tr('状态', 'Status')}</th>
                   <th className="px-4 py-2.5 text-left">{tr('探针数', 'Probes')}</th>
                   <th className="px-4 py-2.5 text-left">{tr('最后心跳', 'Last heartbeat')}</th>
+                  {filter.includeDeleted && (
+                    <th className="px-4 py-2.5 text-left">{tr('已删除', 'Deleted')}</th>
+                  )}
                   <th className="px-4 py-2.5 text-right">{tr('操作', 'Actions')}</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-800/40">
                 {loading && hosts.length === 0 ? (
                   <tr>
-                    <td colSpan={9} className="px-4 py-10 text-center text-zinc-500">
+                    <td colSpan={filter.includeDeleted ? 10 : 9} className="px-4 py-10 text-center text-zinc-500">
                       {tr('加载中…', 'Loading…')}
                     </td>
                   </tr>
-                ) : hosts.length === 0 ? (
+                ) : visibleHosts.length === 0 ? (
                   <tr>
-                    <td colSpan={9} className="px-4 py-10 text-center text-zinc-500">
+                    <td colSpan={filter.includeDeleted ? 10 : 9} className="px-4 py-10 text-center text-zinc-500">
                       {tr(
-                        '暂无主机。点击右上角"添加探针"创建一台。',
-                        'No hosts yet. Click "New probe" in the top right to create one.',
+                        '暂无主机。点击右上角"添加设备"创建一台。',
+                        'No hosts yet. Click "Add device" in the top right to create one.',
                       )}
                     </td>
                   </tr>
                 ) : (
-                  hosts.map((h) => (
+                  visibleHosts.map((h) => (
                     <tr
                       key={h.id}
-                      className="cursor-pointer transition-colors hover:bg-zinc-900/40"
+                      className={cn(
+                        'cursor-pointer transition-colors hover:bg-zinc-900/40',
+                        h.deleted_at && 'opacity-60',
+                      )}
                       onClick={() => navigate(`/hosts/${encodeURIComponent(String(h.id))}`)}
                     >
                       <td className="whitespace-nowrap px-4 py-2.5 font-mono text-xs text-zinc-400">
@@ -273,11 +389,11 @@ export default function HostsPage() {
                       <td
                         className={cn(
                           'whitespace-nowrap px-4 py-2.5',
-                          canMutate && 'cursor-pointer',
+                          canMutate && !h.deleted_at && 'cursor-pointer',
                         )}
                         title={canMutate ? tr('点击分配角色', 'Click to assign roles') : undefined}
                         onClick={(ev) => {
-                          if (!canMutate) return;
+                          if (!canMutate || h.deleted_at) return;
                           ev.stopPropagation();
                           setRolesEditTarget(h);
                         }}
@@ -293,11 +409,35 @@ export default function HostsPage() {
                       <td className="whitespace-nowrap px-4 py-2.5 text-zinc-400">
                         {h.last_seen_at ? relativeTime(h.last_seen_at) : '—'}
                       </td>
+                      {filter.includeDeleted && (
+                        <td className="whitespace-nowrap px-4 py-2.5 text-xs text-red-400">
+                          {h.deleted_at ? relativeTime(h.deleted_at) : '—'}
+                        </td>
+                      )}
                       <td
                         className="whitespace-nowrap px-4 py-2.5 text-right"
                         onClick={(ev) => ev.stopPropagation()}
                       >
                         <ShellButton device={h} canMutate={canMutate} />
+                        <InstallButton
+                          device={h}
+                          edgeOnline={!!edgeOnlinePerHost[h.id]}
+                          canMutate={canMutate && !h.deleted_at}
+                          onClick={() => setInstallTarget(h)}
+                        />
+                        <FilesButton
+                          deviceId={h.id}
+                          disabled={!!h.deleted_at}
+                          onClick={() => navigate(`/devices/${encodeURIComponent(String(h.id))}/files`)}
+                        />
+                        <LogButton
+                          device={h}
+                          lastJob={installJobHistory[h.id]}
+                          onClick={() => {
+                            const j = installJobHistory[h.id];
+                            if (j) setActiveInstallJob({ deviceId: h.id, jobId: j.id });
+                          }}
+                        />
                         <button
                           type="button"
                           onClick={() => navigate(`/hosts/${encodeURIComponent(String(h.id))}`)}
@@ -307,10 +447,10 @@ export default function HostsPage() {
                           <ExternalLink size={14} />
                           <span>{tr('详情', 'Detail')}</span>
                         </button>
-                        {canMutate && (
+                        {canMutate && !h.deleted_at && (
                           <button
                             type="button"
-                            onClick={() => void onDeleteHost(h)}
+                            onClick={() => setDeleteTarget(h)}
                             title={tr('删除主机', 'Delete host')}
                             aria-label={tr(`删除 ${h.name || h.id}`, `Delete ${h.name || h.id}`)}
                             className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-red-300 hover:bg-red-500/10"
@@ -328,12 +468,22 @@ export default function HostsPage() {
         </div>
       </main>
 
+      <CreateDeviceModal
+        open={createDeviceOpen}
+        onClose={() => setCreateDeviceOpen(false)}
+        onCreated={() => {
+          setCreateDeviceOpen(false);
+          void refresh();
+          notifyDevicesChanged();
+        }}
+      />
+
       <CreateEdgeModal
-        open={createOpen}
-        onClose={() => setCreateOpen(false)}
+        open={createProbeOpen}
+        onClose={() => setCreateProbeOpen(false)}
         onSubmit={async (name) => {
-          await onCreate(name);
-          setCreateOpen(false);
+          await onCreateProbe(name);
+          setCreateProbeOpen(false);
         }}
       />
 
@@ -353,6 +503,36 @@ export default function HostsPage() {
           }}
         />
       )}
+
+      <InstallEdgeModal
+        open={!!installTarget}
+        device={installTarget}
+        edgeOnline={installTarget ? !!edgeOnlinePerHost[installTarget.id] : false}
+        onClose={() => setInstallTarget(null)}
+        onStarted={(jobId) => {
+          if (!installTarget) return;
+          setActiveInstallJob({ deviceId: installTarget.id, jobId });
+          void refresh();
+        }}
+      />
+
+      <ConfirmDeleteModal
+        open={!!deleteTarget}
+        device={deleteTarget}
+        deleting={deleting}
+        onClose={() => {
+          if (!deleting) setDeleteTarget(null);
+        }}
+        onConfirm={() => {
+          if (deleteTarget) void onDeleteHost(deleteTarget);
+        }}
+      />
+
+      <InstallLogPanel
+        jobId={activeInstallJob?.jobId ?? 0}
+        open={!!activeInstallJob}
+        onClose={() => setActiveInstallJob(null)}
+      />
     </>
   );
 }
@@ -542,6 +722,132 @@ function ShellButton({ device, canMutate }: { device: HostDevice; canMutate: boo
       <TerminalSquare size={14} />
       <span>{tr('终端', 'Terminal')}</span>
     </a>
+  );
+}
+
+// ----- InstallButton (host 视角) -----
+// 一键安装按钮：edge 在线时禁用（已经有了），否则打开 InstallEdgeModal。
+function InstallButton({
+  device,
+  edgeOnline,
+  canMutate,
+  onClick,
+}: {
+  device: HostDevice;
+  edgeOnline: boolean;
+  canMutate: boolean;
+  onClick(): void;
+}) {
+  const { tr } = useI18n();
+  const disabled = !canMutate || edgeOnline;
+  const reason = !canMutate
+    ? tr('只读账号不能安装', 'Viewer accounts cannot install')
+    : edgeOnline
+      ? tr('设备已有 edge', 'Device already has an edge')
+      : '';
+  if (disabled) {
+    return (
+      <span
+        title={reason}
+        aria-label={reason}
+        className="mr-1 inline-flex cursor-not-allowed items-center gap-1 rounded-md px-2 py-1 text-xs text-zinc-600"
+      >
+        <Power size={14} />
+        <span>{tr('一键安装', 'Install')}</span>
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={tr(`一键安装 edge 到 ${device.name || device.hostname || `host #${device.id}`}`, `Install edge on ${device.name || `host #${device.id}`}`)}
+      className="mr-1 inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
+    >
+      <Power size={14} />
+      <span>{tr('一键安装', 'Install')}</span>
+    </button>
+  );
+}
+
+// ----- FilesButton -----
+// SFTP 文件入口：路由到 /devices/:id/files。
+function FilesButton({
+  deviceId,
+  disabled,
+  onClick,
+}: {
+  deviceId: number;
+  disabled?: boolean;
+  onClick(): void;
+}) {
+  const { tr } = useI18n();
+  const reason = disabled
+    ? tr('已删除的设备不可访问', 'Deleted device cannot be browsed')
+    : '';
+  if (disabled) {
+    return (
+      <span
+        title={reason}
+        aria-label={reason}
+        className="mr-1 inline-flex cursor-not-allowed items-center gap-1 rounded-md px-2 py-1 text-xs text-zinc-600"
+      >
+        <Folder size={14} />
+        <span>{tr('文件', 'Files')}</span>
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={tr(`打开文件浏览器 (#${deviceId})`, `Open file browser (#${deviceId})`)}
+      className="mr-1 inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
+    >
+      <Folder size={14} />
+      <span>{tr('文件', 'Files')}</span>
+    </button>
+  );
+}
+
+// ----- LogButton -----
+// 安装日志入口：仅在设备有最近一次安装任务时显示可点击；否则灰显。
+function LogButton({
+  device,
+  lastJob,
+  onClick,
+}: {
+  device: HostDevice;
+  lastJob?: InstallJob;
+  onClick(): void;
+}) {
+  const { tr } = useI18n();
+  const disabled = !lastJob;
+  const reason = !lastJob
+    ? tr('该设备尚无安装任务', 'No install job for this device yet')
+    : '';
+  if (disabled) {
+    return (
+      <span
+        title={reason}
+        aria-label={reason}
+        className="mr-1 inline-flex cursor-not-allowed items-center gap-1 rounded-md px-2 py-1 text-xs text-zinc-600"
+      >
+        <ScrollText size={14} />
+        <span>{tr('日志', 'Log')}</span>
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={tr(`查看最近一次安装日志 (#${lastJob!.id})`, `View latest install log (#${lastJob!.id})`)}
+      className="mr-1 inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
+    >
+      <ScrollText size={14} />
+      <span>{tr('日志', 'Log')}</span>
+    </button>
   );
 }
 

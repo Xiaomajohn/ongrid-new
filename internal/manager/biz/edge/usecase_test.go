@@ -198,6 +198,85 @@ func (d *fakeDeviceRepo) ReconcileOfflineOrphans(_ context.Context) (int64, erro
 	return 0, nil
 }
 
+func (d *fakeDeviceRepo) SetSSHCredentials(_ context.Context, id uint64, c devicebiz.SSHCredentials) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	dev, ok := d.byID[id]
+	if !ok {
+		return errs.ErrNotFound
+	}
+	dev.SSHHost = c.Host
+	dev.SSHPort = c.Port
+	if dev.SSHPort == 0 {
+		dev.SSHPort = 22
+	}
+	dev.SSHUser = c.User
+	dev.SSHAuthKind = c.AuthKind
+	dev.SSHPassword = c.Password
+	dev.SSHKey = c.Key
+	dev.SSHHostKey = c.HostKey
+	return nil
+}
+
+func (d *fakeDeviceRepo) ClearSSHCredentialsField(_ context.Context, id uint64, kind string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	dev, ok := d.byID[id]
+	if !ok {
+		return errs.ErrNotFound
+	}
+	switch kind {
+	case "password":
+		dev.SSHPassword = ""
+	case "key":
+		dev.SSHKey = ""
+	default:
+		return errs.ErrInvalid
+	}
+	return nil
+}
+
+func (d *fakeDeviceRepo) SetSSHCredentialsIAW(_ context.Context, id uint64, iaw devicebiz.SSHCredentialsIAW) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	dev, ok := d.byID[id]
+	if !ok {
+		return errs.ErrNotFound
+	}
+	dev.SSHLastSeenAt = iaw.LastSeenAt
+	dev.SSHLastError = iaw.LastError
+	return nil
+}
+
+func (d *fakeDeviceRepo) TouchSSHSuccess(_ context.Context, id uint64) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	dev, ok := d.byID[id]
+	if !ok {
+		return errs.ErrNotFound
+	}
+	now := time.Now()
+	dev.SSHLastSeenAt = &now
+	dev.SSHLastError = ""
+	return nil
+}
+
+func (d *fakeDeviceRepo) TouchSSHError(_ context.Context, id uint64, errMsg string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	dev, ok := d.byID[id]
+	if !ok {
+		return errs.ErrNotFound
+	}
+	now := time.Now()
+	dev.SSHLastSeenAt = &now
+	if len(errMsg) > 500 {
+		errMsg = errMsg[:500]
+	}
+	dev.SSHLastError = errMsg
+	return nil
+}
+
 // fakeRepo is an in-memory biz.Repo for usecase-level tests. Mirrors the
 // SQLite implementation's observable semantics (soft-delete hides rows,
 // lookups by AccessKey exclude deleted, etc.) without dragging in gorm.

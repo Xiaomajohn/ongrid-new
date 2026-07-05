@@ -45,6 +45,9 @@ export function listDevices(params?: {
   online?: boolean;
   limit?: number;
   offset?: number;
+  // include_deleted = true → surface soft-deleted rows. Default false so the
+  // list view stays clean; the "显示已删除" filter bar toggles it.
+  include_deleted?: boolean;
 }) {
   const qs = params
     ? '?' +
@@ -55,6 +58,33 @@ export function listDevices(params?: {
       ).toString()
     : '';
   return request<{ items: Device[]; total: number }>('GET', `/devices${qs}`);
+}
+
+export type CreateDeviceInput = {
+  name: string;
+  description?: string;
+  hostname?: string;
+  ssh_host: string;
+  ssh_port: number;
+  ssh_user: string;
+  ssh_auth_kind: 'password' | 'key';
+  ssh_password?: string;
+  ssh_key?: string;
+};
+
+export type CreateDeviceResponse = {
+  id: number;
+  name: string;
+  hostname?: string;
+  description?: string;
+  created_at?: string;
+};
+
+// createDevice — register a new logical host + SSH credentials. Backend
+// persists the credential plaintext-at-rest (per plan §SSH API contract)
+// so the install / SFTP flows can SSH into the box without re-prompting.
+export function createDevice(input: CreateDeviceInput) {
+  return request<CreateDeviceResponse>('POST', '/devices', input);
 }
 
 export function getDevice(id: string | number) {
@@ -88,4 +118,254 @@ export function listDeviceEdges(id: string | number) {
   return request<{
     items: { edge_id: number; device_id: number; type: string; created_at: string }[];
   }>('GET', `/devices/${encodeURIComponent(String(id))}/edges`);
+}
+
+// =============================================================================
+// SSH credentials (per-device, plaintext-at-rest internal use only)
+// =============================================================================
+
+export interface SSHInfo {
+  host: string;
+  port: number;
+  user: string;
+  auth_kind: 'password' | 'key';
+  has_password: boolean;
+  has_key: boolean;
+  edge_online: boolean;
+}
+
+export function getDeviceSSHInfo(deviceId: string | number) {
+  return request<SSHInfo>(
+    'GET',
+    `/devices/${encodeURIComponent(String(deviceId))}/ssh-info`,
+  );
+}
+
+export function putDeviceSSHCredentials(
+  deviceId: string | number,
+  kind: 'password' | 'key',
+  value: string,
+) {
+  return request<void>(
+    'PUT',
+    `/devices/${encodeURIComponent(String(deviceId))}/ssh-credentials`,
+    { kind, value },
+  );
+}
+
+export function deleteDeviceSSHCredentials(
+  deviceId: string | number,
+  kind: 'password' | 'key',
+) {
+  return request<void>(
+    'DELETE',
+    `/devices/${encodeURIComponent(String(deviceId))}/ssh-credentials?kind=${encodeURIComponent(kind)}`,
+  );
+}
+
+// =============================================================================
+// One-button edge install job
+// =============================================================================
+
+export type InstallJobStatus =
+  | 'queued'
+  | 'running'
+  | 'success'
+  | 'failed'
+  | 'cancelled'
+  | 'timeout';
+
+export interface InstallJob {
+  id: number;
+  device_id: number;
+  edge_id: number | null;
+  status: InstallJobStatus;
+  host: string;
+  port: number;
+  user: string;
+  log_output: string;
+  started_at: string | null;
+  finished_at: string | null;
+  exit_code: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface InstallEdgeOptions {
+  ssh_pass?: string;
+  ssh_key_pem?: string;
+  options?: Record<string, unknown>;
+}
+
+export interface InstallEdgeResponse {
+  install_job_id: number;
+  status: string;
+}
+
+export function installEdge(
+  deviceId: string | number,
+  opts: InstallEdgeOptions = {},
+) {
+  return request<InstallEdgeResponse>(
+    'POST',
+    `/devices/${encodeURIComponent(String(deviceId))}/install-edge`,
+    opts,
+  );
+}
+
+export function getInstallJob(jobId: string | number) {
+  return request<InstallJob>(
+    'GET',
+    `/install-jobs/${encodeURIComponent(String(jobId))}`,
+  );
+}
+
+export function listInstallJobsByDevice(
+  deviceId: string | number,
+  limit = 20,
+) {
+  return request<{ items: InstallJob[] }>(
+    'GET',
+    `/devices/${encodeURIComponent(String(deviceId))}/install-jobs?limit=${limit}`,
+  );
+}
+
+export function cancelInstallJob(jobId: string | number) {
+  return request<void>(
+    'POST',
+    `/install-jobs/${encodeURIComponent(String(jobId))}:cancel`,
+  );
+}
+
+// =============================================================================
+// SFTP / filesystem operations (proxied via edgeagent tunnel)
+// =============================================================================
+
+export interface FSEntry {
+  name: string;
+  mode: number;
+  size: number;
+  mtime: number;
+  is_dir: boolean;
+}
+
+export function fsList(deviceId: string | number, path: string) {
+  return request<{ entries: FSEntry[] }>(
+    'GET',
+    `/devices/${encodeURIComponent(String(deviceId))}/fs/list?path=${encodeURIComponent(path)}`,
+  );
+}
+
+export function fsStat(deviceId: string | number, path: string) {
+  return request<FSEntry>(
+    'GET',
+    `/devices/${encodeURIComponent(String(deviceId))}/fs/stat?path=${encodeURIComponent(path)}`,
+  );
+}
+
+export function fsMkdir(deviceId: string | number, path: string, mode?: number) {
+  return request<void>(
+    'POST',
+    `/devices/${encodeURIComponent(String(deviceId))}/fs/mkdir`,
+    { path, mode },
+  );
+}
+
+// fsWrite — overwrite / create a text file on the remote via the SFTP
+// tunnel. Used by FileBrowser's "edit" affordance to commit file content
+// without having to round-trip through a download + edit + upload cycle.
+// Backend caps the size (text-only, see plan §SFTP API contract).
+export function fsWrite(deviceId: string | number, path: string, content: string) {
+  return request<void>(
+    'POST',
+    `/devices/${encodeURIComponent(String(deviceId))}/fs/write`,
+    { path, content },
+  );
+}
+
+export function fsRmdir(deviceId: string | number, path: string) {
+  return request<void>(
+    'POST',
+    `/devices/${encodeURIComponent(String(deviceId))}/fs/rmdir`,
+    { path },
+  );
+}
+
+export function fsRm(deviceId: string | number, path: string) {
+  return request<void>(
+    'POST',
+    `/devices/${encodeURIComponent(String(deviceId))}/fs/rm`,
+    { path },
+  );
+}
+
+export function fsRename(
+  deviceId: string | number,
+  oldPath: string,
+  newPath: string,
+) {
+  return request<void>(
+    'POST',
+    `/devices/${encodeURIComponent(String(deviceId))}/fs/rename`,
+    { old: oldPath, new: newPath },
+  );
+}
+
+export function fsChmod(deviceId: string | number, path: string, mode: number) {
+  return request<void>(
+    'POST',
+    `/devices/${encodeURIComponent(String(deviceId))}/fs/chmod`,
+    { path, mode },
+  );
+}
+
+export interface FSUploadResponse {
+  size_bytes: number;
+  mtime: number;
+}
+
+export function fsUpload(
+  deviceId: string | number,
+  path: string,
+  file: File,
+) {
+  const form = new FormData();
+  form.append('file', file);
+  form.append('path', path);
+  return request<FSUploadResponse>(
+    'POST',
+    `/devices/${encodeURIComponent(String(deviceId))}/fs/upload`,
+    form,
+  );
+}
+
+// fsDownloadURL returns the API path for fetching a file's raw bytes
+// (the caller is responsible for adding the auth header via fetch / a
+// helper that already has the bearer token, e.g. via the global fetch
+// wrapper that uses `request`).
+export function fsDownloadURL(deviceId: string | number, path: string): string {
+  // NB: The request() helper prepends BASE='/api/v1' so the literal path
+  // goes through. For a direct <a href> download the caller needs the
+  // absolute URL — consumers should typically go through fetch with
+  // auth, or open this in a new tab once they have a signed URL.
+  return `/devices/${encodeURIComponent(String(deviceId))}/fs/download?path=${encodeURIComponent(path)}`;
+}
+
+// fsRead returns the raw bytes (Blob) for a file. Goes via fetch directly
+// because the API returns binary, not JSON. Reuses the bearer-token helper
+// from the auth store so the read picks up 401 refreshes the same way the
+// rest of the SPA does.
+export async function fsRead(
+  deviceId: string | number,
+  path: string,
+): Promise<Blob> {
+  const { getToken } = await import('@/store/auth');
+  const token = getToken();
+  const res = await fetch(`/api/v1${fsDownloadURL(deviceId, path)}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) {
+    throw new Error(`fsRead HTTP ${res.status}`);
+  }
+  return res.blob();
 }

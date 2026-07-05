@@ -13,6 +13,7 @@ const EdgeDetailPage = lazy(() => import('@/pages/EdgeDetail'));
 // DeviceShellPage，沿用 Prom label device_id 完成 on-grid 反向连接。
 const HostsPage = lazy(() => import('@/pages/Hosts'));
 const HostDetailPage = lazy(() => import('@/pages/HostDetail'));
+const DeviceFilesPage = lazy(() => import('@/pages/DeviceFiles'));
 const DeviceShellPage = lazy(() => import('@/pages/DeviceShell'));
 const DashboardPage = lazy(() => import('@/pages/Dashboard'));
 const MonitorPage = lazy(() => import('@/pages/Monitor'));
@@ -112,6 +113,10 @@ export default function App() {
         <Route path="/hosts" element={<HostsPage />} />
         <Route path="/hosts/:hostId" element={<HostDetailPage />} />
         <Route path="/hosts/:hostId/shell" element={<DeviceShellPage />} />
+        {/* SFTP file browser lives under /devices/:id/files (the device-id
+            path mirrors /devices/:id/shell so it's reachable both from the
+            Hosts list ("文件" button) and any direct bookmark). */}
+        <Route path="/devices/:id/files" element={<DeviceFilesPage />} />
         <Route path="/monitor" element={<MonitorPage />} />
         <Route path="/logs" element={<LogsPage />} />
         <Route path="/traces" element={<TracesPage />} />

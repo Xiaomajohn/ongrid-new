@@ -29,11 +29,19 @@ const roleAdmin = "admin"
 
 // Handler exposes /v1/devices.
 type Handler struct {
-	uc *devicebiz.Usecase
+	uc    *devicebiz.Usecase
+	edges EdgeLookup // optional; consulted by getSSHInfo, see credentials.go
 }
 
 // NewHandler builds the handler around a device biz Usecase.
 func NewHandler(uc *devicebiz.Usecase) *Handler { return &Handler{uc: uc} }
+
+// SetEdgeLookup wires the (optional) edge-status adapter consulted by
+// getSSHInfo to report agent reachability alongside the stored creds.
+// Must be called before Register if the SPA wants edge_online in the
+// response; otherwise the SSH endpoints still work and report
+// edge_online=false.
+func (h *Handler) SetEdgeLookup(e EdgeLookup) { h.edges = e }
 
 // Register attaches the device routes on r.
 //
@@ -45,6 +53,9 @@ func NewHandler(uc *devicebiz.Usecase) *Handler { return &Handler{uc: uc} }
 //	PATCH /v1/devices/{id}/roles (admin)
 //	DELETE /v1/devices/{id} (admin)
 //	GET /v1/devices/{id}/edges (any authed) — junction edges
+//	PUT /v1/devices/{id}/ssh-credentials (admin)
+//	GET /v1/devices/{id}/ssh-info (any authed)
+//	DELETE /v1/devices/{id}/ssh-credentials (admin)
 func (h *Handler) Register(r chi.Router) {
 	r.Get("/v1/devices", h.list)
 	r.Get("/v1/devices/{id}", h.get)
@@ -52,6 +63,11 @@ func (h *Handler) Register(r chi.Router) {
 	r.With(h.requireAdmin).Patch("/v1/devices/{id}/roles", h.updateRoles)
 	r.With(h.requireAdmin).Delete("/v1/devices/{id}", h.delete)
 	r.Get("/v1/devices/{id}/edges", h.listEdges)
+	// SSH credential endpoints — implementations live in
+	// credentials.go to keep this file focused on host facts.
+	r.With(h.requireAdmin).Put("/v1/devices/{id}/ssh-credentials", h.putSSHCredentials)
+	r.Get("/v1/devices/{id}/ssh-info", h.getSSHInfo)
+	r.With(h.requireAdmin).Delete("/v1/devices/{id}/ssh-credentials", h.deleteSSHCredentials)
 }
 
 // requireAdmin is a thin middleware that 403s non-admin callers.
