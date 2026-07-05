@@ -883,13 +883,13 @@ is_blank() {
 # MYSQL_ROOT_PASSWORD
 if is_blank MYSQL_ROOT_PASSWORD; then
     fill_blank MYSQL_ROOT_PASSWORD "$(gen_secret 24)"
-    log_info "generated MYSQL_ROOT_PASSWORD"
+    log_info "kept default MYSQL_ROOT_PASSWORD (edit .env for production)"
 fi
 
 # MYSQL_PASSWORD
 if is_blank MYSQL_PASSWORD; then
     fill_blank MYSQL_PASSWORD "$(gen_secret 24)"
-    log_info "generated MYSQL_PASSWORD"
+    log_info "kept default MYSQL_PASSWORD (edit .env for production)"
 fi
 
 # ONGRID_JWT_SECRET (64 chars)
@@ -903,13 +903,13 @@ if is_blank ONGRID_ADMIN_PASSWORD; then
     GENERATED_ADMIN_PASSWORD=$(gen_secret 20)
     fill_blank ONGRID_ADMIN_PASSWORD "$GENERATED_ADMIN_PASSWORD"
     ADMIN_PASSWORD_NEWLY_GENERATED=1
-    log_info "generated ONGRID_ADMIN_PASSWORD (printed once in final banner)"
+    log_info "kept default ONGRID_ADMIN_PASSWORD (edit .env for production)"
 fi
 
 # GRAFANA_ADMIN_PASSWORD (manager bootstraps SA token with this)
 if is_blank GRAFANA_ADMIN_PASSWORD; then
     fill_blank GRAFANA_ADMIN_PASSWORD "$(gen_secret 20)"
-    log_info "generated GRAFANA_ADMIN_PASSWORD"
+    log_info "kept default GRAFANA_ADMIN_PASSWORD (edit .env for production)"
 fi
 
 # ONGRID_PUBLIC_URL — the address EDGES use to reach this manager's data
@@ -1102,13 +1102,15 @@ echo ""
 if [[ $NO_SEED -eq 0 ]]; then
     echo "${C_BOLD}${C_YELLOW}---------------- bootstrap admin ----------------${C_RESET}"
     echo "${C_BOLD}email:${C_RESET}    ${ADMIN_EMAIL}"
+    ADMIN_PASSWORD_VALUE=$(grep -E '^ONGRID_ADMIN_PASSWORD=' "$ENV_FILE" | cut -d= -f2- || true)
+    echo "${C_BOLD}password:${C_RESET} ${C_BOLD}${ADMIN_PASSWORD_VALUE}${C_RESET}"
+    echo ""
     if [[ $ADMIN_PASSWORD_NEWLY_GENERATED -eq 1 ]]; then
-        echo "${C_BOLD}${C_YELLOW}password:${C_RESET} ${C_BOLD}${GENERATED_ADMIN_PASSWORD}${C_RESET}"
-        echo ""
         echo "${C_YELLOW}>> Record this password NOW. It will not be shown again.${C_RESET}"
         echo "${C_YELLOW}>> It is stored in ${ENV_FILE} (chmod 600) and seeded on first start.${C_RESET}"
     else
-        echo "${C_BOLD}password:${C_RESET} (unchanged; see ${ENV_FILE})"
+        echo "${C_YELLOW}>> This is the DEFAULT password from .env.example.${C_RESET}"
+        echo "${C_YELLOW}>> Edit ${ENV_FILE} and change ONGRID_ADMIN_PASSWORD before production use.${C_RESET}"
     fi
     echo "${C_BOLD}${C_YELLOW}-------------------------------------------------${C_RESET}"
     echo ""

@@ -2,6 +2,18 @@
 
 本文件记录 ongrid 各版本的主要变更。最新在上。
 
+## v0.9.1 (2026-07-05)
+
+### 行为变化
+- **安装时密码改为固定默认值**：`MYSQL_ROOT_PASSWORD`、`MYSQL_PASSWORD`、`ONGRID_ADMIN_PASSWORD`、`GRAFANA_ADMIN_PASSWORD` 不再由 `install.sh` 随机生成，而是在 `.env.example` 中写死默认值（`ongrid_root_pwd` / `ongrid_app_pwd` / `ongrid_admin_pwd` / `ongrid_grafana_pwd`）。每次安装使用一致的固定凭据，便于自动化、脚本化、回归测试。
+- **生产前必须修改**：默认值仅供开发/测试使用，生产部署请编辑 `/opt/ongrid/.env` 修改这 4 个字段。
+- **横幅行为调整**：安装脚本末尾始终打印当前 `ONGRID_ADMIN_PASSWORD` 值（不再"只显示一次"），并标注"生产前请修改"提示。
+- **`install.sh` 兜底逻辑保留**：若运维手动把 `.env` 中这 4 个字段清空，`install.sh` 仍会自动生成随机值（仅触发兜底，正常路径不再生成）。
+
+### 不变项
+- `ONGRID_JWT_SECRET` 仍为空时随机生成（用户未要求改 JWT secret）。
+- `upgrade.sh` 的 `backfill_secret GRAFANA_ADMIN_PASSWORD 20` 仍按"key 不存在才补"语义，不覆盖已有值。
+
 ## v0.9.0 (2026-06-27)
 
 大版本：统一任务抽象、MCP 客户端、AI 助理写权限治理，外加一整轮工作流编排与可观测打磨。

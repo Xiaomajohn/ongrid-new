@@ -232,7 +232,7 @@ tar xf ongrid-v0.1.0-linux-<arch>.tar.xz
 cd ongrid-v0.1.0-linux-<arch>
 
 # 3. （可选）先编辑 .env.example，自定义端口或 OpenAI key
-#    不编辑也行，install.sh 会把 .env.example 复制成 .env 并为空密码自动生成随机值。
+#    不编辑也行，install.sh 会把 .env.example 复制成 .env，密码字段直接采用模板里的固定默认值。
 
 # 4. 运行安装脚本
 sudo ./install.sh
@@ -245,10 +245,10 @@ sudo ./install.sh
 3. 拷贝 `docker-compose.yml`、`nginx.conf`、`prometheus.yml`、`grafana/`、`edge/`、`VERSION` 到安装目录。
 4. **生成自签 TLS 证书**（首次安装且 `certs/tls.crt` 不存在时）：通过临时 OpenSSL 配置生成 CN=ongrid、SAN 包含 `ongrid` / `localhost` / `127.0.0.1` 的 365 天证书，落到 `${INSTALL_DIR}/certs/`，私钥 `chmod 600`。脚本不交互，直接生成；末尾 banner 提示替换真证书。
 5. `docker load -i images/ongrid.tar`、`images/frontier.tar`、`images/ongrid-web.tar` 加载所有镜像。
-6. 若 `/opt/ongrid/.env` 不存在则从 `.env.example` 创建，并对空字段（`MYSQL_ROOT_PASSWORD`、`MYSQL_PASSWORD`、`ONGRID_JWT_SECRET`、`ONGRID_ADMIN_PASSWORD`）生成随机值，文件权限置 `600`。
+6. 若 `/opt/ongrid/.env` 不存在则从 `.env.example` 创建；`MYSQL_ROOT_PASSWORD` / `MYSQL_PASSWORD` / `ONGRID_ADMIN_PASSWORD` / `GRAFANA_ADMIN_PASSWORD` 已在 `.env.example` 中写死固定默认值（`ongrid_root_pwd` / `ongrid_app_pwd` / `ongrid_admin_pwd` / `ongrid_grafana_pwd`），如需修改请编辑该文件后重新安装。文件权限置 `600`。
 7. `docker compose up -d` 启动 MySQL + ongrid + frontier + nginx + prometheus（ADR-009）。
 8. 轮询 `https://localhost:${ONGRID_HTTP_PORT}/healthz`（nginx 透传到 manager，`-k` 跳过自签校验）最多 60 秒。
-9. 打印安装摘要，包括 **Web URL**、**API URL** 与 **管理员初始密码**（只显示一次，务必立即记录）。
+9. 打印安装摘要，包括 **Web URL**、**API URL** 与 **管理员密码**（取自 `.env` 中的 `ONGRID_ADMIN_PASSWORD`，可手动修改后重启服务生效）。
 
 ### 可选参数
 
@@ -321,12 +321,13 @@ sudo ./uninstall.sh --purge --yes
 | `ONGRID_NOTIFY_SLACK_*` | Slack incoming webhook 通道 | 默认关闭 |
 | `ONGRID_NOTIFY_FEISHU_*` | 飞书 / Lark 自定义机器人 webhook 通道，支持 `SECRET` 签名 | 默认关闭 |
 | `ONGRID_NOTIFY_DINGTALK_*` | 钉钉自定义机器人 webhook 通道，支持 `SECRET` 签名 | 默认关闭 |
-| `MYSQL_ROOT_PASSWORD` | MySQL root 密码（容器内使用） | 空则自动生成 24 位随机 |
-| `MYSQL_PASSWORD` | `ongrid` 应用库密码 | 空则自动生成 24 位随机 |
+| `MYSQL_ROOT_PASSWORD` | MySQL root 密码（容器内使用） | 默认 `ongrid_root_pwd`，生产环境请修改 |
+| `MYSQL_PASSWORD` | `ongrid` 应用库密码 | 默认 `ongrid_app_pwd`，生产环境请修改 |
 | `ONGRID_JWT_SECRET` | JWT 签名密钥 | 空则自动生成 64 位随机 |
 | `ONGRID_JWT_ACCESS_TTL` / `_REFRESH_TTL` | Token 有效期 | 默认 `15m` / `720h` |
+| `GRAFANA_ADMIN_PASSWORD` | Grafana 管理员密码（外部接入时 bootstrap 用） | 默认 `ongrid_grafana_pwd`，生产环境请修改 |
 | `ONGRID_ADMIN_EMAIL` | 首次启动时自动建立的管理员邮箱 | 默认 `admin@ongrid.local` |
-| `ONGRID_ADMIN_PASSWORD` | 首次启动时的管理员密码 | 空则自动生成 20 位随机，安装末尾打印一次 |
+| `ONGRID_ADMIN_PASSWORD` | 首次启动时的管理员密码 | 默认 `ongrid_admin_pwd`，生产环境请修改 |
 | `OPENAI_API_KEY` | OpenAI 密钥（留空则 AI Chat 接口返回 500） | 可为空 |
 | `OPENAI_MODEL` / `OPENAI_BASE_URL` | OpenAI 模型与自定义 endpoint | 默认 `gpt-4o` |
 
@@ -484,7 +485,7 @@ curl -k -I https://<host>:8443/grafana/
 
 ## 登录验证
 
-安装脚本末尾打印的 `password` 是管理员初始密码，**只显示一次**（也保存在 `/opt/ongrid/.env`）。首次登录（注意 `-k` 跳过自签证书校验，换成真证书后可以去掉）：
+安装脚本末尾打印的 `password` 是管理员初始密码，等于 `.env.example` 中的 `ONGRID_ADMIN_PASSWORD` 默认值（也保存在 `/opt/ongrid/.env`，可手动修改后重启服务生效）。首次登录（注意 `-k` 跳过自签证书校验，换成真证书后可以去掉）：
 
 ```bash
 curl -sk -X POST https://<host>/api/v1/auth/login \
