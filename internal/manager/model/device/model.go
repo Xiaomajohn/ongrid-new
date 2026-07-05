@@ -90,8 +90,10 @@ type Device struct {
 	// SFTP + one-click install flows read these directly (no secret-box
 	// envelope) — ongrid is an internal ops platform and the trade-off
 	// (operator UX vs envelope crypto) is deliberately in favour of UX.
-	// Response shapes must still scrub these fields before serialization;
-	// the wire contract is documented in server/device/credentials.go.
+	// API response shapes (ssh-info / device detail / create response)
+	// echo the password / private key back in clear so operators can
+	// review and rotate without re-entering; the wire contract is
+	// documented in server/device/credentials.go and http.go.
 	SSHHost       string     `gorm:"size:255;column:ssh_host"`
 	SSHPort       int        `gorm:"not null;default:22;column:ssh_port"`
 	SSHUser       string     `gorm:"size:64;column:ssh_user"`

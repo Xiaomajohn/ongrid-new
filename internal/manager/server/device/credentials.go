@@ -50,10 +50,16 @@ type sshCredentialsResp struct {
 	AuthKind    string `json:"auth_kind"`
 	HasPassword bool   `json:"has_password"`
 	HasKey      bool   `json:"has_key"`
-	HostKey     string `json:"host_key,omitempty"`
-	LastSeenAt  any    `json:"last_seen_at,omitempty"`
-	LastError   string `json:"last_error,omitempty"`
-	EdgeOnline  bool   `json:"edge_online"`
+	// Password / Key carry the plaintext secret (internal ops tool, no
+	// envelope). Empty string means "this auth kind is not configured".
+	// Frontends gate visibility behind HasPassword / HasKey booleans
+	// (still useful as a quick "is set?" hint in lists).
+	Password   string `json:"password,omitempty"`
+	Key        string `json:"key,omitempty"`
+	HostKey    string `json:"host_key,omitempty"`
+	LastSeenAt any    `json:"last_seen_at,omitempty"`
+	LastError  string `json:"last_error,omitempty"`
+	EdgeOnline bool   `json:"edge_online"`
 }
 
 // putSSHCredentials replaces the SSH block. Admin only. Single-PUT
@@ -130,6 +136,8 @@ func (h *Handler) getSSHInfo(w http.ResponseWriter, r *http.Request) {
 		AuthKind:    wire.AuthKind,
 		HasPassword: wire.HasPassword,
 		HasKey:      wire.HasKey,
+		Password:    wire.Password,
+		Key:         wire.Key,
 		HostKey:     wire.HostKey,
 		LastSeenAt:  wire.LastSeenAt,
 		LastError:   wire.LastError,

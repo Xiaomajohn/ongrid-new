@@ -46,6 +46,30 @@ func (d *fakeDeviceRepo) FindOrCreateByFingerprint(_ context.Context, seed *devi
 	return &cp, nil
 }
 
+// Create is the manual-registration path stub for tests. In-memory:
+// rejects empty fingerprint with ErrInvalid, ErrConflict on fingerprint
+// collision, otherwise allocates a new id mirroring FindOrCreateByFingerprint
+// but always inserting (no upsert). Mirrors the production store's
+// semantics so biz/device.Create tests can rely on the same code path.
+func (d *fakeDeviceRepo) Create(_ context.Context, in *devicemodel.Device) (*devicemodel.Device, error) {
+	if in == nil || in.Fingerprint == "" {
+		return nil, errs.ErrInvalid
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if _, taken := d.byFP[in.Fingerprint]; taken {
+		return nil, errs.ErrConflict
+	}
+	d.nextID++
+	cp := *in
+	cp.ID = d.nextID
+	cp.CreatedAt = time.Now()
+	cp.UpdatedAt = cp.CreatedAt
+	d.byID[cp.ID] = &cp
+	d.byFP[cp.Fingerprint] = cp.ID
+	return &cp, nil
+}
+
 func (d *fakeDeviceRepo) RebindFingerprint(_ context.Context, oldFP, newFP string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()

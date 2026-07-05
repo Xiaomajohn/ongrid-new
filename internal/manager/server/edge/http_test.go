@@ -38,6 +38,12 @@ func newFakeDeviceRepo(rows ...*devicemodel.Device) *fakeDeviceRepo {
 func (d *fakeDeviceRepo) FindOrCreateByFingerprint(context.Context, *devicemodel.Device) (*devicemodel.Device, error) {
 	return nil, nil
 }
+func (d *fakeDeviceRepo) Create(context.Context, *devicemodel.Device) (*devicemodel.Device, error) {
+	// Not exercised by the HTTP layer (the create flow lives in the
+	// device server). Returning (nil,nil) keeps the interface satisfied
+	// without adding test surface that isn't covered.
+	return nil, nil
+}
 func (d *fakeDeviceRepo) RebindFingerprint(context.Context, string, string) error { return nil }
 func (d *fakeDeviceRepo) UpdateHostFacts(context.Context, uint64, devicebiz.HostFacts) error {
 	return nil
@@ -64,6 +70,19 @@ func (d *fakeDeviceRepo) GetMany(_ context.Context, ids []uint64) (map[uint64]*d
 func (d *fakeDeviceRepo) UpdateUsage(context.Context, uint64, devicebiz.Usage) error { return nil }
 func (d *fakeDeviceRepo) UpdateRoles(context.Context, uint64, uint8) error           { return nil }
 func (d *fakeDeviceRepo) UpdateNameDescription(context.Context, uint64, string, string) error {
+	return nil
+}
+func (d *fakeDeviceRepo) SetSSHCredentials(context.Context, uint64, devicebiz.SSHCredentials) error {
+	return nil
+}
+func (d *fakeDeviceRepo) ClearSSHCredentialsField(context.Context, uint64, string) error {
+	return nil
+}
+func (d *fakeDeviceRepo) SetSSHCredentialsIAW(context.Context, uint64, devicebiz.SSHCredentialsIAW) error {
+	return nil
+}
+func (d *fakeDeviceRepo) TouchSSHSuccess(context.Context, uint64) error    { return nil }
+func (d *fakeDeviceRepo) TouchSSHError(context.Context, uint64, string) error {
 	return nil
 }
 func (d *fakeDeviceRepo) SetNodeID(context.Context, uint64, uint64) error { return nil }

@@ -36,6 +36,15 @@ export type Device = {
   cpu_usage_pct?: number;
   mem_usage_pct?: number;
   disk_usage_pct?: number;
+  // — SSH 凭据（内部系统，明文回显）。仅 `ssh_host` / `ssh_port` /
+  // `ssh_user` 是上下文信息；`ssh_password` / `ssh_key` 是真凭据，
+  // 渲染时需自建查看 / 复制 UI（本次未做 UI 组件，仅类型扩展对齐 API）。
+  ssh_host?: string;
+  ssh_port?: number;
+  ssh_user?: string;
+  ssh_auth_kind?: 'password' | 'key';
+  ssh_password?: string;
+  ssh_key?: string;
 };
 
 export function listDevices(params?: {
@@ -78,6 +87,13 @@ export type CreateDeviceResponse = {
   hostname?: string;
   description?: string;
   created_at?: string;
+  // 内部系统不回显密文 — 同 Device 上 6 个 SSH 字段语义
+  ssh_host?: string;
+  ssh_port?: number;
+  ssh_user?: string;
+  ssh_auth_kind?: 'password' | 'key';
+  ssh_password?: string;
+  ssh_key?: string;
 };
 
 // createDevice — register a new logical host + SSH credentials. Backend
@@ -132,6 +148,10 @@ export interface SSHInfo {
   has_password: boolean;
   has_key: boolean;
   edge_online: boolean;
+  // 内部系统：密码 / 私钥随主结构明文回显（不做密文处理），前端按需渲染。
+  // 空串表示该 auth_kind 未配置。
+  password?: string;
+  key?: string;
 }
 
 export function getDeviceSSHInfo(deviceId: string | number) {

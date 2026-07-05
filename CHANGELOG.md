@@ -4,11 +4,15 @@
 
 ## v0.9.1 (2026-07-05)
 
+### 新增
+- **`POST /api/v1/devices`（admin）**：手动注册一台逻辑主机并写入 SSH 凭据，供 edge agent 上报前预占设备名 / 凭据。实现链路 `Repo.Create` → `Usecase.Create` → `Handler.create`；`Device.Fingerprint` 使用 `manual:<UUID>` 占位，真实 agent 上报时由 `RebindFingerprint` 覆盖；`CreatedBy` 取自 `tenantctx.UserID`，未登录为 `nil`；SSH 凭据明文落库（内部运维工具设计）。重复 fingerprint 返回 `ErrConflict`（HTTP 409），空 fingerprint / 必填字段缺失返回 `ErrInvalid`（HTTP 400）；路由前缀 `/api/v1/devices`，admin 网关沿用 `requireAdmin` 中间件。
+
 ### 行为变化
 - **安装时密码改为固定默认值**：`MYSQL_ROOT_PASSWORD`、`MYSQL_PASSWORD`、`ONGRID_ADMIN_PASSWORD`、`GRAFANA_ADMIN_PASSWORD` 不再由 `install.sh` 随机生成，而是在 `.env.example` 中写死默认值（`ongrid_root_pwd` / `ongrid_app_pwd` / `ongrid_admin_pwd` / `ongrid_grafana_pwd`）。每次安装使用一致的固定凭据，便于自动化、脚本化、回归测试。
 - **生产前必须修改**：默认值仅供开发/测试使用，生产部署请编辑 `/opt/ongrid/.env` 修改这 4 个字段。
 - **横幅行为调整**：安装脚本末尾始终打印当前 `ONGRID_ADMIN_PASSWORD` 值（不再"只显示一次"），并标注"生产前请修改"提示。
 - **`install.sh` 兜底逻辑保留**：若运维手动把 `.env` 中这 4 个字段清空，`install.sh` 仍会自动生成随机值（仅触发兜底，正常路径不再生成）。
+- **API 层 SSH 凭据改为明文回显**：内部运维系统策略 — `GET /v1/devices/{id}/ssh-info`、`POST /v1/devices`、`GET /v1/devices/{id}` 的响应体均直接带回 `ssh_password` / `ssh_key` 字段，不再 scrub；`has_password` / `has_key` 布尔保留作为"是否配置"的快速提示。`Device.SSHPassword` / `SSHKey` 列继续明文存库（原有约定不变）。前端若要展示明文需自建查看/复制 UI（本次未做）。
 
 ### 不变项
 - `ONGRID_JWT_SECRET` 仍为空时随机生成（用户未要求改 JWT secret）。

@@ -47,6 +47,7 @@ func (h *Handler) SetEdgeLookup(e EdgeLookup) { h.edges = e }
 //
 // Routes:
 //
+//	POST /v1/devices (admin) — register a new logical host + SSH creds
 //	GET /v1/devices (any authed)
 //	GET /v1/devices/{id} (any authed)
 //	PATCH /v1/devices/{id} (admin) — name / description
@@ -57,6 +58,7 @@ func (h *Handler) SetEdgeLookup(e EdgeLookup) { h.edges = e }
 //	GET /v1/devices/{id}/ssh-info (any authed)
 //	DELETE /v1/devices/{id}/ssh-credentials (admin)
 func (h *Handler) Register(r chi.Router) {
+	r.With(h.requireAdmin).Post("/v1/devices", h.create)
 	r.Get("/v1/devices", h.list)
 	r.Get("/v1/devices/{id}", h.get)
 	r.With(h.requireAdmin).Patch("/v1/devices/{id}", h.update)
@@ -108,6 +110,17 @@ type deviceItem struct {
 	Online         bool       `json:"online"`
 	LastSeenAt     *time.Time `json:"last_seen_at,omitempty"`
 	CreatedAt      time.Time  `json:"created_at"`
+	// SSH fields echoed in clear (internal ops system — plaintext is
+	// the documented contract; see model/device/model.go + the 行为变化
+	// entry in CHANGELOG.md v0.9.1). Host / port / user / auth_kind are
+	// non-secret context that operators expect back; password / key are
+	// the secrets, returned on purpose so the SPA can review / rotate.
+	SSHHost     string `json:"ssh_host,omitempty"`
+	SSHPort     int    `json:"ssh_port"`
+	SSHUser     string `json:"ssh_user,omitempty"`
+	SSHAuthKind string `json:"ssh_auth_kind,omitempty"`
+	SSHPassword string `json:"ssh_password,omitempty"`
+	SSHKey      string `json:"ssh_key,omitempty"`
 	// NodeID is the link to the topology `nodes` table. Lets
 	// the SPA's device-detail Topology tab resolve neighbours without
 	// a separate /v1/topology lookup. Nullable until topology.Migrate
@@ -127,6 +140,44 @@ type updateReq struct {
 
 type updateRolesReq struct {
 	Roles []string `json:"roles"`
+}
+
+// createReq is the wire body for POST /v1/devices. Field names match
+// the SPA's CreateDeviceInput (api/devices.ts) so the frontend doesn't
+// need a remap shim. Host facts (OS / Arch / CPU / Mem / disk) are
+// intentionally absent — those arrive from the edge agent's register
+// call, not from the operator.
+type createReq struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Hostname    string `json:"hostname,omitempty"`
+	SSHHost     string `json:"ssh_host"`
+	SSHPort     int    `json:"ssh_port"`
+	SSHUser     string `json:"ssh_user"`
+	SSHAuthKind string `json:"ssh_auth_kind"` // "password" | "key"
+	SSHPassword string `json:"ssh_password,omitempty"`
+	SSHKey      string `json:"ssh_key,omitempty"`
+}
+
+// createResp is what the SPA expects back from CreateDeviceResponse:
+// id / name / hostname / description / created_at, plus the SSH block
+// echoed in clear. The project decided SSH secrets come back plaintext
+// in API responses — ongrid is an internal ops platform and the
+// operator-UX trade-off beats envelope crypto. The wire contract is
+// also documented in server/device/credentials.go (ssh-info) and the
+// model-level comment on Device.SSHPassword / SSHKey.
+type createResp struct {
+	ID          uint64    `json:"id"`
+	Name        string    `json:"name"`
+	Hostname    string    `json:"hostname,omitempty"`
+	Description string    `json:"description,omitempty"`
+	SSHHost     string    `json:"ssh_host,omitempty"`
+	SSHPort     int       `json:"ssh_port"`
+	SSHUser     string    `json:"ssh_user,omitempty"`
+	SSHAuthKind string    `json:"ssh_auth_kind,omitempty"`
+	SSHPassword string    `json:"ssh_password,omitempty"`
+	SSHKey      string    `json:"ssh_key,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 type edgeLinkRow struct {
@@ -204,6 +255,60 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 		out = append(out, devToItem(d))
 	}
 	writeJSON(w, http.StatusOK, listResp{Items: out, Total: len(out)})
+}
+
+// create registers a new logical host + SSH credentials. Admin only
+// — matches the legacy edge CreateEdge admin gate. The handler is a
+// thin DTO mapper; validation + persistence live in biz/device.Create.
+//
+// Wire shape matches CreateDeviceResponse in web/src/api/devices.ts so
+// the SPA can re-use its existing `createDevice` helper without a
+// remap shim.
+func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
+	t, ok := tenantctx.From(r.Context())
+	if !ok {
+		writeErr(w, errs.ErrUnauthorized)
+		return
+	}
+	var req createReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, errors.Join(errs.ErrInvalid, err))
+		return
+	}
+	in := devicebiz.CreateInput{
+		Name:        req.Name,
+		Description: req.Description,
+		Hostname:    req.Hostname,
+		SSHHost:     req.SSHHost,
+		SSHPort:     req.SSHPort,
+		SSHUser:     req.SSHUser,
+		SSHAuthKind: req.SSHAuthKind,
+		SSHPassword: req.SSHPassword,
+		SSHKey:      req.SSHKey,
+	}
+	var createdBy *uint64
+	if t.UserID != 0 {
+		uid := t.UserID
+		createdBy = &uid
+	}
+	d, err := h.uc.Create(r.Context(), in, createdBy)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, createResp{
+		ID:          d.ID,
+		Name:        d.Name,
+		Hostname:    d.Hostname,
+		Description: d.Description,
+		SSHHost:     d.SSHHost,
+		SSHPort:     d.SSHPort,
+		SSHUser:     d.SSHUser,
+		SSHAuthKind: d.SSHAuthKind,
+		SSHPassword: d.SSHPassword,
+		SSHKey:      d.SSHKey,
+		CreatedAt:   d.CreatedAt,
+	})
 }
 
 func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
@@ -341,6 +446,12 @@ func devToItem(d *devicemodel.Device) deviceItem {
 		Online:         d.Online,
 		LastSeenAt:     d.LastSeenAt,
 		CreatedAt:      d.CreatedAt,
+		SSHHost:        d.SSHHost,
+		SSHPort:        d.SSHPort,
+		SSHUser:        d.SSHUser,
+		SSHAuthKind:    d.SSHAuthKind,
+		SSHPassword:    d.SSHPassword,
+		SSHKey:         d.SSHKey,
 		NodeID:         d.NodeID,
 	}
 }

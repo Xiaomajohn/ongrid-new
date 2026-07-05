@@ -32,6 +32,12 @@ type ListFilter struct {
 // Repo is the device persistence contract. The sqlite/mysql implementation
 // lives under internal/manager/data/device.
 type Repo interface {
+	// Create inserts a fresh Device row. Caller is responsible for
+	// setting every required column (Fingerprint, Name, Hostname, OS,
+	// Arch, CPU/Mem sizes — see the model comments). Returns the row
+	// with ID populated. Duplicate fingerprint → ErrConflict.
+	Create(ctx context.Context, d *model.Device) (*model.Device, error)
+
 	// FindOrCreateByFingerprint returns the existing Device for the
 	// (Fingerprint) key or creates a fresh row carrying the provided
 	// fields. UserID, Hostname/OS/etc. on the seed are only written on

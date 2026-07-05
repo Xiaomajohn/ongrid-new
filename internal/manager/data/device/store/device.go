@@ -29,6 +29,28 @@ func NewRepo(db *gorm.DB) *Repo { return &Repo{db: db} }
 // compile-time check.
 var _ biz.Repo = (*Repo)(nil)
 
+// Create inserts d and returns the row with ID populated. Duplicate
+// fingerprint (UNIQUE index violation on `fingerprint`) → ErrConflict.
+// Other DB errors pass through unchanged so callers can debug.
+func (r *Repo) Create(ctx context.Context, d *model.Device) (*model.Device, error) {
+	if d == nil || d.Fingerprint == "" {
+		return nil, errs.ErrInvalid
+	}
+	if err := r.db.WithContext(ctx).Create(d).Error; err != nil {
+		// MySQL: *mysql.MySQLError with Number==1062 (ER_DUP_ENTRY).
+		// SQLite: plain string "UNIQUE constraint failed: devices.fingerprint".
+		// Both signal the same UNIQUE index violation on fingerprint —
+		// surface ErrConflict so the handler can map to 409 without
+		// reaching for a driver-specific type switch.
+		if strings.Contains(err.Error(), "Duplicate entry") ||
+			strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return nil, errs.ErrConflict
+		}
+		return nil, err
+	}
+	return d, nil
+}
+
 // FindOrCreateByFingerprint returns the existing row for seed.Fingerprint
 // or creates a fresh row populated from seed. Implementation uses an
 // ON CONFLICT DO NOTHING insert plus a follow-up select; this works on

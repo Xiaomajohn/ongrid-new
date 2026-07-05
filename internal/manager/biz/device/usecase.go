@@ -9,9 +9,119 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	model "github.com/ongridio/ongrid/internal/manager/model/device"
 	"github.com/ongridio/ongrid/internal/pkg/errs"
 )
+
+// manualFingerprintPrefix marks Devices seeded by the operator's web UI
+// rather than by an edge-agent register call. The UUID suffix keeps the
+// row unique within the manual namespace; once an edge actually reports
+// in for this host, RebindFingerprint (model/edge DeviceID → real
+// machine-id) takes over and the manual:… fingerprint is overwritten
+// in place (device.ID / junction / history all carry over).
+const manualFingerprintPrefix = "manual:"
+
+// CreateInput is the operator-supplied payload for POST /v1/devices.
+// Host facts (OS / CPU / Mem / disk) are intentionally NOT here — those
+// arrive when the edge agent registers; we just persist the operator-
+// facing name + SSH credentials on day 1.
+type CreateInput struct {
+	Name        string // required
+	Description string
+	Hostname    string // optional; falls back to sshHost when blank
+	// SSH credentials — exactly one of Password / Key is required,
+	// matched to AuthKind. Stored plaintext by design (internal ops tool).
+	SSHHost     string // required
+	SSHPort     int    // 0 → 22
+	SSHUser     string // required
+	SSHAuthKind string // "password" | "key"
+	SSHPassword string
+	SSHKey      string
+}
+
+// Create inserts a brand-new device row owned by the calling admin.
+// Returns the persisted row (with ID populated) so the handler can echo
+// the canonical response. Validation lives here so the wire layer stays
+// a thin DTO mapper; the SQL layer (Repo.Create) assumes inputs are
+// already clean.
+//
+// Fingerprint derivation: see manualFingerprintPrefix. We do NOT use
+// (sshHost, sshPort, sshUser) as the fingerprint because re-pointing an
+// existing device at a new SSH endpoint (e.g. migrated IP) shouldn't
+// spawn a new row.
+func (u *Usecase) Create(ctx context.Context, in CreateInput, createdBy *uint64) (*model.Device, error) {
+	if u.repo == nil {
+		return nil, errs.ErrNotWiredYet
+	}
+	name := strings.TrimSpace(in.Name)
+	if name == "" {
+		return nil, fmt.Errorf("%w: name required", errs.ErrInvalid)
+	}
+	sshHost := strings.TrimSpace(in.SSHHost)
+	if sshHost == "" {
+		return nil, fmt.Errorf("%w: ssh_host required", errs.ErrInvalid)
+	}
+	sshUser := strings.TrimSpace(in.SSHUser)
+	if sshUser == "" {
+		return nil, fmt.Errorf("%w: ssh_user required", errs.ErrInvalid)
+	}
+	authKind := strings.TrimSpace(in.SSHAuthKind)
+	switch authKind {
+	case "password":
+		if strings.TrimSpace(in.SSHPassword) == "" {
+			return nil, fmt.Errorf("%w: ssh_password required when ssh_auth_kind=password", errs.ErrInvalid)
+		}
+	case "key":
+		if strings.TrimSpace(in.SSHKey) == "" {
+			return nil, fmt.Errorf("%w: ssh_key required when ssh_auth_kind=key", errs.ErrInvalid)
+		}
+	case "":
+		authKind = "password"
+	default:
+		return nil, fmt.Errorf("%w: ssh_auth_kind must be password or key, got %q", errs.ErrInvalid, authKind)
+	}
+	port := in.SSHPort
+	if port == 0 {
+		port = 22
+	}
+	if port < 1 || port > 65535 {
+		return nil, fmt.Errorf("%w: ssh_port out of range", errs.ErrInvalid)
+	}
+
+	hostname := strings.TrimSpace(in.Hostname)
+	if hostname == "" {
+		hostname = sshHost
+	}
+
+	d := &model.Device{
+		Fingerprint: manualFingerprintPrefix + uuid.NewString(),
+		UserID:      createdBy,
+		Name:        name,
+		Description: strings.TrimSpace(in.Description),
+		Hostname:    hostname,
+		// Host facts left at zero-value defaults — the edge agent will
+		// overwrite via UpdateHostFacts on its first register.
+		SSHHost:     sshHost,
+		SSHPort:     port,
+		SSHUser:     sshUser,
+		SSHAuthKind: authKind,
+		SSHPassword: in.SSHPassword,
+		SSHKey:      in.SSHKey,
+	}
+	out, err := u.repo.Create(ctx, d)
+	if err != nil {
+		return nil, err
+	}
+	if u.log != nil {
+		u.log.Info("device created",
+			"id", out.ID, "name", out.Name, "ssh_host", out.SSHHost,
+			"ssh_user", out.SSHUser, "auth_kind", out.SSHAuthKind,
+			"fingerprint_kind", "manual")
+	}
+	return out, nil
+}
 
 // Usecase is the manager/device biz-layer facade.
 type Usecase struct {
@@ -157,9 +267,9 @@ func (u *Usecase) SetSSHCredentials(ctx context.Context, id uint64, creds SSHCre
 	return nil
 }
 
-// GetSSHCredentials returns the SSH block in a wire-safe shape: never
-// the password / key plaintext (those are write-only on purpose — see
-// the model comment).
+// GetSSHCredentials 以线协议形态返回 SSH 块。内部运维系统：密码 /
+// 私钥直接以明文回显（不做信封加密），SPA 直接读取即可；has_password /
+// has_key 派生布尔同时回填，便于前端按需作为"已配置"的可见性提示。
 func (u *Usecase) GetSSHCredentials(ctx context.Context, id uint64) (*SSHCredentialsWire, error) {
 	if u.repo == nil {
 		return nil, errs.ErrNotWiredYet
@@ -169,15 +279,17 @@ func (u *Usecase) GetSSHCredentials(ctx context.Context, id uint64) (*SSHCredent
 		return nil, err
 	}
 	w := &SSHCredentialsWire{
-		Host:       d.SSHHost,
-		Port:       d.SSHPort,
-		User:       d.SSHUser,
-		AuthKind:   d.SSHAuthKind,
+		Host:        d.SSHHost,
+		Port:        d.SSHPort,
+		User:        d.SSHUser,
+		AuthKind:    d.SSHAuthKind,
 		HasPassword: d.SSHPassword != "",
+		Password:    d.SSHPassword,
 		HasKey:      d.SSHKey != "",
-		HostKey:    d.SSHHostKey,
-		LastSeenAt: d.SSHLastSeenAt,
-		LastError:  d.SSHLastError,
+		Key:         d.SSHKey,
+		HostKey:     d.SSHHostKey,
+		LastSeenAt:  d.SSHLastSeenAt,
+		LastError:   d.SSHLastError,
 	}
 	if w.Port == 0 {
 		w.Port = 22
@@ -219,17 +331,20 @@ func (u *Usecase) SetSSHCredentialsIAW(ctx context.Context, id uint64, iaw SSHCr
 	return u.repo.SetSSHCredentialsIAW(ctx, id, iaw)
 }
 
-// SSHCredentialsWire is the SSH-info DTO shape the SPA reads. It
-// deliberately omits plaintext password / key — has_* flags say
-// whether the corresponding field is set so the UI can render
-// "configured" / "not configured" without leaking the secret.
+// SSHCredentialsWire 是 SPA 读取的 SSH 信息 DTO 形态。内部运维系统：
+// 密码 / 私钥直接以明文回显（不做信封加密），供 SPA 直接渲染使用。
+// 空字符串代表"该认证方式未配置"——has_password / has_key 派生布尔
+// 保留下来，便于前端按需作为"已配置"的可见性提示，或在 UI 切换时
+// 复用同一份数据。
 type SSHCredentialsWire struct {
 	Host        string     `json:"host,omitempty"`
 	Port        int        `json:"port"`
 	User        string     `json:"user,omitempty"`
 	AuthKind    string     `json:"auth_kind"`
 	HasPassword bool       `json:"has_password"`
+	Password    string     `json:"password,omitempty"`
 	HasKey      bool       `json:"has_key"`
+	Key         string     `json:"key,omitempty"`
 	HostKey     string     `json:"host_key,omitempty"`
 	LastSeenAt  *time.Time `json:"last_seen_at,omitempty"`
 	LastError   string     `json:"last_error,omitempty"`
