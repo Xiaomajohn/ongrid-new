@@ -837,6 +837,52 @@ if ! docker image inspect "ongrid:${VERSION_FROM_FILE}" >/dev/null 2>&1; then
 fi
 log_info "ongrid:${VERSION_FROM_FILE} image ready"
 
+# extract_image_dist <image-ref> <dst-dir> <src-path> [<src-path>...]
+# Extracts one or more baked-in directories from <image-ref> into <dst-dir>
+# via `docker create` + `docker cp`. Each <src-path> inside the image lands
+# at <dst-dir>/<basename(src-path)> so the bind-mount source layout mirrors
+# the source layout 1:1 (/ongrid → dst/ongrid, /usr/share/nginx/html →
+# dst/html, …). Fails fast on any individual cp — caller decides whether
+# to `exit 1` or continue. chmod -R a+rX lets the nginx worker (uid nginx)
+# and any non-root mount consumer read the files; for the ongrid binary
+# itself the conditional-X is harmless because the manager runs as
+# nonroot (uid 65532) and only the X bit matters for execution.
+#
+# MUST be defined before the call sites below — bash resolves a function
+# reference at call time, so placing this further down yields the cryptic
+# `./install.sh: <line>: extract_image_dist: 未找到命令` failure when
+# `set -euo pipefail` (line 5) makes the if-condition take the then-branch
+# and the script aborts on its own error message. upgrade.sh has this
+# defined at line 248 (before any call); install.sh is the only place
+# where the order is sensitive.
+extract_image_dist() {
+    local image="$1" dst_dir="$2"; shift 2
+    local tmp_name="ongrid-extract-$$-$(date +%s%N)"
+    docker rm -f "$tmp_name" >/dev/null 2>&1 || true
+    if ! docker create --name "$tmp_name" "$image" >/dev/null 2>&1; then
+        log_error "failed to create extract container from $image"
+        return 1
+    fi
+    mkdir -p "$dst_dir"
+    local rc=0 src name sub
+    for src in "$@"; do
+        name="${src##*/}"            # /ongrid → ongrid, /usr/share/nginx/html → html
+        name="${name:-root}"         # bare '/' edge case
+        sub="${dst_dir}/${name}"
+        rm -rf "$sub"
+        mkdir -p "$sub"
+        if ! docker cp "$tmp_name:$src/." "$sub/" 2>/dev/null; then
+            log_error "failed to copy $src from $image into $sub"
+            rc=1
+            break
+        fi
+        chmod -R a+rX "$sub"
+        log_info "  + $src → $sub ($(find "$sub" -type f 2>/dev/null | wc -l) files)"
+    done
+    docker rm -f "$tmp_name" >/dev/null 2>&1 || true
+    return $rc
+}
+
 # ---------- extract baked-in image assets to host bind-mount sources ----------
 # Bind-mounts in docker-compose.yml that point at image-baked-in assets
 # (`/usr/share/nginx/html` in ongrid-web + `/ongrid`, `/skills`, `/agents`
@@ -845,7 +891,9 @@ log_info "ongrid:${VERSION_FROM_FILE} image ready"
 # bind-mount = single source of truth"; the image's baked-in copy becomes
 # a literal read-only fallback that nothing in the running stack ever reads.
 #
-# extract_image_dist is defined further down (next to gen_secret). Each call
+# extract_image_dist is defined above (just before this comment block,
+# right after `image ready` — it MUST come before the call sites since bash
+# resolves function references at call time, not parse time). Each call
 # below hard-fails (exit 1) on any failure — there is no fallback. If a
 # future change relaxes this, audit the bind-mount contract first: nginx
 # + ongrid will silently serve stale / empty content otherwise.
@@ -881,44 +929,6 @@ gen_secret() {
         out=$(hexdump -n 32 -e '"%02x"' /dev/urandom | cut -c1-"$len")
     fi
     printf '%s' "$out"
-}
-
-# extract_image_dist <image-ref> <dst-dir> <src-path> [<src-path>...]
-# Extracts one or more baked-in directories from <image-ref> into <dst-dir>
-# via `docker create` + `docker cp`. Each <src-path> inside the image lands
-# at <dst-dir>/<basename(src-path)> so the bind-mount source layout mirrors
-# the source layout 1:1 (/ongrid → dst/ongrid, /usr/share/nginx/html →
-# dst/html, …). Fails fast on any individual cp — caller decides whether
-# to `exit 1` or continue. chmod -R a+rX lets the nginx worker (uid nginx)
-# and any non-root mount consumer read the files; for the ongrid binary
-# itself the conditional-X is harmless because the manager runs as
-# nonroot (uid 65532) and only the X bit matters for execution.
-extract_image_dist() {
-    local image="$1" dst_dir="$2"; shift 2
-    local tmp_name="ongrid-extract-$$-$(date +%s%N)"
-    docker rm -f "$tmp_name" >/dev/null 2>&1 || true
-    if ! docker create --name "$tmp_name" "$image" >/dev/null 2>&1; then
-        log_error "failed to create extract container from $image"
-        return 1
-    fi
-    mkdir -p "$dst_dir"
-    local rc=0 src name sub
-    for src in "$@"; do
-        name="${src##*/}"            # /ongrid → ongrid, /usr/share/nginx/html → html
-        name="${name:-root}"         # bare '/' edge case
-        sub="${dst_dir}/${name}"
-        rm -rf "$sub"
-        mkdir -p "$sub"
-        if ! docker cp "$tmp_name:$src/." "$sub/" 2>/dev/null; then
-            log_error "failed to copy $src from $image into $sub"
-            rc=1
-            break
-        fi
-        chmod -R a+rX "$sub"
-        log_info "  + $src → $sub ($(find "$sub" -type f 2>/dev/null | wc -l) files)"
-    done
-    docker rm -f "$tmp_name" >/dev/null 2>&1 || true
-    return $rc
 }
 
 # ---------- .env: create or reuse ----------
