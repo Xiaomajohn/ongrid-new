@@ -59,11 +59,36 @@ while [[ $# -gt 0 ]]; do
 done
 
 # -------- mode dispatch (must happen before we touch INSTALL_DIR) --------
+# install.sh + upgrade.sh both default INSTALL_DIR=/opt/ongrid with
+# docker-compose.yml living DIRECTLY under it (single-level; no nested
+# /ongrid/ subdir — see install.sh:593-609 + comment "There is no
+# separate PARENT_DIR/ongrid nesting"). Earlier versions of this script
+# still checked the legacy <parent>/ongrid/docker-compose.yml path; that
+# never matched real installs and forced the dispatcher to fall through
+# to the "no install detected — running systemd --purge anyway" branch,
+# which then ran the systemd cleaner against compose-mode hosts (zero
+# effect: it removed only what install-systemd.sh would have created —
+# /var/lib/ongrid*, /etc/ongrid, ongrid-* service users — none of which
+# exist on a docker host). The compose stack stayed up, the bind-mount
+# /opt/ongrid/data survived, and the named volumes ongrid_mysql_data /
+# ongrid_logs were never reaped — exactly the failure mode users hit.
+# Default to the canonical location used by install.sh today, but keep
+# a best-effort fallback probe for the legacy nested location so we
+# still detect an older install if one slips through.
 detect_install_mode() {
     local has_systemd=0 has_compose=0
     [[ -f /etc/systemd/system/ongrid.service ]] && has_systemd=1
+    local install_dir="${ONGRID_INSTALL_DIR:-/opt/ongrid}"
+    [[ -f "$install_dir/docker-compose.yml" ]] && has_compose=1
+    # Legacy fallback (pre single-parent-refactor installs). Without
+    # this, an operator who upgraded across the refactor boundary with
+    # an old install_root that still nests compose under <parent>/ongrid
+    # would silently fail to detect and fall into the systemd branch.
     local parent="${ONGRID_INSTALL_DIR:-/opt/ongrid}"
-    [[ -f "$parent/ongrid/docker-compose.yml" ]] && has_compose=1
+    if (( ! has_compose )) && [[ -f "$parent/ongrid/docker-compose.yml" ]]; then
+        log_warn "detected legacy nested compose layout at $parent/ongrid/ — consider re-installing with the current single-parent layout"
+        has_compose=1
+    fi
     if (( has_systemd && has_compose )); then
         log_warn "both systemd and compose installs detected — pick one with --mode"
         exit 2
@@ -117,19 +142,19 @@ if [[ $EUID -ne 0 ]]; then
     exec sudo -E bash "$0" "$@"
 fi
 
-# Same four-subdir layout as install.sh / upgrade.sh: parent + ongrid/
-# + ongrid-web/ + data/ + logs/. Operators who redirected ONGRID_INSTALL_DIR
-# / ONGRID_DATA_DIR / ONGRID_LOG_DIR / ONGRID_WEB_DIR get the matching dirs
-# wiped here; the four ?:- fallbacks land on the new single-parent default
-# (/opt/ongrid/{ongrid,ongrid-web,data,logs}) so this script remains a
-# drop-in replacement for legacy installs too (just override the vars).
-PARENT_DIR="${ONGRID_INSTALL_DIR:-/opt/ongrid}"
-INSTALL_DIR="$PARENT_DIR/ongrid"
-WEB_DIR="${ONGRID_WEB_DIR:-$PARENT_DIR/ongrid-web}"
+# Single-parent layout: install.sh/upgrade.sh now write docker-compose.yml
+# directly under $INSTALL_DIR (no PARENT/ongrid/ nesting — see comment in
+# detect_install_mode above). Operators who redirect ONGRID_INSTALL_DIR /
+# ONGRID_DATA_DIR / ONGRID_LOG_DIR / ONGRID_WEB_DIR get the matching dirs
+# cleaned here. On a legacy install whose install_root is the old
+# <parent>/ongrid/ nested path, override ONGRID_INSTALL_DIR to point at
+# that legacy dir (this script then treats it as the canonical install_dir).
+INSTALL_DIR="${ONGRID_INSTALL_DIR:-/opt/ongrid}"
+WEB_DIR="${ONGRID_WEB_DIR:-$INSTALL_DIR/ongrid-web}"
 COMPOSE_FILE="$INSTALL_DIR/docker-compose.yml"
 ENV_FILE="$INSTALL_DIR/.env"
-DATA_DIR="${ONGRID_DATA_DIR:-$PARENT_DIR/data}"
-LOG_DIR="${ONGRID_LOG_DIR:-$PARENT_DIR/logs}"
+DATA_DIR="${ONGRID_DATA_DIR:-$INSTALL_DIR/data}"
+LOG_DIR="${ONGRID_LOG_DIR:-$INSTALL_DIR/logs}"
 
 if [[ ! -f "$COMPOSE_FILE" ]]; then
     log_warn "no compose file at $COMPOSE_FILE; nothing to stop"
@@ -179,9 +204,9 @@ docker volume rm ongrid_mysql_data ongrid_logs 2>/dev/null || true
 # mysql data dir with the previous random password but writes a *new*
 # password into .env — manager crashloops with `Access denied for user
 # 'ongrid'@…`. Discovered during the 2026-05-20 reinstall smoke.
-# DATA_DIR resolved above; falls back to $PARENT_DIR/data so the legacy
-# /var/lib/ongrid path only survives when the operator explicitly
-# exports ONGRID_DATA_DIR.
+# DATA_DIR resolves to $INSTALL_DIR/data above (single-parent layout),
+# so to point uninstall.sh at a non-default data root just export
+# ONGRID_DATA_DIR before invoking.
 if [[ -d "$DATA_DIR" ]]; then
     log_info "removing bind-mount data dirs in $DATA_DIR (mysql/qdrant/prom/loki/tempo/grafana/embeddings/skills/pages/workspace/tools)"
     for d in mysql qdrant prometheus loki tempo grafana embeddings skills pages workspace tools; do

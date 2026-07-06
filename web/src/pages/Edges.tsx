@@ -8,6 +8,7 @@ import { cn } from '@/lib/cn';
 import { openMetricDrilldown } from '@/lib/drilldown';
 import { relativeTime } from '@/lib/format';
 import { usePoll } from '@/lib/usePoll';
+import { buildInstallCommand } from '@/lib/installCommand';
 import {
   listEdges,
   createEdge,
@@ -28,6 +29,20 @@ import { getManagerVersion } from '@/api/version';
 import { usePermissions } from '@/store/me';
 import { notifyDevicesChanged } from '@/lib/events';
 import { useI18n } from '@/i18n/locale';
+
+// filter 状态：name / hostname / ip 走 EdgesFilterBar（本地 state），
+// roles 继续走 ?roles= URL（Sidebar 入口控制）。两者合并到 listEdges。
+type EdgesFilterValue = {
+  name: string;
+  hostname: string;
+  ip: string;
+};
+
+const INITIAL_EDGES_FILTER: EdgesFilterValue = {
+  name: '',
+  hostname: '',
+  ip: '',
+};
 
 // Sidebar headers that map to ?roles= filters. Empty string = "全部"; the
 // sentinel "unknown" lights up the 未分类 sub-item. Pulled out so the page
@@ -61,6 +76,9 @@ export default function EdgesPage() {
   const [edges, setEdges] = useState<Edge[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // EdgesFilterBar 本地 state：name / hostname / ip 走这里；roles 由
+  // Sidebar ?roles= URL 控制。两者通过 refresh() 合并下发 listEdges。
+  const [filter, setFilter] = useState<EdgesFilterValue>(INITIAL_EDGES_FILTER);
   // managerVersion drives the Agent column's drift chip — fetched once
   // on mount; failures degrade silently to "no chip" rather than red
   // because version mismatch isn't operationally critical.
@@ -86,7 +104,12 @@ export default function EdgesPage() {
 
   const refresh = useCallback(async () => {
     try {
-      const r = await listEdges(rolesFilter ? { roles: rolesFilter } : undefined);
+      const r = await listEdges({
+        roles: rolesFilter || undefined,
+        name: filter.name.trim() || undefined,
+        hostname: filter.hostname.trim() || undefined,
+        ip: filter.ip.trim() || undefined,
+      });
       // Backend currently doesn't filter by roles (the param is sent
       // for forward-compat); the post-split device.roles lives on
       // each row in `Roles []string`. Filter client-side so the
@@ -107,7 +130,7 @@ export default function EdgesPage() {
     } finally {
       setLoading(false);
     }
-  }, [rolesFilter]);
+  }, [rolesFilter, filter]);
 
   useEffect(() => {
     void refresh();
@@ -224,12 +247,15 @@ export default function EdgesPage() {
             </div>
           )}
 
+          <EdgesFilterBar value={filter} total={edges.length} onChange={setFilter} />
+
           <div className="overflow-hidden rounded-xl border border-zinc-800/60 bg-zinc-900/40">
             <table className="w-full text-sm">
               <thead className="border-b border-zinc-800/60 bg-zinc-950/40 text-[11px] uppercase tracking-wider text-zinc-500">
                 <tr>
                   <th className="px-4 py-2.5 text-left">ID</th>
                   <th className="px-4 py-2.5 text-left">{tr('名称', 'Name')}</th>
+                  <th className="px-4 py-2.5 text-left">{tr('任务名', 'Task name')}</th>
                   <th className="px-4 py-2.5 text-left">{tr('所属设备', 'Host device')}</th>
                   <th className="px-4 py-2.5 text-left">{tr('主机名', 'Hostname')}</th>
                   <th className="px-4 py-2.5 text-left">IP</th>
@@ -244,13 +270,13 @@ export default function EdgesPage() {
               <tbody className="divide-y divide-zinc-800/40">
                 {loading && edges.length === 0 ? (
                   <tr>
-                    <td colSpan={11} className="px-4 py-10 text-center text-zinc-500">
+                    <td colSpan={12} className="px-4 py-10 text-center text-zinc-500">
                       {tr('加载中…', 'Loading…')}
                     </td>
                   </tr>
                 ) : edges.length === 0 ? (
                   <tr>
-                    <td colSpan={11} className="px-4 py-10 text-center text-zinc-500">
+                    <td colSpan={12} className="px-4 py-10 text-center text-zinc-500">
                       {rolesFilter
                         ? tr(
                             `没有 ${ROLE_FILTER_TITLES[rolesFilter]?.[0] ?? rolesFilter} 设备。点设备名打开详情后可在右上角分配角色。`,
@@ -283,6 +309,11 @@ export default function EdgesPage() {
                           <span className="italic text-zinc-500">{tr('（待主机上线）', '(waiting for host)')}</span>
                         )}
                       </td>
+                      <td className="whitespace-nowrap px-4 py-2.5 text-zinc-400">
+                        {e.task_name || (
+                          <span className="italic text-zinc-600">—</span>
+                        )}
+                      </td>
                       <td
                         className="cursor-pointer whitespace-nowrap px-4 py-2.5 text-zinc-400"
                         title={tr('查看所属设备详情', 'View host device')}
@@ -298,10 +329,16 @@ export default function EdgesPage() {
                         )}
                       </td>
                       <td className="whitespace-nowrap px-4 py-2.5 text-zinc-400">
-                        {extractHostname(e.host_info) ?? '—'}
+                        <DeviceHostnameCell
+                          deviceId={e.device_id}
+                          fallback={extractHostname(e.host_info)}
+                        />
                       </td>
                       <td className="whitespace-nowrap px-4 py-2.5 font-mono text-xs text-zinc-400">
-                        {extractIP(e.host_info) ?? '—'}
+                        <DeviceIPCell
+                          deviceId={e.device_id}
+                          fallback={extractIP(e.host_info)}
+                        />
                       </td>
                       <td
                         className="cursor-pointer whitespace-nowrap px-4 py-2.5"
@@ -1101,21 +1138,7 @@ function SecretRevealModal({
 function InstallCommandRow({ accessKey, secretKey }: { accessKey: string; secretKey: string }) {
   const { tr } = useI18n();
   const [copied, setCopied] = useState(false);
-  const host = typeof window !== 'undefined' ? window.location.host : 'ongrid.example.com';
-  const hostnameOnly = host.split(':')[0] || host;
-  const tunnelAddr = `${hostnameOnly}:40012`;
-  const cmd =
-    `curl -k -sSL https://${host}/install.sh | bash -s -- ` +
-    `--access-key=${accessKey} ` +
-    `--secret-key=${secretKey} ` +
-    `--server-edge-addr=${tunnelAddr} ` +
-    `--server-http-addr=${host}`;
-  const display =
-    `curl -k -sSL https://${host}/install.sh | bash -s -- \\\n` +
-    `  --access-key=${accessKey} \\\n` +
-    `  --secret-key=${secretKey} \\\n` +
-    `  --server-edge-addr=${tunnelAddr} \\\n` +
-    `  --server-http-addr=${host}`;
+  const { cmd, display } = buildInstallCommand({ accessKey, secretKey });
   return (
     <div className="mt-4">
       <div className="mb-1 flex items-center justify-between">
@@ -1157,48 +1180,198 @@ function InstallCommandRow({ accessKey, secretKey }: { accessKey: string; secret
   );
 }
 
-// DeviceNameCell: cache + lazy-fetch device.name by id for the new
-// "所属设备" column on the Edges list. The list already fetches
-// /edges, but the edge DTO embeds device_id only — we follow up with
-// one GET /devices/{id} per unique id (per page) and memoize in a
-// module-level map so re-renders are free.
-const deviceNameCache = new Map<number, string>();
-const deviceNameInflight = new Map<number, Promise<string | null>>();
-async function fetchDeviceName(id: number): Promise<string | null> {
-  const cached = deviceNameCache.get(id);
-  if (cached !== undefined) return cached;
-  const inflight = deviceNameInflight.get(id);
+// DeviceFactsCell 子组件集合（name / hostname / ip_address）— 三列
+// 共享一份 device facts 缓存，避免重复 GET /devices/{id}。device_id 为
+// null/undefined 时直接走 fallback（一般是 edge.host_info 提取出来的值）。
+// 设计要点：
+//   - deviceFactsCache 是 module-level Map，每次页面渲染同一个 deviceId
+//     只会拉一次接口。
+//   - 拉取时 promise 同一 deviceId 共享，不重复发请求。
+//   - 失败（404 / network）缓存为 null，避免重试骚扰。
+//   - host_info 是 edge agent 上线时上报的原始快照，fallback 先行避免
+//     device 还未被 device 表关联时的闪烁。
+type DeviceFacts = { name: string; hostname?: string; ip_address?: string };
+const deviceFactsCache = new Map<number, DeviceFacts | null>();
+const deviceFactsInflight = new Map<number, Promise<DeviceFacts | null>>();
+
+async function fetchDeviceFacts(id: number): Promise<DeviceFacts | null> {
+  if (deviceFactsCache.has(id)) return deviceFactsCache.get(id) ?? null;
+  const inflight = deviceFactsInflight.get(id);
   if (inflight) return inflight;
-  const p = import('@/api/devices').then(({ getDevice }) => getDevice(id)).then((d) => {
-    const name = d?.name || '';
-    deviceNameCache.set(id, name);
-    deviceNameInflight.delete(id);
-    return name;
-  }).catch(() => {
-    deviceNameInflight.delete(id);
-    return null;
-  });
-  deviceNameInflight.set(id, p);
+  const p = import('@/api/devices')
+    .then(({ getDevice }) => getDevice(id))
+    .then((d) => {
+      const facts: DeviceFacts = {
+        name: d?.name || '',
+        hostname: d?.hostname,
+        ip_address: d?.ip_address,
+      };
+      deviceFactsCache.set(id, facts);
+      return facts;
+    })
+    .catch(() => {
+      deviceFactsCache.set(id, null);
+      return null;
+    })
+    .finally(() => {
+      deviceFactsInflight.delete(id);
+    });
+  deviceFactsInflight.set(id, p);
   return p;
 }
 
-function DeviceNameCell({ deviceId }: { deviceId: number }) {
-  const [name, setName] = useState<string | null>(deviceNameCache.get(deviceId) ?? null);
+function useDeviceFacts(deviceId: number | null | undefined): DeviceFacts | null {
+  const [facts, setFacts] = useState<DeviceFacts | null>(() =>
+    deviceId != null ? deviceFactsCache.get(deviceId) ?? null : null,
+  );
   useEffect(() => {
-    if (deviceNameCache.has(deviceId)) {
-      setName(deviceNameCache.get(deviceId) ?? null);
+    if (deviceId == null) {
+      setFacts(null);
+      return;
+    }
+    if (deviceFactsCache.has(deviceId)) {
+      setFacts(deviceFactsCache.get(deviceId) ?? null);
       return;
     }
     let cancelled = false;
-    void fetchDeviceName(deviceId).then((n) => {
+    void fetchDeviceFacts(deviceId).then((f) => {
       if (cancelled) return;
-      setName(n);
+      setFacts(f);
     });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [deviceId]);
-  if (name) {
-    return <span className="text-zinc-300">{name}</span>;
-  }
-  return <span className="text-zinc-600">#{deviceId}</span>;
+  return facts;
+}
+
+// 所属设备列：展示 device.name，未拉到时回退 #id。保持原有 clickable
+// 跳转 /hosts/{id} 的 td 外层处理，本组件只负责文案渲染。
+function DeviceNameCell({ deviceId }: { deviceId: number }) {
+  const facts = useDeviceFacts(deviceId);
+  const name = facts?.name || `#${deviceId}`;
+  return <span className="text-zinc-300">{name}</span>;
+}
+
+// 主机名列：device.hostname 优先；为 null/未拉取时用 edge.host_info 提取
+// 出的值（fallback），再退到 “—”。
+function DeviceHostnameCell({
+  deviceId,
+  fallback,
+}: {
+  deviceId: number | null | undefined;
+  fallback?: string | null;
+}) {
+  const facts = useDeviceFacts(deviceId);
+  // deviceId 为 null 时直接用 fallback，避免 useDeviceFacts(null) 误拉 -1
+  const value =
+    deviceId != null && facts && facts.hostname
+      ? facts.hostname
+      : fallback || '—';
+  return <span>{value}</span>;
+}
+
+// IP 列：device.ip_address 优先；为 null/未拉取时用 edge.host_info 提取
+// 出的 IP；再退到 “—”。使用 font-mono 与 Hosts 页保持一致。
+function DeviceIPCell({
+  deviceId,
+  fallback,
+}: {
+  deviceId: number | null | undefined;
+  fallback?: string | null;
+}) {
+  const facts = useDeviceFacts(deviceId);
+  const value =
+    deviceId != null && facts && facts.ip_address
+      ? facts.ip_address
+      : fallback || '—';
+  return <span>{value}</span>;
+}
+
+// EdgesFilterBar — 本地 filter 条，不复用 HostsFilterBar 因为：
+//   1) 角色已由 Sidebar ?roles= 控制，HostsFilterBar 的 role select 多余
+//   2) Edges 后端只接 name / hostname / ip 三个精准查询参数，没有
+//      online / edge / includeDeleted 维度
+// 三个输入框与 HostsFilterBar 的搜索框同款：300ms debounce 后再下发。
+// 与 EdgesPage 的 filter state 直接对接。
+function EdgesFilterBar({
+  value,
+  total,
+  onChange,
+}: {
+  value: EdgesFilterValue;
+  total: number;
+  onChange(next: EdgesFilterValue): void;
+}) {
+  const { tr } = useI18n();
+  return (
+    <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-zinc-800/60 bg-zinc-900/40 px-3 py-2 text-xs">
+      <DebouncedInput
+        value={value.name}
+        onCommit={(v) => onChange({ ...value, name: v })}
+        placeholder={tr('搜索名称', 'Search name')}
+        className="w-56 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 focus:border-zinc-600 focus:outline-none"
+      />
+      <DebouncedInput
+        value={value.hostname}
+        onCommit={(v) => onChange({ ...value, hostname: v })}
+        placeholder={tr('主机名', 'Hostname')}
+        className="w-40 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 focus:border-zinc-600 focus:outline-none"
+      />
+      <DebouncedInput
+        value={value.ip}
+        onCommit={(v) => onChange({ ...value, ip: v })}
+        placeholder="IP"
+        className="w-40 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 focus:border-zinc-600 focus:outline-none"
+      />
+      <div className="ml-auto text-[11px] text-zinc-500">
+        {tr(`共 ${total} 台`, `${total} total`)}
+      </div>
+    </div>
+  );
+}
+
+// DebouncedInput — 300ms 内连续输入只触发一次 onCommit，避免每次按键
+// 都重发 listEdges。复用 HostsFilterBar 的策略保持一致。
+const SEARCH_DEBOUNCE_MS = 300;
+function DebouncedInput({
+  value,
+  onCommit,
+  placeholder,
+  className,
+}: {
+  value: string;
+  onCommit(next: string): void;
+  placeholder?: string;
+  className?: string;
+}) {
+  const [draft, setDraft] = useState(value);
+  const timerRef = useRef<number | null>(null);
+
+  // 外部主动清空 filter 时同步本地草稿（避免“已重置但输入框还在显示”）
+  useEffect(() => {
+    setDraft(value);
+  }, [value]);
+
+  useEffect(() => {
+    if (draft === value) return;
+    if (timerRef.current) window.clearTimeout(timerRef.current);
+    timerRef.current = window.setTimeout(() => {
+      onCommit(draft);
+    }, SEARCH_DEBOUNCE_MS);
+    return () => {
+      if (timerRef.current) window.clearTimeout(timerRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft]);
+
+  return (
+    <input
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      placeholder={placeholder}
+      className={className}
+    />
+  );
 }
 

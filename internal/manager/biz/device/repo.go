@@ -69,8 +69,11 @@ type Repo interface {
 	// constraint is the second line of defense.
 	UpdateRoles(ctx context.Context, id uint64, roles uint8) error
 
-	// UpdateNameDescription updates operator-editable display fields.
-	UpdateNameDescription(ctx context.Context, id uint64, name, description string) error
+	// UpdateNameDescription 更新 operator 可编辑的展示字段（name /
+	// description / hostname）。三者在 PATCH /v1/devices/{id} 里都允许
+	// 局部更新；调用方传空字符串表示清空 description，name / hostname
+	// 不允许为空（已由 usecase 层校验）。
+	UpdateNameDescription(ctx context.Context, id uint64, name, description, hostname string) error
 
 	// SetSSHCredentials writes the SSH credentials block for a device.
 	// Implementing both password and key in one call lets the UI
@@ -98,6 +101,14 @@ type Repo interface {
 	// timestamp. Called from the edge online/offline callbacks.
 	MarkOnline(ctx context.Context, id uint64) error
 	MarkOffline(ctx context.Context, id uint64) error
+
+	// UpdateReachability 写入 ping 服务的可达性结果。可由 usecase.PingReachable
+	// （定时器）在每轮扫描后调用。到达时间 at=nil 时清空 last_reachable_at。
+	UpdateReachability(ctx context.Context, id uint64, reachable bool, at *time.Time) error
+
+	// ListReachableTargets 列出"需要被 ping 探活"的设备：ssh_host 非空。
+	// 软删除行会被自动过滤。返回的 device 包含 Ping 需要的最小列（id / ssh_host）。
+	ListReachableTargets(ctx context.Context) ([]*model.Device, error)
 
 	// Get returns the row by id; ErrNotFound otherwise.
 	Get(ctx context.Context, id uint64) (*model.Device, error)

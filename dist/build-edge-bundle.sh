@@ -71,6 +71,17 @@ for entry in "${ENTRIES[@]}"; do
   src_file=$4
 
   if [[ ! -f "$src_file" ]]; then
+    if [[ "$src_in_bundle" == "auditbeat" ]]; then
+      # auditbeat is Elastic closed-source and intentionally offline-only;
+      # there is no fetch-* path to fall back on, so a missing binary
+      # hard-fails the bundle build. Other entries (promtail / otelcol /
+      # exporters) have online fetch-* targets so a missing copy is only
+      # a warning operators can act on later.
+      echo "build-edge-bundle: error: $src_file missing — auditbeat is offline-only and is NOT auto-fetched." >&2
+      echo "build-edge-bundle:   place the Elastic auditbeat binary at $src_file per resource/auditbeat/README.md," >&2
+      echo "build-edge-bundle:   run 'make stage-auditbeat', then re-run build-edge-bundle." >&2
+      exit 1
+    fi
     echo "build-edge-bundle: missing $src_file — skipping (bundle will be incomplete)" >&2
     continue
   fi

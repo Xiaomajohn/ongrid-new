@@ -66,6 +66,12 @@ type Config struct {
 	// MethodAgentUpgrade handler entirely (useful for dev where systemd
 	// isn't available — manager will see "method not found").
 	UpgradeStageDir string
+
+	// TaskName 是 install.sh 通过 --task-name=NAME 写入 env file
+	// (ONGRID_EDGE_TASK_NAME) 的监控任务名。register_edge 时填进
+	// HostInfo.TaskName 上报给 manager，落到 edge.task_name。
+	// 空字符串表示此 edge 未指定任务名，manager 端不会覆盖已有值。
+	TaskName string
 }
 
 // Agent is the edge run-loop. It owns the tunnel.Client, periodic
@@ -349,6 +355,12 @@ func (a *Agent) registerEdge(ctx context.Context) error {
 	info, err := a.collector.HostInfo(ctx)
 	if err != nil {
 		a.log.Warn("agent: HostInfo collection failed", slog.Any("err", err))
+	}
+	// 把 install.sh 透传过来的监控任务名塞进 HostInfo，让 manager 端的
+	// HandleRegister 落到 edge.task_name。空字符串由 json omitempty 略掉，
+	// 不会覆盖 manager 已有的值。
+	if a.cfg.TaskName != "" {
+		info.TaskName = a.cfg.TaskName
 	}
 	req := tunnel.RegisterEdgeRequest{
 		AccessKey:    "", // server-side AuthFunc matches by Meta, not body

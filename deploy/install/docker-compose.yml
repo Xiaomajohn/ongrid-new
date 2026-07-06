@@ -321,20 +321,31 @@ services:
       #   certs/      → /etc/nginx/certs      (operator's real cert survives
       #                                          across upgrades; install.sh
       #                                          only writes when missing)
-      #   edge/       → /usr/share/nginx/html/edge   (one-button edge upgrade
-      #                                          binaries + install.sh; same dir
-      #                                          the manager service mounts at
-      #                                          /usr/share/ongrid/edge-bundles)
+      #   edge/       → /usr/share/nginx/edge (one-button edge upgrade binaries
+      #                                          + install.sh; same dir the
+      #                                          manager service mounts at
+      #                                          /usr/share/ongrid/edge-bundles).
+      #                                          Note: independent path, NOT a
+      #                                          sub-dir of /usr/share/nginx/html —
+      #                                          docker bind-mount nesting fails
+      #                                          when the parent path is read-only.
       - ${ONGRID_WEB_DIR:-/opt/ongrid/ongrid-web}/nginx.conf:/etc/nginx/nginx.conf:ro
       - ${ONGRID_WEB_DIR:-/opt/ongrid/ongrid-web}/certs:/etc/nginx/certs:ro
-      - ${ONGRID_WEB_DIR:-/opt/ongrid/ongrid-web}/edge:/usr/share/nginx/html/edge
+
       # ongrid-web SPA dist. install.sh / upgrade.sh extract /usr/share/nginx/html
       # from the ongrid-web:${ONGRID_VERSION} image into ${ONGRID_WEB_DIR}/html/
       # via `docker create` + `docker cp`; the function's basename bucket `html`
       # lands the files under html/html/. Bind-mount that sub-path read-only so
       # nginx serves the freshly-staged SPA and an operator can hot-swap by
       # editing files on the host + `docker compose restart nginx`.
-      - ${ONGRID_WEB_DIR:-/opt/ongrid/ongrid-web}/html/html:/usr/share/nginx/html:ro
+      - ${ONGRID_WEB_DIR:-/opt/ongrid/ongrid-web}/html:/usr/share/nginx/html:ro
+
+      # Edge curl-pipe installer + upgrade bundles. Independent mount path
+      # so it doesn't collide with the SPA html mount (a sub-dir of a
+      # read-only parent mount fails at container init — mkdir returns
+      # EROFS for the parent). nginx.conf alias maps /install.sh,
+      # /uninstall.sh, and /edge/ to /usr/share/nginx/edge/*.
+      - ${ONGRID_WEB_DIR:-/opt/ongrid/ongrid-web}/edge:/usr/share/nginx/edge:ro
 
     ports:
       - "${ONGRID_HTTP_PORT:-443}:443"

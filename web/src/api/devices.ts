@@ -14,6 +14,12 @@ export type Device = {
   scope: DeviceRole;
   online?: boolean;
   last_seen_at?: string | null;
+  // — ping 服务 5min 定时器写入的网络层可达性结果。与 edge agent
+  // 推送的 online 解耦：operator 视角“机器在线” = reachable。
+  // 首次启动后第一次跑 ping 之前，reachable 为 false；
+  // last_reachable_at 为 null。SPA 的 Hosts 页面按 reachable 渲染状态列。
+  reachable?: boolean;
+  last_reachable_at?: string | null;
   created_at?: string;
   updated_at?: string;
   // — points at the row in topology.nodes that fronts this
@@ -107,11 +113,25 @@ export function getDevice(id: string | number) {
   return request<Device>('GET', `/devices/${encodeURIComponent(String(id))}`);
 }
 
-export function updateDevice(
-  id: string | number,
-  body: { name?: string; description?: string },
-) {
-  return request<void>(
+// UpdateDeviceInput — 后端 PATCH /v1/devices/{id} 的 wire body。后端
+// 走“指针 = 可选”语义：未指定的字段保持不变；指定为空串 ("") 则
+// 视为“清空”（仅对 ssh_password / ssh_key 有效，name / ssh_host /
+// ssh_user 的空串会被服务端拒掉）。前端“编辑主机”对话框根据 dirty
+// 状态传部分字段，服务端 merge 后回 200 + 完整 DTO。
+export type UpdateDeviceInput = {
+  name?: string;
+  description?: string;
+  hostname?: string;
+  ssh_host?: string;
+  ssh_port?: number;
+  ssh_user?: string;
+  ssh_auth_kind?: 'password' | 'key';
+  ssh_password?: string;
+  ssh_key?: string;
+};
+
+export function updateDevice(id: string | number, body: UpdateDeviceInput) {
+  return request<Device>(
     'PATCH',
     `/devices/${encodeURIComponent(String(id))}`,
     body,
@@ -212,6 +232,11 @@ export interface InstallJob {
 }
 
 export interface InstallEdgeOptions {
+  // 任务名（必填），会写入 edge 任务标识，供 Edges 页面按 task_name 筛选。
+  // 空字符串会被后端拒绝——前端在 InstallEdgeModal 做 trim 后校验。
+  task_name: string;
+  // 前端拼好的完整 curl 安装命令，后端不再自己拼装，直接 SSH 执行。
+  command?: string;
   ssh_pass?: string;
   ssh_key_pem?: string;
   options?: Record<string, unknown>;
@@ -224,7 +249,7 @@ export interface InstallEdgeResponse {
 
 export function installEdge(
   deviceId: string | number,
-  opts: InstallEdgeOptions = {},
+  opts: InstallEdgeOptions,
 ) {
   return request<InstallEdgeResponse>(
     'POST',

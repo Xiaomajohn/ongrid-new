@@ -65,6 +65,7 @@ func (r *fakeEdgeRepo) UpdateRoles(_ context.Context, _ uint64, _ uint8) error  
 func (r *fakeEdgeRepo) UpdateName(_ context.Context, _ uint64, _ string) error  { return nil }
 func (r *fakeEdgeRepo) SetDeviceID(_ context.Context, _ uint64, _ uint64) error      { return nil }
 func (r *fakeEdgeRepo) SetAgentVersion(_ context.Context, _ uint64, _ string) error  { return nil }
+func (r *fakeEdgeRepo) UpdateTaskName(_ context.Context, _ uint64, _ string) error { return nil }
 func (r *fakeEdgeRepo) Delete(_ context.Context, _ uint64) error                     { return nil }
 func (r *fakeEdgeRepo) Count(_ context.Context) (int64, error)                     { return int64(len(r.byID)), nil }
 

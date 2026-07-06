@@ -28,6 +28,7 @@ import {
   Folder,
   ScrollText,
   Power,
+  Pencil,
 } from 'lucide-react';
 import { StatusPill } from '@/components/StatusPill';
 import { Modal } from '@/components/Modal';
@@ -56,6 +57,7 @@ import { usePermissions } from '@/store/me';
 import { notifyDevicesChanged } from '@/lib/events';
 import { useI18n } from '@/i18n/locale';
 import { CreateDeviceModal } from '@/components/CreateDeviceModal';
+import { EditDeviceModal } from '@/components/EditDeviceModal';
 import { InstallEdgeModal } from '@/components/InstallEdgeModal';
 import { ConfirmDeleteModal } from '@/components/ConfirmDeleteModal';
 import { InstallLogPanel } from '@/components/InstallLogPanel';
@@ -153,6 +155,10 @@ export default function HostsPage() {
   // Confirm-delete state.
   const [deleteTarget, setDeleteTarget] = useState<HostDevice | null>(null);
   const [deleting, setDeleting] = useState(false);
+
+  // Edit-device state。点击“编辑”打开 EditDeviceModal，编辑后通过
+  // updateDevice PATCH 到后端。模态关掉 + refresh 拿最新一行回填。
+  const [editTarget, setEditTarget] = useState<HostDevice | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -383,8 +389,13 @@ export default function HostsPage() {
                       <td className="whitespace-nowrap px-4 py-2.5 text-zinc-400">
                         {h.hostname || '—'}
                       </td>
+                      {/* IP 列优先级：用户填的 ssh_host（创建设备时输入的）→
+                          edge 实际上报的 ip_address。ssh_host 是 operator
+                          写下的 IP，是真“添加时输入的 IP”，但容错上要
+                          兼容老数据（只有 ip_address 没有 ssh_host）。
+                          都为空时落 "—"。 */}
                       <td className="whitespace-nowrap px-4 py-2.5 font-mono text-xs text-zinc-400">
-                        {h.ip_address || '—'}
+                        {h.ssh_host || h.ip_address || '—'}
                       </td>
                       <td
                         className={cn(
@@ -401,7 +412,14 @@ export default function HostsPage() {
                         <HostRoleChips roles={(h.roles ?? []) as HostEdgeRole[]} />
                       </td>
                       <td className="whitespace-nowrap px-4 py-2.5">
-                        <StatusPill status={h.online ? 'online' : 'offline'} />
+                        {/* 状态列按 reachable 渲染：ping 服务的 5min
+                            定时结果，operator 视角 = "网络层是否能
+                            通"。edge agent 推送的 online 还在 device
+                            对象里（h.online），但只用于内部诊断；UI
+                            默认按 reachable 走。新装机器在第一次 ping
+                            之前 reachable 为 false，显示离线，这是一
+                            致语义。 */}
+                        <StatusPill status={h.reachable ? 'online' : 'offline'} />
                       </td>
                       <td className="whitespace-nowrap px-4 py-2.5 text-zinc-400">
                         {edgesPerHost[h.id] ?? 0}
@@ -438,6 +456,19 @@ export default function HostsPage() {
                             if (j) setActiveInstallJob({ deviceId: h.id, jobId: j.id });
                           }}
                         />
+                        {canMutate && !h.deleted_at && (
+                          <button
+                            type="button"
+                            onClick={() => setEditTarget(h)}
+                            title={tr('编辑主机', 'Edit host')}
+                            aria-label={tr(`编辑 ${h.name || h.id}`, `Edit ${h.name || h.id}`)}
+                            data-testid={`edit-host-${h.id}`}
+                            className="mr-1 inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
+                          >
+                            <Pencil size={14} />
+                            <span>{tr('编辑', 'Edit')}</span>
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => navigate(`/hosts/${encodeURIComponent(String(h.id))}`)}
@@ -477,6 +508,18 @@ export default function HostsPage() {
           notifyDevicesChanged();
         }}
       />
+
+      {editTarget && (
+        <EditDeviceModal
+          device={editTarget}
+          onClose={() => setEditTarget(null)}
+          onSaved={() => {
+            setEditTarget(null);
+            void refresh();
+            notifyDevicesChanged();
+          }}
+        />
+      )}
 
       <CreateEdgeModal
         open={createProbeOpen}

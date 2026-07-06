@@ -178,11 +178,15 @@ func (r *Repo) SetNodeID(ctx context.Context, id, nodeID uint64) error {
 	return nil
 }
 
-// UpdateNameDescription writes the operator-editable display fields.
-func (r *Repo) UpdateNameDescription(ctx context.Context, id uint64, name, description string) error {
+// UpdateNameDescription writes the operator-editable display fields. Also
+// accepts hostname so the PATCH editor can re-point a device at a new
+// hostname without an edge register round-trip; this is what the SPA's
+// 编辑主机 dialog uses.
+func (r *Repo) UpdateNameDescription(ctx context.Context, id uint64, name, description, hostname string) error {
 	res := r.db.WithContext(ctx).Model(&model.Device{}).Where("id = ?", id).Updates(map[string]any{
 		"name":        name,
 		"description": description,
+		"hostname":    hostname,
 	})
 	if res.Error != nil {
 		return res.Error
@@ -220,6 +224,41 @@ func (r *Repo) MarkOffline(ctx context.Context, id uint64) error {
 		return errs.ErrNotFound
 	}
 	return nil
+}
+
+// UpdateReachability 写入 ping 服务的可达性结果。
+// reachable=false 时 last_reachable_at 会被清空为 NULL（表示"现在不可达"
+// 不应该展示旧的"上次可达"时间）。reaches=true 时 at 必须非 nil，调用方
+// 已经确保这一点；usecase 层在调用本函数前会传 time.Now().UTC()。
+func (r *Repo) UpdateReachability(ctx context.Context, id uint64, reachable bool, at *time.Time) error {
+	updates := map[string]any{"reachable": reachable}
+	if reachable {
+		updates["last_reachable_at"] = at
+	} else {
+		updates["last_reachable_at"] = nil
+	}
+	res := r.db.WithContext(ctx).Model(&model.Device{}).Where("id = ?", id).Updates(updates)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return errs.ErrNotFound
+	}
+	return nil
+}
+
+// ListReachableTargets 拉出所有需要被 ping 探活的设备。只取 ping 需要
+// 的最小列（id / ssh_host），避免拉大字段。软删除行已由 gorm 默认
+// scope 过滤（DeleteMarker）。
+func (r *Repo) ListReachableTargets(ctx context.Context) ([]*model.Device, error) {
+	var rows []*model.Device
+	if err := r.db.WithContext(ctx).
+		Select("id, ssh_host").
+		Where("ssh_host <> ?", "").
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 // reconcileOfflineOrphansSQL flips online devices back to offline when no

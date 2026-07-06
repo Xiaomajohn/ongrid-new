@@ -1,123 +1,64 @@
+// Package installjob 提供一键安装 edge 的异步任务队列。
+//
+// 这是 manager/installjob BC 的 biz 层。一个 InstallJob 代表一次 "在指定
+// 设备上 ssh 一把 → 写 install.sh → 引导边缘 agent 上线" 的端到端尝试；
+// 任务经 Runner 排队后由 Worker.Execute 串行处理，结果（含日志）持久化
+// 在 install_jobs / install_job_events 两张表里（schema 与 Repo 实现在
+// sibling 包 internal/manager/data/installjob，biz 层只通过本包的
+// type alias 与 Repo interface 接触数据，保持数据层唯一持有 gorm 的
+// 分层纪律）。
+//
+// Phase 1（本文件）只落 biz 内核：
+//
+//   - 状态机 / 凭据分类常量（Status enum + AuthKind）
+//   - Worker.Execute：单 job 的状态机 + 凭据快照清理 + 事件时间线
+//   - Runner：goroutine 池，bounded queue + 非阻塞 enqueue
+//
+// 留给后续 wire（cmd/ongrid main.go 内执行）：
+//
+//   - 接 Repo（gorm.DB）→ 由 data/installjob.NewRepo 实现 Repo contract
+//   - 接 EdgeIssuer / DeviceSSHSoftDelete / Installer 三个外部接口
+//   - 在 main.go 的 wiring 阶段替换 Worker.waitEdgeOnline 占位实现
+//
+// HTTP handler / cron 入口同样落在后续 PR；本 BC 不导出 usecase 入口，
+// 由调用方组合 Repo + Runner.Enqueue 即可。
 package installjob
 
 import (
-	"time"
-
-	"gorm.io/plugin/soft_delete"
+	managerinstalldata "github.com/ongridio/ongrid/internal/manager/data/installjob"
 )
 
-// Status is the lifecycle of a one-click install job. Stored as a
-// short varchar on the row so list queries can filter with the
-// idx_install_jobs_status index.
-type Status string
+// 数据 schema 别名（type alias）：biz 内部使用 InstallJob 字面量即可
+// 触达 data 包真实 gorm 实体；所有字段、gorm tag、TableName 都从
+// data 解析，biz 任何位置写 managerbizinstalljob.InstallJob 与写
+// managerinstalldata.InstallJob 完全等价。
+type (
+	InstallJob      = managerinstalldata.InstallJob
+	InstallJobEvent = managerinstalldata.InstallJobEvent
+	Status          = managerinstalldata.Status
+	EventKind       = managerinstalldata.EventKind
+)
+
+// Status enum 重导出。type alias 让以下常量与 data 同 identity；
+// gorm Read/Write 都视作同一个 Status 字面量。
+const (
+	StatusQueued    = managerinstalldata.StatusQueued
+	StatusRunning   = managerinstalldata.StatusRunning
+	StatusSuccess   = managerinstalldata.StatusSuccess
+	StatusFailed    = managerinstalldata.StatusFailed
+	StatusCancelled = managerinstalldata.StatusCancelled
+	StatusTimeout   = managerinstalldata.StatusTimeout
+)
 
 const (
-	StatusQueued    Status = "queued"
-	StatusRunning   Status = "running"
-	StatusSuccess   Status = "success"
-	StatusFailed    Status = "failed"
-	StatusCancelled Status = "cancelled"
-	StatusTimeout   Status = "timeout"
+	EventKindLog   = managerinstalldata.EventKindLog
+	EventKindState = managerinstalldata.EventKindState
+	EventKindError = managerinstalldata.EventKindError
 )
 
-// AuthKind discriminates the credential bundle stashed on the job so
-// the worker knows which SSH path to take when reconnecting. Mirrors
-// the device-level auth taxonomy.
+// AuthKind 区分凭据套餐（password|key）。biz 独有的 enum，未进 data 层
+// —— 因为它只是 InstallJob.AuthKind 字段值的枚举，不存为独立 gorm 实体。
 const (
 	AuthKindPassword = "password"
 	AuthKindKey      = "key"
 )
-
-// InstallJob is one asynchronous one-click install attempt against a
-// device. The job carries everything the worker needs to reach the
-// host (host/port/user + credential snapshot) and the streaming log
-// buffer it built up while running.
-//
-// Credential handling:
-//   - PasswordSnap / KeySnap hold a *plaintext* copy of the secret at
-//     submit time so the worker doesn't have to re-derive / re-decrypt
-//     during execution.
-//   - The worker MUST call Repo.ClearCredentialSnap once the job
-//     settles (success / failure / timeout) so the secret does not
-//     linger in MySQL/SQLite beyond the install window.
-//   - Job.KeySnap is also used by redactSecretKey as the substr to
-//     scrub from the streamed log before it lands in LogOutput.
-//
-// Lifecycle:
-//   - Created with Status=queued from the HTTP / gRPC handler.
-//   - Picked up by Runner → Worker.Execute → flips to running.
-//   - Settles into one of success / failed / cancelled / timeout.
-//   - Soft-deleted via DeleteMarker (gorm soft_delete plugin) — never
-//     hard-deleted so the audit history survives restarts.
-type InstallJob struct {
-	ID       uint64  `gorm:"primaryKey;autoIncrement"`
-	DeviceID uint64  `gorm:"not null;column:device_id;index:idx_install_jobs_device,priority:1"`
-	EdgeID   *uint64 `gorm:"column:edge_id"`
-
-	Status   Status `gorm:"size:16;not null;default:'queued';column:status;index:idx_install_jobs_status,priority:1"`
-	AuthKind string `gorm:"size:16;not null;column:auth_kind"` // password|key
-
-	// PasswordSnap / KeySnap are scoped to the worker lifetime; the
-	// repo clears them once the job settles (success/failed/etc).
-	PasswordSnap string `gorm:"size:255;column:password_snap"`
-	KeySnap      string `gorm:"type:mediumtext;column:key_snap"`
-
-	// Connection target — the device's current SSH endpoint at the
-	// time the user hit "install".
-	Host string `gorm:"size:255;not null;column:host"`
-	Port int    `gorm:"not null;column:port"`
-	User string `gorm:"size:64;not null;column:user"`
-
-	// OptionsJSON holds the free-form install options (proxy,
-	// custom CA, …) as opaque JSON; the wire shape is owned by the
-	// HTTP handler / usecase layer.
-	OptionsJSON string `gorm:"type:json;column:options_json"`
-
-	// LogOutput accumulates the streamed install output. mediumtext
-	// so even a long install (think heavy package downloads) does
-	// not blow past varchar(255) limits.
-	LogOutput string `gorm:"type:mediumtext;not null;column:log_output"`
-
-	// StartedAt is set when the worker transitions queued→running.
-	// FinishedAt is set when the job lands in a terminal state.
-	StartedAt  *time.Time `gorm:"column:started_at"`
-	FinishedAt *time.Time `gorm:"column:finished_at"`
-	ExitCode   *int       `gorm:"column:exit_code"`
-
-	CreatedAt time.Time `gorm:"column:created_at;autoCreateTime"`
-	UpdatedAt time.Time `gorm:"column:updated_at;autoUpdateTime"`
-	DeletedAt *time.Time `gorm:"index;column:deleted_at"`
-
-	// DeleteMarker drives the gorm.io/plugin/soft_delete plugin.
-	// Soft-delete by millisecond so sub-second double-submits stay
-	// distinguishable if we ever need them; the unique soft-delete
-	// column on (device_id) when applicable will be added by the
-	// migration step in main.go.
-	DeleteMarker soft_delete.DeletedAt `gorm:"column:delete_marker;not null;default:0;softDelete:milli,DeletedAtField:DeletedAt"`
-}
-
-// TableName pins the gorm table for the install_jobs entity.
-func (InstallJob) TableName() string { return "install_jobs" }
-
-// EventKind discriminates rows in install_job_events. Keeping the kind
-// short keeps the indexed column cheap.
-const (
-	EventKindLog   = "log"   // streamed chunk (already redacted)
-	EventKindState = "state" // state-machine transition
-	EventKindError = "error" // failure detail
-)
-
-// InstallJobEvent is an append-only timeline of what happened during
-// a job's lifetime: log chunks, state transitions, and error reasons.
-// We keep it as a separate table so the install_jobs row stays light
-// (long output doesn't bloat the metadata read path).
-type InstallJobEvent struct {
-	ID           uint64    `gorm:"primaryKey;autoIncrement"`
-	InstallJobID uint64    `gorm:"not null;column:install_job_id;index:idx_install_job_events,priority:1"`
-	Ts           time.Time `gorm:"not null;column:ts;autoCreateTime"`
-	Kind         string    `gorm:"size:32;not null;column:kind"` // log|state|error
-	Payload      string    `gorm:"type:text;not null;column:payload"`
-}
-
-// TableName pins the gorm table for the install_job_events entity.
-func (InstallJobEvent) TableName() string { return "install_job_events" }

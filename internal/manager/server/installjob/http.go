@@ -13,9 +13,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -27,15 +30,18 @@ import (
 // --- domain model (used by main.go's stub today, by A4's real
 // biz layer tomorrow) ---
 
-// Status values for an install job. Status drives the SPA's pill
-// colour (pending / running / success / failed / cancelled) and the
-// worker's progress events.
+// Status values for an install job. Mirrors the biz layer's
+// installjob.Status (queued / running / success / failed / cancelled /
+// timeout) so HTTP handlers can reference the same wire vocabulary
+// without importing the biz type. Status drives the SPA's pill colour
+// and the worker's progress events.
 const (
-	StatusPending   = "pending"
+	StatusQueued    = "queued"
 	StatusRunning   = "running"
 	StatusSuccess   = "success"
 	StatusFailed    = "failed"
 	StatusCancelled = "cancelled"
+	StatusTimeout   = "timeout"
 )
 
 // Job is the row shape the JSON serializes. NEVER include any
@@ -62,6 +68,32 @@ type Usecase interface {
 	Get(ctx context.Context, id uint64) (*Job, error)
 	ListByDevice(ctx context.Context, deviceID uint64, limit int) ([]*Job, error)
 	Cancel(ctx context.Context, id uint64) error
+	// Create enqueues a one-shot install-edge job for the given device.
+	//
+	// taskName 是一键安装的“任务名”（用户在 SPA 的 InstallEdgeModal 输
+	// 入），必填。它会落到 install_jobs.options_json（供后续按任务名筛
+	// 选 / 审计），并一路透传到：
+	//   - biz/edge.InstallEdgeIssuer.CreateEdgeForDevice → edge.task_name
+	//     列（Agent1 同步增加；本 PR 用 repo.UpdateTaskName 在创建后追
+	//     写一次）
+	//   - SSHInstaller.runCurlPipe → install.sh 的 --task-name 参数
+	//
+	// SSH credentials are pulled from the device row at call time — the
+	// request body is ignored for credentials (see plan §凭据策略变更).
+	// The worker also captures a snapshot on the row so a mid-flight
+	// credential rotation does not break an in-progress install. Returned
+	// Job's Status is always "queued" on success; the worker flips it
+	// to running once it picks the job up off the Runner queue.
+	Create(ctx context.Context, deviceID uint64, taskName, command string) (*Job, error)
+}
+
+// CreateResponse is the wire shape POST /v1/devices/{id}/install-edge
+// returns. Mirrors the SPA's InstallEdgeResponse in
+// web/src/api/devices.ts — only the two fields the install-launchpad
+// modal reads (job id + initial status) cross the wire.
+type CreateResponse struct {
+	InstallJobID uint64 `json:"install_job_id"`
+	Status       string `json:"status"`
 }
 
 // --- handler ---
@@ -81,16 +113,18 @@ func NewHandler(uc Usecase, log *slog.Logger) *Handler {
 	return &Handler{uc: uc, log: log}
 }
 
-// Register attaches the 3 routes. id-first listing is the typical
-// "show progress on the device page" entry; by-device second so
-// the device-tab polls live without joining on the install-jobs
-// table itself.
+// Register attaches the install-job routes. The device-scoped POST
+// kicks off the one-button install workflow; the by-device GET is the
+// "show progress on the device page" entry; the standalone GET / POST
+// :cancel cover the post-submit polling + abort paths.
 //
+//	POST /v1/devices/{id}/install-edge
 //	GET  /v1/install-jobs/{id}
 //	GET  /v1/devices/{id}/install-jobs?limit=20
 //	POST /v1/install-jobs/{id}:cancel
 func (h *Handler) Register(r chi.Router) {
 	r.Get("/v1/install-jobs/{id}", h.get)
+	r.Post("/v1/devices/{id}/install-edge", h.createInstall)
 	r.Get("/v1/devices/{id}/install-jobs", h.listByDevice)
 	r.Post("/v1/install-jobs/{id}:cancel", h.cancel)
 }
@@ -198,6 +232,78 @@ func (h *Handler) listByDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSONStatus(w, http.StatusOK, map[string]any{"items": rows, "total": len(rows)})
+}
+
+// installCreateReq 是 POST /v1/devices/{id}/install-edge 的请求体。
+// 字段名与 SPA 的 InstallEdgeOptions（web/src/api/devices.ts）对齐：
+//   - task_name 必填，由 InstallEdgeModal 端做 trim+非空校验
+//   - ssh_pass / ssh_key_pem 是可选的“覆盖 DB 凭据”字段；当前 v1 wiring
+//     不读，保留是为了后续 explicit-mode UX（见 plan §凭据策略变更）
+type installCreateReq struct {
+	TaskName  string `json:"task_name"`
+	Command   string `json:"command,omitempty"` // 前端拼好的完整 curl 安装命令,后端不再自己拼
+	SSHPass   string `json:"ssh_pass,omitempty"`
+	SSHKeyPEM string `json:"ssh_key_pem,omitempty"`
+}
+
+// createInstall: POST /v1/devices/{id}/install-edge
+//
+// Kicks off the one-button edge-install workflow for a single device.
+// The handler reads SSH credentials from the device row at call time
+// (the request body is ignored for credentials per plan §凭据策略变更),
+// persists a fresh install_jobs row whose OptionsJSON 携带 task_name
+// （后续 worker 会从 OptionsJSON 解析出来透传给 installer 与 edge
+// 创建路径），and Enqueues it on the worker Runner. The returned job
+// id is what the SPA polls via the existing
+// GET /v1/devices/{id}/install-jobs endpoint.
+//
+// Error mapping (via errs.HTTPStatus):
+//   - 401 when the request has no tenant in context.
+//   - 400 when path id is not a uint, body JSON is malformed, task_name
+//     缺失/为空白（必填；SPA 端 InstallEdgeModal 也会 trim+非空校验，
+//     这里是双保险），or the device row is missing the minimum SSH
+//     triple (host + user + (password|key)).
+//   - 404 when the device id doesn't resolve to a live row (natural
+//     Repo.Get propagation; soft-deleted devices also 404).
+//   - 500 on any other internal failure.
+//
+// godoc
+// @Summary Start one-button edge install for a device
+// @Router /v1/devices/{id}/install-edge [post]
+// @Success 200 {object} installjob.CreateResponse
+func (h *Handler) createInstall(w http.ResponseWriter, r *http.Request) {
+	if _, ok := tenantctx.From(r.Context()); !ok {
+		writeErr(w, errs.ErrUnauthorized)
+		return
+	}
+	deviceID, err := deviceIDFrom(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	// 允许 body 缺失 / 为空 —— task_name 必填校验放在下方统一处理；
+	// 这里只负责把 body 解析失败映射成 400。
+	var req installCreateReq
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeErr(w, errors.Join(errs.ErrInvalid, fmt.Errorf("decode body: %w", err)))
+			return
+		}
+	}
+	taskName := strings.TrimSpace(req.TaskName)
+	if taskName == "" {
+		writeErr(w, errors.Join(errs.ErrInvalid, fmt.Errorf("task_name is required")))
+		return
+	}
+	job, err := h.uc.Create(r.Context(), deviceID, taskName, req.Command)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSONStatus(w, http.StatusOK, CreateResponse{
+		InstallJobID: job.ID,
+		Status:       job.Status,
+	})
 }
 
 // cancel: POST /v1/install-jobs/{id}:cancel

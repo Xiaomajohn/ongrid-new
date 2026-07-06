@@ -675,11 +675,16 @@ if ! extract_image_dist "ongrid:${NEW_VERSION}" "$ONGRID_APP_DIR" \
     exit 1
 fi
 
+# extract_image_dist uses the basename of <src-path> as the sub-dir under
+# <dst-dir>; pass $WEB_DIR (NOT $WEB_DIR/html) so the function creates the
+# trailing html/ itself and the bind-mount
+# (${ONGRID_WEB_DIR}/html -> /usr/share/nginx/html) aligns with nginx.conf's
+# `root /usr/share/nginx/html` without an html/html indirection.
 log_info "extracting ongrid-web SPA dist → $WEB_DIR/html"
-if ! extract_image_dist "ongrid-web:${NEW_VERSION}" "$WEB_DIR/html" \
+if ! extract_image_dist "ongrid-web:${NEW_VERSION}" "$WEB_DIR" \
         /usr/share/nginx/html; then
     log_error "ongrid-web dist extraction failed."
-    log_error "the nginx bind-mount ${WEB_DIR}/html/html would be empty."
+    log_error "the nginx bind-mount ${WEB_DIR}/html would be empty."
     log_error "refusing to continue (host bind-mount is the single source of truth)."
     exit 1
 fi

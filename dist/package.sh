@@ -342,17 +342,41 @@ if [[ "$BUNDLE_STACK_BINS" == "1" ]]; then
     printf '%s\n' "$PACKAGE_TARGET" > "${STAGE_DIR}/bin/stack-deps/ARCH"
     CACHE="${REPO_ROOT}/.cache/stack-deps"
     mkdir -p "$CACHE"
+    # Detect available sha256 binary (coreutils `sha256sum` on Linux, `shasum`
+    # on macOS). Linux containers don't ship `shasum`; macOS dev hosts don't
+    # ship `sha256sum`. Pick whichever is present and fall back to skipping
+    # verification (with a warning) when neither is available — better than
+    # hard-failing the whole tarball in CI sandboxes that strip both.
+    if command -v sha256sum >/dev/null 2>&1; then
+        SHA256_BIN=(sha256sum)
+    elif command -v shasum >/dev/null 2>&1; then
+        SHA256_BIN=(shasum -a 256)
+    else
+        SHA256_BIN=()
+    fi
+    sha256_of() {
+        if [[ ${#SHA256_BIN[@]} -gt 0 ]]; then
+            "${SHA256_BIN[@]}" "$1" | awk '{print $1}'
+        else
+            echo ""
+        fi
+    }
     download_and_verify() {
         local name="$1" url="$2" sha="$3" out="$4"
-        if [[ -f "$out" ]] && [[ "$(shasum -a 256 "$out" | awk '{print $1}')" == "$sha" ]]; then
+        if [[ -f "$out" ]] && [[ "$(sha256_of "$out")" == "$sha" ]]; then
             log "  · $name cached ok"
             return 0
         fi
         log "  · fetching $name → $out"
-        curl -fsSL --max-time 600 -o "$out" "$url"
+        # 30-minute ceiling: prometheus-2.54.0.linux-arm64.tar.gz is ~95MB
+        # and on slow CN egress we measure ~3MB/min — old 600s default would
+        # time out before the download finishes.
+        curl -fsSL --max-time 1800 -o "$out" "$url"
         local actual
-        actual=$(shasum -a 256 "$out" | awk '{print $1}')
-        if [[ "$actual" != "$sha" ]]; then
+        actual=$(sha256_of "$out")
+        if [[ -z "$actual" ]]; then
+            warn "$name sha skipped — no sha256sum/shasum binary available"
+        elif [[ "$actual" != "$sha" ]]; then
             warn "$name sha mismatch (expected $sha got $actual) — skipping bundle"
             rm -f "$out"; return 1
         fi
@@ -481,7 +505,10 @@ done
 # can install it under /usr/local/lib/ongrid-edge/auditbeat. Linux-only:
 # auditd requires the Linux kernel audit subsystem. Binary comes from
 # resource/auditbeat/<arch>/auditbeat via `make stage-auditbeat` (no
-# network fetch in this script).
+# network fetch in this script — auditbeat is Elastic closed-source and
+# intentionally offline-only). Missing binaries hard-fail the package:
+# shipping a tarball whose audit plugin silently never starts on the
+# edge would be worse than a loud build failure operators can act on.
 for target in ${EDGE_TARGETS}; do
     src="${REPO_ROOT}/bin/${target}/auditbeat"
     dst="${STAGE_DIR}/edge/auditbeat-${target}"
@@ -490,7 +517,7 @@ for target in ${EDGE_TARGETS}; do
         chmod 755 "$dst"
         log "  + edge/auditbeat-${target}"
     else
-        warn "auditbeat binary ${src} missing; audit plugin won't work on ${target}. Run 'make stage-auditbeat' after dropping the binary into resource/auditbeat/${target}/."
+        die "auditbeat binary ${src} missing — auditbeat is offline-only and is NOT auto-fetched. Place the Elastic auditbeat binary at resource/auditbeat/${target}/auditbeat per resource/auditbeat/README.md, run 'make stage-auditbeat', then re-run 'make package'."
     fi
 done
 

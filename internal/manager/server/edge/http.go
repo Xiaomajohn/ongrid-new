@@ -420,7 +420,19 @@ func (h *Handler) listEdges(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	f := biz.ListFilter{
 		Status: q.Get("status"),
-		Name:   q.Get("name"),
+	}
+	// name / hostname / ip 是“精准查询”参数（与 proto ListEdgesRequest
+	// 的语义一致），传 nil = 不过滤；q.Get 返回空串但参数缺失也是
+	// nil，q.Get 返回空串且参数存在则视为“过滤空值”（后端 WHERE
+	// 会匹配空字段，操作员一般不会这么做但保持语义正确）。
+	if v := q.Get("name"); v != "" {
+		f.Name = &v
+	}
+	if v := q.Get("hostname"); v != "" {
+		f.Hostname = &v
+	}
+	if v := q.Get("ip"); v != "" {
+		f.IP = &v
 	}
 	if v := q.Get("device_id"); v != "" {
 		if n, err := strconv.ParseUint(v, 10, 64); err == nil {

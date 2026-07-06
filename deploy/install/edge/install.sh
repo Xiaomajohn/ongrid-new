@@ -21,31 +21,7 @@
 
 set -euo pipefail
 
-# --- defaults / constants ----------------------------------------------------
-
-ACCESS_KEY=""
-SECRET_KEY=""
-SERVER_EDGE_ADDR=""
-SERVER_HTTP_ADDR=""
-
-INSTALL_DIR="/usr/local/bin"
-ENV_DIR="/etc/ongrid-edge"
-ENV_FILE="${ENV_DIR}/ongrid-edge.env"
-SERVICE_FILE="/etc/systemd/system/ongrid-edge.service"
-UPGRADE_SERVICE_FILE="/etc/systemd/system/ongrid-edge-upgrade.service"
-LOG_DIR="/var/log/ongrid-edge"
-STATE_DIR="/var/lib/ongrid-edge"
-SERVICE_USER="ongrid-edge"
-SERVICE_GROUP="ongrid-edge"
-
-UNINSTALL=0
-
-# Wait up to N seconds for systemd-managed agent to log "registered with cloud"
-# before declaring success. Connect handshake is sub-second on a healthy box;
-# 20s leaves headroom for slow DNS / network. Set ONGRID_INSTALL_WAIT to override.
-WAIT_SECS="${ONGRID_INSTALL_WAIT:-20}"
-
-# --- pretty-print helpers ----------------------------------------------------
+# --- pretty-print helpers (must come before any log_* call) -----------------
 
 if [[ -t 1 && "${NO_COLOR:-}" == "" ]]; then
     C_RED=$'\033[0;31m'
@@ -66,6 +42,61 @@ log_ok()    { printf '%s[OK]%s    %s\n' "$C_GREEN"  "$C_RESET" "$*"; }
 
 trap 'log_error "install failed at line $LINENO (exit $?)"' ERR
 
+# Print a one-line banner immediately so the manager-side onLog
+# callback sees something on stdout/stderr right after the SSH pipe
+# opens. This is the operator's first hint that the install actually
+# started on the box; without it, a script that exits fast (e.g. on
+# the EUID != 0 -> sudo re-exec fail path) gives the worker nothing
+# to surface beyond "Process exited with status N". Trim secrets —
+# only echo the structural fields.
+log_info "install.sh starting on $(uname -srm); user=$(whoami 2>/dev/null || echo unknown)"
+
+# --- defaults / constants ----------------------------------------------------
+
+ACCESS_KEY=""
+SECRET_KEY=""
+SERVER_EDGE_ADDR=""
+SERVER_HTTP_ADDR=""
+# --task-name=NAME 是监控任务名，写入 env file (ONGRID_EDGE_TASK_NAME)，
+# agent 启动后随 register_edge 上报给 manager，落到 edge.task_name 列。
+# installjob worker 会从 installjob.options_json 透传过来；手工 install
+# 时由 operator 直接在命令行给。空字符串表示不设置，edge 端 HostInfo.TaskName
+# 留空，manager 端 SetTaskName 不会覆盖已有值。
+TASK_NAME=""
+# --prefix=PATH collapses every ongrid-edge install path (binary, plugin
+# binaries, env file, state dir, log dir) under one root. Default
+# /mnt/data/toos-temp keeps everything together so the operator can wipe
+# the whole install by rm -rf /mnt/data/toos-temp/{bin,lib,etc,var}. All
+# other path constants below are derived from this single knob.
+PREFIX="/mnt/data/toos-temp"
+
+# Layout (matches the original /usr/local{,/lib}/..., /etc/...,
+# /var/lib/..., /var/log/... split, just under PREFIX):
+#   PREFIX/bin/                  ongrid-edge
+#   PREFIX/lib/ongrid-edge/      plugin binaries + apply-pending-upgrade.sh
+#   PREFIX/etc/ongrid-edge/      ongrid-edge.env
+#   PREFIX/var/lib/ongrid-edge/  state, plugin work, upgrade stage
+#   PREFIX/var/log/ongrid-edge/  logs
+BIN_DIR="${PREFIX}/bin"
+LIB_DIR="${PREFIX}/lib/ongrid-edge"
+ENV_DIR="${PREFIX}/etc/ongrid-edge"
+ENV_FILE="${ENV_DIR}/ongrid-edge.env"
+STATE_DIR="${PREFIX}/var/lib/ongrid-edge"
+LOG_DIR="${PREFIX}/var/log/ongrid-edge"
+APPLY_HOOK="${LIB_DIR}/apply-pending-upgrade.sh"
+
+SERVICE_FILE="/etc/systemd/system/ongrid-edge.service"
+UPGRADE_SERVICE_FILE="/etc/systemd/system/ongrid-edge-upgrade.service"
+SERVICE_USER="ongrid-edge"
+SERVICE_GROUP="ongrid-edge"
+
+UNINSTALL=0
+
+# Wait up to N seconds for systemd-managed agent to log "registered with cloud"
+# before declaring success. Connect handshake is sub-second on a healthy box;
+# 20s leaves headroom for slow DNS / network. Set ONGRID_INSTALL_WAIT to override.
+WAIT_SECS="${ONGRID_INSTALL_WAIT:-20}"
+
 # --- arg parsing -------------------------------------------------------------
 
 usage() {
@@ -79,7 +110,10 @@ Required (install):
   --server-http-addr=HOST[:PORT]   http endpoint, e.g. ongrid.example.com:8443
 
 Other:
-  --uninstall                      stop + remove ongrid-edge (keeps /var/log)
+  --prefix=PATH                     install root (default /mnt/data/toos-temp);
+                                    consolidates bin/lib/etc/var under PATH
+  --task-name=NAME                  监控任务名（写入 env file，agent 启动后上报给 manager）
+  --uninstall                      stop + remove ongrid-edge (keeps PREFIX/var/log)
   -h, --help                       this help
 
 Env:
@@ -94,17 +128,45 @@ for arg in "$@"; do
         --secret-key=*)        SECRET_KEY="${arg#*=}" ;;
         --server-edge-addr=*)  SERVER_EDGE_ADDR="${arg#*=}" ;;
         --server-http-addr=*)  SERVER_HTTP_ADDR="${arg#*=}" ;;
+        --prefix=*)            PREFIX="${arg#*=}" ;;
+        --task-name=*)         TASK_NAME="${arg#*=}" ;;
         --uninstall)           UNINSTALL=1 ;;
         -h|--help)             usage; exit 0 ;;
         *) log_error "unknown arg: $arg"; usage; exit 2 ;;
     esac
 done
 
-# --- root check --------------------------------------------------------------
+# Re-derive paths after --prefix may have overridden the default.
+BIN_DIR="${PREFIX}/bin"
+LIB_DIR="${PREFIX}/lib/ongrid-edge"
+ENV_DIR="${PREFIX}/etc/ongrid-edge"
+ENV_FILE="${ENV_DIR}/ongrid-edge.env"
+STATE_DIR="${PREFIX}/var/lib/ongrid-edge"
+LOG_DIR="${PREFIX}/var/log/ongrid-edge"
+APPLY_HOOK="${LIB_DIR}/apply-pending-upgrade.sh"
 
+# --- root check --------------------------------------------------------------
+#
+# Resolve the actual script file path. Under `bash install.sh ARGS` $0
+# is the file path. Under `curl URL | bash -s -- ARGS` $0 is the FIRST
+# arg after `--` (not a file), so the old
+#   exec sudo -E bash "$0" "$@"
+# would point sudo at a non-existent file. BASH_SOURCE[0] in bash -s
+# mode also isn't usable (returns "bash" or empty depending on bash
+# version), so the only reliable thing we can do under the curl-pipe
+# path is refuse to re-exec and tell the operator to stage the script
+# to a file or re-run as root. Root users skip the if entirely.
+SCRIPT_PATH="${BASH_SOURCE[0]:-$0}"
 if [[ $EUID -ne 0 ]]; then
-    log_info "re-executing with sudo"
-    exec sudo -E bash "$0" "$@"
+    if [[ -z "$SCRIPT_PATH" || "$SCRIPT_PATH" == -* || "$SCRIPT_PATH" == "bash" || ! -f "$SCRIPT_PATH" ]]; then
+        log_error "non-root invocation but no script file path is resolvable (likely 'curl ... | bash -s -- ...' mode)."
+        log_error "  fix one of:"
+        log_error "    - re-run as root"
+        log_error "    - or:  curl -k -sSL https://${SERVER_HTTP_ADDR:-<server>}/install.sh -o /tmp/ongrid-install.sh && bash /tmp/ongrid-install.sh --access-key=... ..."
+        exit 2
+    fi
+    log_info "re-executing with sudo (script=$SCRIPT_PATH)"
+    exec sudo -E bash "$SCRIPT_PATH" "$@"
 fi
 
 # --- uninstall path ----------------------------------------------------------
@@ -112,10 +174,10 @@ fi
 if [[ $UNINSTALL -eq 1 ]]; then
     log_info "stopping ongrid-edge"
     systemctl disable --now ongrid-edge 2>/dev/null || true
-    rm -f "$SERVICE_FILE" "$INSTALL_DIR/ongrid-edge"
+    rm -f "$SERVICE_FILE" "$UPGRADE_SERVICE_FILE" "${BIN_DIR}/ongrid-edge"
     rm -rf "$ENV_DIR"
     systemctl daemon-reload || true
-    log_ok "uninstalled (logs under $LOG_DIR preserved)"
+    log_ok "uninstalled (logs under $LOG_DIR preserved; full wipe: rm -rf ${PREFIX})"
     exit 0
 fi
 
@@ -164,9 +226,29 @@ if [[ ! -s "$TMP_BIN" ]]; then
     log_error "downloaded binary is empty: $TMP_BIN"
     rm -f "$TMP_BIN"; exit 1
 fi
-install -m 0755 -o root -g root "$TMP_BIN" "${INSTALL_DIR}/ongrid-edge"
+mkdir -p "$BIN_DIR"
+install -m 0755 -o root -g root "$TMP_BIN" "${BIN_DIR}/ongrid-edge"
 rm -f "$TMP_BIN"
 trap 'log_error "install failed at line $LINENO (exit $?)"' ERR
+
+# --- SELinux relabel (openEuler/RHEL enforcing + custom --prefix) ------------
+# When --prefix puts the binary somewhere like /mnt/data/.../bin/ongrid-edge,
+# the file inherits mnt_t from /mnt. systemd ExecStart= requires bin_t to
+# actually exec; under SELinux enforcing the service then crashes 203/EXEC
+# within ~1s of start (verified on openEuler 24.03 / RHEL-family). Detect
+# SELinux and re-label the bin/lib trees so plugin-supervisor-spawned binaries
+# also get bin_t. Standard /usr, /usr/local, /opt are already bin_t by default
+# so we skip them — chcon on a standard path only adds noise.
+if command -v getenforce >/dev/null 2>&1 && [[ "$(getenforce 2>/dev/null)" != "Disabled" ]]; then
+    case "$PREFIX" in
+        /usr|/usr/local|/opt|/srv) : ;;  # already bin_t under default policy
+        *)
+            log_info "relabeling SELinux bin_t on ${BIN_DIR} and ${LIB_DIR}"
+            chcon -R -h -t bin_t "${BIN_DIR}" "${LIB_DIR}" 2>/dev/null \
+                || log_warn "chcon -t bin_t failed; if SELinux is enforcing, ongrid-edge.service will exit 203/EXEC"
+            ;;
+    esac
+fi
 
 # --- ADR-024 ExecStartPre hook ----------------------------------------------
 #
@@ -175,11 +257,9 @@ trap 'log_error "install failed at line $LINENO (exit $?)"' ERR
 # every file in MANIFEST.txt atomically, then on the NEXT boot rolls back if
 # no healthy_marker landed. Without this script installed remote whole-bundle
 # upgrades are silently no-ops. Anonymous /edge/ static path serves it.
-APPLY_HOOK_DIR=/usr/local/lib/ongrid-edge
-APPLY_HOOK="${APPLY_HOOK_DIR}/apply-pending-upgrade.sh"
 APPLY_URL="https://${SERVER_HTTP_ADDR}/edge/apply-pending-upgrade.sh"
 log_info "installing ${APPLY_HOOK}"
-mkdir -p "$APPLY_HOOK_DIR"
+mkdir -p "$LIB_DIR"
 TMP_HOOK=$(mktemp /tmp/apply-pending-upgrade.XXXXXX)
 if curl -fLk --retry 3 --retry-delay 2 -o "$TMP_HOOK" "$APPLY_URL"; then
     install -m 0755 -o root -g root "$TMP_HOOK" "$APPLY_HOOK"
@@ -193,7 +273,7 @@ rm -f "$TMP_HOOK"
 # The agent's plugin supervisor runs promtail (logs), node_exporter
 # (hostmetrics), process_exporter (procmetrics), otelcol-contrib (traces),
 # and database exporters (databasemetrics)
-# as subprocesses, expecting them under ${APPLY_HOOK_DIR}. The old curl-pipe
+# as subprocesses, expecting them under ${LIB_DIR}. The old curl-pipe
 # installer fetched ONLY the agent binary, so every edge enrolled via the UI
 # one-liner came up with an empty plugin dir → all plugins "crashed: binary
 # missing" → silent empty Logs / Monitor / Traces. (install-edge.sh, run from
@@ -202,7 +282,7 @@ rm -f "$TMP_HOOK"
 # binary came from. Best-effort per binary: a missing one only disables its
 # plugin, surfaced loudly in the self-check below.
 fetch_plugin_bin() {
-    local name="$1" dest="${APPLY_HOOK_DIR}/$1"
+    local name="$1" dest="${LIB_DIR}/$1"
     local url="https://${SERVER_HTTP_ADDR}/edge/${name}-${OS}-${ARCH}"
     local tmp
     tmp=$(mktemp "/tmp/${name}.XXXXXX")
@@ -257,22 +337,34 @@ cat > "$ENV_FILE" <<EOF
 ONGRID_EDGE_CLOUD_ADDR=${SERVER_EDGE_ADDR}
 ONGRID_EDGE_ACCESS_KEY=${ACCESS_KEY}
 ONGRID_EDGE_SECRET_KEY=${SECRET_KEY}
+# 监控任务名（空表示不设置；agent 启动后随 register_edge 上报给 manager）。
+# 不加引号，env file 由 systemd 直接 source，特殊字符由 operator 自负责。
+ONGRID_EDGE_TASK_NAME=${TASK_NAME}
+# Override the agent-side defaults so plugin binaries, plugin work dir, and
+# upgrade stage dir all land under \${PREFIX} (= ${PREFIX}) instead of the
+# hardcoded /usr/local/lib, /var/lib/ongrid-edge, /var/lib/ongrid-edge/.upgrade.
+# Matches the prefix-relative paths the systemd unit + apply-pending-upgrade.sh
+# hook use (see ongrid-edge.service / ongrid-edge-upgrade.service).
+ONGRID_EDGE_PLUGIN_BIN_DIR=${LIB_DIR}
+ONGRID_EDGE_PLUGIN_WORK_DIR=${STATE_DIR}/plugins
+ONGRID_EDGE_UPGRADE_STAGE_DIR=${STATE_DIR}/.upgrade
+# scrape config (used by internal/pkg/config Edge.ScrapeConfigFile default
+# when this var is unset) also moves under \${PREFIX} for consistency.
+ONGRID_EDGE_SCRAPE_CONFIG_FILE=${ENV_DIR}/scrape.yaml
 EOF
 chmod 640 "$ENV_FILE"
 chown "root:${SERVICE_GROUP}" "$ENV_FILE"
 
 # --- state dir ---------------------------------------------------------------
 #
-# The unit below sets StateDirectory=ongrid-edge so systemd creates
-# /var/lib/ongrid-edge (owned by the service user) at start. But
-# StateDirectory= requires systemd >= 235 and is SILENTLY IGNORED on older
-# releases — CentOS/RHEL 7 ships systemd 219. When ignored, the base dir is
-# never created, /var/lib stays root:root 0755, and the agent — running
-# unprivileged as ${SERVICE_USER} — cannot mkdir its plugin work dirs beneath
-# it. Every collector plugin then fails `configure` with EACCES, no exporter
-# starts, and the edge shows up "online but with no data". Create the dir
-# explicitly so the installer is correct regardless of systemd version. This
-# is idempotent and a harmless no-op where StateDirectory= already made it.
+# StateDirectory= is NOT used in the rendered unit (it always maps to
+# ${LOCALSTATEDIR}/lib/<name> = /var/lib/ongrid-edge on default systemd builds
+# and can't follow an arbitrary --prefix). We rely on:
+#   (a) the installer pre-creating + chowning $STATE_DIR below, and
+#   (b) ReadWritePaths=$STATE_DIR $LOG_DIR inside the unit,
+# both honored even on systemd 219 (CentOS 7) where StateDirectory= would be
+# silently ignored anyway. The agent can always write its plugin work dir
+# + .upgrade stage + log dir regardless of systemd version.
 mkdir -p "$STATE_DIR"
 chown "$SERVICE_USER":"$SERVICE_GROUP" "$STATE_DIR"
 chmod 0755 "$STATE_DIR"
@@ -281,32 +373,33 @@ chmod 0755 "$STATE_DIR"
 
 # ADR-024 privileged apply oneshot. Runs apply-pending-upgrade.sh as root
 # (no sandbox) before the agent, so it can write the root-owned binary paths
-# under /usr/local. ongrid-edge.service pulls it via Wants=, which re-runs it
+# under ${BIN_DIR}. ongrid-edge.service pulls it via Wants=, which re-runs it
 # on every Restart=always auto-restart (verified on systemd 219). This
 # replaces the old `ExecStartPre=-+...`: the `+` root-exec prefix is
 # unsupported on systemd < 231 and was silently ignored there, so upgrades
 # never applied on CentOS 7's systemd 219.
-cat > "$UPGRADE_SERVICE_FILE" <<'EOF'
+cat > "$UPGRADE_SERVICE_FILE" <<EOF
 [Unit]
 Description=ongrid edge pending-upgrade apply (root, pre-start)
-Documentation=ADR-024
+# ${APPLY_HOOK} — rendered from --prefix (default /mnt/data/toos-temp).
+Documentation=file://${APPLY_HOOK}
 Before=ongrid-edge.service
 After=local-fs.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=no
-ExecStart=/usr/local/lib/ongrid-edge/apply-pending-upgrade.sh
+ExecStart=${APPLY_HOOK}
 EOF
 
-cat > "$SERVICE_FILE" <<'EOF'
+cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=ongrid edge agent
 After=network-online.target
 Wants=network-online.target
 # ADR-024 remote upgrade: the privileged "apply staged bundle + rollback
 # check" step runs as the separate root oneshot ongrid-edge-upgrade.service
-# (this unit is sandboxed + non-root and cannot write /usr/local). Wants=
+# (this unit is sandboxed + non-root and cannot write ${BIN_DIR}). Wants=
 # pulls it on every (re)start incl. Restart=always; After= guarantees the
 # swap lands before the agent execs.
 Wants=ongrid-edge-upgrade.service
@@ -314,8 +407,8 @@ After=ongrid-edge-upgrade.service
 
 [Service]
 Type=simple
-EnvironmentFile=/etc/ongrid-edge/ongrid-edge.env
-ExecStart=/usr/local/bin/ongrid-edge
+EnvironmentFile=${ENV_FILE}
+ExecStart=${BIN_DIR}/ongrid-edge
 Restart=always
 RestartSec=5
 User=ongrid-edge
@@ -335,9 +428,10 @@ PrivateTmp=true
 # writable path is lost and the sandboxed agent still can't write the state
 # dir even after the installer pre-created it. List it in ReadWritePaths=
 # explicitly so writability never depends on StateDirectory= taking effect.
-StateDirectory=ongrid-edge
-StateDirectoryMode=0755
-ReadWritePaths=/var/lib/ongrid-edge /var/log/ongrid-edge
+# We don't set StateDirectory= here at all: it pins the path to
+# /var/lib/ongrid-edge and can't follow --prefix. The ReadWritePaths= below
+# plus the installer pre-creating + chowning $STATE_DIR (above) is enough.
+ReadWritePaths=${STATE_DIR} ${LOG_DIR}
 StandardOutput=journal
 StandardError=journal
 
@@ -406,7 +500,7 @@ while :; do
 done
 printf '\n'
 
-[[ -z "$VERSION_LINE" ]] && VERSION_LINE="ongrid-edge ($(stat -c '%y' ${INSTALL_DIR}/ongrid-edge 2>/dev/null | cut -d. -f1))"
+[[ -z "$VERSION_LINE" ]] && VERSION_LINE="ongrid-edge ($(stat -c '%y' ${BIN_DIR}/ongrid-edge 2>/dev/null | cut -d. -f1))"
 
 # --- self-check --------------------------------------------------------------
 #
@@ -417,10 +511,10 @@ echo
 echo "${C_BOLD}${C_CYAN}--- self-check ---${C_RESET}"
 SELFCHECK_FAIL=0
 for tool in promtail otelcol-contrib node_exporter process_exporter mysqld_exporter postgres_exporter redis_exporter mongodb_exporter; do
-    if [[ -x "${APPLY_HOOK_DIR}/${tool}" ]]; then
+    if [[ -x "${LIB_DIR}/${tool}" ]]; then
         log_ok "plugin binary present: ${tool}"
     else
-        log_error "plugin binary MISSING: ${APPLY_HOOK_DIR}/${tool} — that plugin will not run"
+        log_error "plugin binary MISSING: ${LIB_DIR}/${tool} — that plugin will not run"
         SELFCHECK_FAIL=1
     fi
 done
@@ -475,9 +569,14 @@ case "$STATUS" in
         else
             log_ok "connected:    via ${SERVER_EDGE_ADDR}"
         fi
-        log_ok "tail logs:    journalctl -u ongrid-edge -f"
+        log_ok "install root: ${PREFIX}"
+        log_ok "binary:       ${BIN_DIR}/ongrid-edge"
+        log_ok "plugin dir:   ${LIB_DIR}"
         log_ok "env file:     ${ENV_FILE}"
-        log_ok "uninstall:    curl -k -sSL https://${SERVER_HTTP_ADDR}/install.sh | bash -s -- --uninstall"
+        log_ok "state dir:    ${STATE_DIR}"
+        log_ok "log dir:      ${LOG_DIR}"
+        log_ok "tail logs:    journalctl -u ongrid-edge -f"
+        log_ok "uninstall:    curl -k -sSL https://${SERVER_HTTP_ADDR}/install.sh | bash -s -- --uninstall --prefix=${PREFIX}"
         ;;
     failed)
         log_ok "installed:    ${VERSION_LINE}"
@@ -493,8 +592,9 @@ case "$STATUS" in
             log_warn "next step: tail the journal to diagnose:"
             log_warn "  journalctl -u ongrid-edge -f"
         fi
+        log_ok "install root: ${PREFIX}"
         log_ok "env file:     ${ENV_FILE}"
-        log_ok "uninstall:    curl -k -sSL https://${SERVER_HTTP_ADDR}/install.sh | bash -s -- --uninstall"
+        log_ok "uninstall:    curl -k -sSL https://${SERVER_HTTP_ADDR}/install.sh | bash -s -- --uninstall --prefix=${PREFIX}"
         exit 1
         ;;
     pending)
@@ -502,7 +602,8 @@ case "$STATUS" in
         log_warn "service is running but did not log a connect within ${WAIT_SECS}s"
         log_warn "this can happen on slow networks; tail the journal to confirm:"
         log_warn "  journalctl -u ongrid-edge -f"
+        log_ok "install root: ${PREFIX}"
         log_ok "env file:     ${ENV_FILE}"
-        log_ok "uninstall:    curl -k -sSL https://${SERVER_HTTP_ADDR}/install.sh | bash -s -- --uninstall"
+        log_ok "uninstall:    curl -k -sSL https://${SERVER_HTTP_ADDR}/install.sh | bash -s -- --uninstall --prefix=${PREFIX}"
         ;;
 esac

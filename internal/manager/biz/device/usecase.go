@@ -210,12 +210,85 @@ func (u *Usecase) UpdateRoles(ctx context.Context, id uint64, names []string) er
 	return nil
 }
 
-// UpdateNameDescription updates operator-editable display fields.
-func (u *Usecase) UpdateNameDescription(ctx context.Context, id uint64, name, description string) error {
+// UpdateNameDescription updates operator-editable display fields (name /
+// description / hostname). name 不允许为空；description 允许空字符串
+// （operator 主动清空）；hostname 允许空——为空时由调用方在 UI 层 fallback
+// 到 ssh_host。校验在 usecase 层做，避免无效写入穿透到 SQL。
+func (u *Usecase) UpdateNameDescription(ctx context.Context, id uint64, name, description, hostname string) error {
 	if u.repo == nil {
 		return errs.ErrNotWiredYet
 	}
-	return u.repo.UpdateNameDescription(ctx, id, strings.TrimSpace(name), strings.TrimSpace(description))
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("%w: name required", errs.ErrInvalid)
+	}
+	return u.repo.UpdateNameDescription(ctx, id, name, strings.TrimSpace(description), strings.TrimSpace(hostname))
+}
+
+// UpdateReachability 写入 ping 服务的可达性结果。pinger 定时任务会
+// 调用本方法把每台 host 的 ping 结果回填到 devices 表。
+func (u *Usecase) UpdateReachability(ctx context.Context, id uint64, reachable bool, at *time.Time) error {
+	if u.repo == nil {
+		return errs.ErrNotWiredYet
+	}
+	return u.repo.UpdateReachability(ctx, id, reachable, at)
+}
+
+// PingReachable 拉所有有 ssh_host 的设备，对每台跑一次 ping，把结果
+// 写回 devices.reachable / last_reachable_at。main.go 的 5 分钟定时器
+// 调本函数。pinger 允许 nil——本函数会退化到 NewPinger(log) 的默认参数。
+//
+// 返回值：实际 ping 的设备数（不含空数据库的 fast-path 0）。
+func (u *Usecase) PingReachable(ctx context.Context, pinger *Pinger) (int, error) {
+	if u.repo == nil {
+		return 0, errs.ErrNotWiredYet
+	}
+	targets, err := u.repo.ListReachableTargets(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if len(targets) == 0 {
+		return 0, nil
+	}
+	pingTargets := make([]PingTarget, 0, len(targets))
+	for _, d := range targets {
+		pingTargets = append(pingTargets, PingTarget{ID: d.ID, Host: d.SSHHost})
+	}
+	p := pinger
+	if p == nil {
+		p = NewPinger(u.log)
+	}
+	results := p.RunAll(ctx, pingTargets)
+	now := time.Now().UTC()
+	reachable, unreachable := 0, 0
+	for i, r := range results {
+		var at *time.Time
+		if r.Reachable {
+			reachable++
+			at = &now
+		} else {
+			unreachable++
+		}
+		if err := u.repo.UpdateReachability(ctx, pingTargets[i].ID, r.Reachable, at); err != nil {
+			// 单台回填失败不能阻塞整轮——只打 warn，留给下个 5min 周期补上
+			if u.log != nil {
+				u.log.Warn("ping reachability: update failed",
+					slog.Uint64("device_id", pingTargets[i].ID),
+					slog.String("host", r.Host),
+					slog.Bool("reachable", r.Reachable),
+					slog.Any("err", err),
+				)
+			}
+		}
+	}
+	if u.log != nil {
+		u.log.Info("ping reachability: round complete",
+			slog.Int("scanned", len(results)),
+			slog.Int("reachable", reachable),
+			slog.Int("unreachable", unreachable),
+		)
+	}
+	return len(results), nil
 }
 
 // SetSSHCredentials persists the operator-supplied SSH block. The

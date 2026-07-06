@@ -109,7 +109,11 @@ type deviceItem struct {
 	Roles          []string   `json:"roles"`
 	Online         bool       `json:"online"`
 	LastSeenAt     *time.Time `json:"last_seen_at,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
+	// Reachable / LastReachableAt 是 ping 服务定时写入的结果，与 Edge
+	// 推送的 Online 解耦。SPA 的 Hosts 页面按 Reachable 渲染状态列。
+	Reachable       bool       `json:"reachable"`
+	LastReachableAt *time.Time `json:"last_reachable_at,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
 	// SSH fields echoed in clear (internal ops system — plaintext is
 	// the documented contract; see model/device/model.go + the 行为变化
 	// entry in CHANGELOG.md v0.9.1). Host / port / user / auth_kind are
@@ -133,9 +137,22 @@ type listResp struct {
 	Total int          `json:"total"`
 }
 
+// updateReq 是 PATCH /v1/devices/{id} 的 wire body。所有字段都是可选
+// 的（指针类型，nil=不改）。operator 在 UI 上点"编辑主机"提交一个
+// 局部变更，服务端只回写被显式设的字段——这样下面的 SSH 凭据修改不会
+// 误清空现有未提交的密码 / 私钥。
 type updateReq struct {
 	Name        *string `json:"name,omitempty"`
 	Description *string `json:"description,omitempty"`
+	Hostname    *string `json:"hostname,omitempty"`
+	// SSH 连接块。EmptyString ("") 在服务端视为"清空该字段"（仅对
+	// port / auth_kind / password / key 适用，host/user 有合法性校验）。
+	SSHHost     *string `json:"ssh_host,omitempty"`
+	SSHPort     *int    `json:"ssh_port,omitempty"`
+	SSHUser     *string `json:"ssh_user,omitempty"`
+	SSHAuthKind *string `json:"ssh_auth_kind,omitempty"`
+	SSHPassword *string `json:"ssh_password,omitempty"`
+	SSHKey      *string `json:"ssh_key,omitempty"`
 }
 
 type updateRolesReq struct {
@@ -329,6 +346,18 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, devToItem(d))
 }
 
+// update 是 PATCH /v1/devices/{id} 的主 handler。处理两个逻辑块：
+//
+//   1) name / description / hostname 走 UpdateNameDescription。三个都是
+//      可选；只传 name 不传 description 时不破坏现有 description；
+//   2) SSH 连接块 (host/port/user/auth_kind/password/key) 走
+//      SetSSHCredentials。任何一个字段被提供都触发重写；为避免“只改了
+//      ssh_host 却不小心被 password 同一个 nil 指针干掉现有 password
+//      ”的 bug，未提供的字段从当前行读回再 setSSHCredentials（merge
+//      语义）。空字符串 ("") 仍然是“清空”语义（仅对 password / key /
+//      auth_kind 有效，host/user 的空串在调用层拒绝）。
+//
+// 返回 200 + 最新一行的 DTO，让 SPA 不用再发一次 GET。
 func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 	id, err := parseID(r)
 	if err != nil {
@@ -345,19 +374,76 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	name := d.Name
-	desc := d.Description
-	if in.Name != nil {
-		name = *in.Name
+
+	// --- Block 1: 展示字段 ---
+	if in.Name != nil || in.Description != nil || in.Hostname != nil {
+		name := d.Name
+		desc := d.Description
+		hostname := d.Hostname
+		if in.Name != nil {
+			name = *in.Name
+		}
+		if in.Description != nil {
+			desc = *in.Description
+		}
+		if in.Hostname != nil {
+			hostname = *in.Hostname
+		}
+		if err := h.uc.UpdateNameDescription(r.Context(), id, name, desc, hostname); err != nil {
+			writeErr(w, err)
+			return
+		}
+		// 后面 SSH 块要拿最新 name/desc/hostname 走 merge，
+		// 这里补一下 d 的镜像（避免后面从 DB 重读一次）。
+		d.Name, d.Description, d.Hostname = name, desc, hostname
 	}
-	if in.Description != nil {
-		desc = *in.Description
+
+	// --- Block 2: SSH 连接块 ---
+	// 任意一个 SSH 字段被提供则走 SetSSHCredentials；未提供的字段从
+	// d 镜像里读回，保证现有 password / key 不被 nil 推成零值。
+	if in.SSHHost != nil || in.SSHPort != nil || in.SSHUser != nil ||
+		in.SSHAuthKind != nil || in.SSHPassword != nil || in.SSHKey != nil {
+		creds := devicebiz.SSHCredentials{
+			Host:     d.SSHHost,
+			Port:     d.SSHPort,
+			User:     d.SSHUser,
+			AuthKind: d.SSHAuthKind,
+			Password: d.SSHPassword,
+			Key:      d.SSHKey,
+		}
+		if in.SSHHost != nil {
+			creds.Host = *in.SSHHost
+		}
+		if in.SSHPort != nil {
+			creds.Port = *in.SSHPort
+		}
+		if in.SSHUser != nil {
+			creds.User = *in.SSHUser
+		}
+		if in.SSHAuthKind != nil {
+			creds.AuthKind = *in.SSHAuthKind
+		}
+		if in.SSHPassword != nil {
+			creds.Password = *in.SSHPassword
+		}
+		if in.SSHKey != nil {
+			creds.Key = *in.SSHKey
+		}
+		if err := h.uc.SetSSHCredentials(r.Context(), id, creds); err != nil {
+			writeErr(w, err)
+			return
+		}
 	}
-	if err := h.uc.UpdateNameDescription(r.Context(), id, name, desc); err != nil {
+
+	// 重读一次，回最新 DTO（包括可能侧边变化的 ssh_* 字段）。如果
+	// 本次 PATCH 一个字段都没改，也走这里——响应一个 200 而不是 204，
+	// 让 SPA 的“保存后刷新列表”逻辑能收到一个明确的成功信号。
+	updated, err := h.uc.Get(r.Context(), id)
+	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	writeJSON(w, http.StatusOK, devToItem(updated))
 }
 
 func (h *Handler) updateRoles(w http.ResponseWriter, r *http.Request) {
@@ -427,32 +513,34 @@ func (h *Handler) listEdges(w http.ResponseWriter, r *http.Request) {
 
 func devToItem(d *devicemodel.Device) deviceItem {
 	return deviceItem{
-		ID:             d.ID,
-		Name:           d.Name,
-		Description:    d.Description,
-		Hostname:       d.Hostname,
-		OS:             d.OS,
-		OSVersion:      d.OSVersion,
-		Arch:           d.Arch,
-		KernelVersion:  d.KernelVersion,
-		IPAddress:      d.IPAddress,
-		CPUCount:       d.CPUCount,
-		MemTotalBytes:  d.MemTotalBytes,
-		DiskTotalBytes: d.DiskTotalBytes,
-		CPUUsagePct:    d.CPUUsagePct,
-		MemUsagePct:    d.MemUsagePct,
-		DiskUsagePct:   d.DiskUsagePct,
-		Roles:          devicemodel.DecodeRoles(d.Roles),
-		Online:         d.Online,
-		LastSeenAt:     d.LastSeenAt,
-		CreatedAt:      d.CreatedAt,
-		SSHHost:        d.SSHHost,
-		SSHPort:        d.SSHPort,
-		SSHUser:        d.SSHUser,
-		SSHAuthKind:    d.SSHAuthKind,
-		SSHPassword:    d.SSHPassword,
-		SSHKey:         d.SSHKey,
-		NodeID:         d.NodeID,
+		ID:              d.ID,
+		Name:            d.Name,
+		Description:     d.Description,
+		Hostname:        d.Hostname,
+		OS:              d.OS,
+		OSVersion:       d.OSVersion,
+		Arch:            d.Arch,
+		KernelVersion:   d.KernelVersion,
+		IPAddress:       d.IPAddress,
+		CPUCount:        d.CPUCount,
+		MemTotalBytes:   d.MemTotalBytes,
+		DiskTotalBytes:  d.DiskTotalBytes,
+		CPUUsagePct:     d.CPUUsagePct,
+		MemUsagePct:     d.MemUsagePct,
+		DiskUsagePct:    d.DiskUsagePct,
+		Roles:           devicemodel.DecodeRoles(d.Roles),
+		Online:          d.Online,
+		LastSeenAt:      d.LastSeenAt,
+		Reachable:       d.Reachable,
+		LastReachableAt: d.LastReachableAt,
+		CreatedAt:       d.CreatedAt,
+		SSHHost:         d.SSHHost,
+		SSHPort:         d.SSHPort,
+		SSHUser:         d.SSHUser,
+		SSHAuthKind:     d.SSHAuthKind,
+		SSHPassword:     d.SSHPassword,
+		SSHKey:          d.SSHKey,
+		NodeID:          d.NodeID,
 	}
 }
 

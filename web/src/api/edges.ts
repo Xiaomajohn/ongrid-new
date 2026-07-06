@@ -46,6 +46,10 @@ export type Edge = {
   // its most recent register_edge handshake. Empty string means the agent
   // declined to report (e.g. pre-introduction binary).
   agent_version?: string;
+  // 任务名 — 安装时由 operator 在 InstallEdgeModal 输入，后端落地到 edge
+  // 行。空字符串表示后端预存的数据未携带该字段；UI 渲染为空时显示 —。
+  // 后端新增精准查询参数 name / hostname / ip 的依据字段之一。
+  task_name?: string;
 };
 
 export type UpgradeAgentResponse = {
@@ -130,10 +134,26 @@ export type MetricsResponse = {
   points: MetricPoint[];
 };
 
-export function listEdges(params?: { roles?: string; device_id?: number | string }) {
+// listEdges — 后端 listEdges 支持以下精准查询参数：
+//   - roles       ：逗号分隔的角色列表（来自 Sidebar ?roles= URL）
+//   - device_id   ：单设备过滤（一般不通过 UI 触发，预留）
+//   - name        ：edge.name 模糊匹配
+//   - hostname    ：从 device.hostname / edge.host_info 回填后模糊匹配
+//   - ip          ：从 device.ip_address / edge.host_info 回填后模糊匹配
+// 三个字符串参数都为空时省略 URL key，避免多余 query string。
+export function listEdges(params?: {
+  roles?: string;
+  device_id?: number | string;
+  name?: string;
+  hostname?: string;
+  ip?: string;
+}) {
   const usp = new URLSearchParams();
   if (params?.roles) usp.set('roles', params.roles);
   if (params?.device_id != null) usp.set('device_id', String(params.device_id));
+  if (params?.name) usp.set('name', params.name);
+  if (params?.hostname) usp.set('hostname', params.hostname);
+  if (params?.ip) usp.set('ip', params.ip);
   const qs = usp.toString();
   return request<{ items: Edge[]; total: number }>('GET', `/edges${qs ? `?${qs}` : ''}`);
 }

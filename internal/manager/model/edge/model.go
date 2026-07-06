@@ -45,14 +45,16 @@ type Edge struct {
 	// agents that decline to report. Used by the SPA's Edges page so
 	// operators can audit version drift across the fleet at a glance.
 	AgentVersion string `gorm:"size:32;not null;default:'';column:agent_version"`
-	// DeviceID is the convenience pointer to the host Device (the device
-	// this edge is running on). Source of truth is the edge_devices
-	// junction (Type=Host); this field is kept synchronised by the
-	// register flow so old callers that read e.DeviceID don't break.
-	DeviceID     *uint64               `gorm:"index;column:device_id"`
-	CreatedBy    *uint64               `gorm:"column:created_by"` // audit only
-	CreatedAt    time.Time             `gorm:"column:created_at"`
-	UpdatedAt    time.Time             `gorm:"column:updated_at"`
+	// TaskName is the human-readable task identifier attached by the
+	// installjob worker (e.g. "rack-A-2026Q3-patch"). Lets operators
+	// group edges by the install campaign in the Edges page. Empty
+	// string for edges created without an installjob (manual create,
+	// legacy rows). The Edges page filters exact-match on this column.
+	TaskName     string  `gorm:"size:128;column:task_name"`
+	DeviceID     *uint64 `gorm:"index;column:device_id"`
+	CreatedBy    *uint64 `gorm:"column:created_by"` // audit only
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 	DeletedAt    *time.Time            `gorm:"index;column:deleted_at"` // soft delete audit time
 	DeleteMarker soft_delete.DeletedAt `gorm:"column:delete_marker;not null;default:0;softDelete:milli,DeletedAtField:DeletedAt;uniqueIndex:idx_edges_access_key_id,priority:2"`
 }

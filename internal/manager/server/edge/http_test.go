@@ -50,6 +50,12 @@ func (d *fakeDeviceRepo) UpdateHostFacts(context.Context, uint64, devicebiz.Host
 }
 func (d *fakeDeviceRepo) MarkOnline(context.Context, uint64) error  { return nil }
 func (d *fakeDeviceRepo) MarkOffline(context.Context, uint64) error { return nil }
+func (d *fakeDeviceRepo) UpdateReachability(context.Context, uint64, bool, *time.Time) error {
+	return nil
+}
+func (d *fakeDeviceRepo) ListReachableTargets(context.Context) ([]*devicemodel.Device, error) {
+	return nil, nil
+}
 
 func (d *fakeDeviceRepo) ReconcileOfflineOrphans(context.Context) (int64, error) { return 0, nil }
 func (d *fakeDeviceRepo) Get(_ context.Context, id uint64) (*devicemodel.Device, error) {
@@ -69,7 +75,7 @@ func (d *fakeDeviceRepo) GetMany(_ context.Context, ids []uint64) (map[uint64]*d
 }
 func (d *fakeDeviceRepo) UpdateUsage(context.Context, uint64, devicebiz.Usage) error { return nil }
 func (d *fakeDeviceRepo) UpdateRoles(context.Context, uint64, uint8) error           { return nil }
-func (d *fakeDeviceRepo) UpdateNameDescription(context.Context, uint64, string, string) error {
+func (d *fakeDeviceRepo) UpdateNameDescription(context.Context, uint64, string, string, string) error {
 	return nil
 }
 func (d *fakeDeviceRepo) SetSSHCredentials(context.Context, uint64, devicebiz.SSHCredentials) error {

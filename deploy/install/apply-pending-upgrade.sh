@@ -33,7 +33,13 @@
 
 set -uo pipefail
 
-STAGE_DIR=/var/lib/ongrid-edge/.upgrade
+# Paths are placeholders — install.sh / install-edge.sh render them to the
+# operator-chosen --prefix (default /mnt/data/toos-temp) at install time:
+#   __STAGE_DIR__   PREFIX/var/lib/ongrid-edge/.upgrade  (agent stage dir)
+#   __BIN_TARGET__  PREFIX/bin/ongrid-edge                (legacy swap target)
+#   __BIN_DIR__     PREFIX/bin                            (swap parent for *.previous)
+#   __LIB_DIR__     PREFIX/lib/ongrid-edge                (plugin bin parent)
+STAGE_DIR=__STAGE_DIR__
 INCOMING_DIR=$STAGE_DIR/incoming
 MANIFEST=$INCOMING_DIR/MANIFEST.txt
 LAST_UPGRADE_AT=$STAGE_DIR/last_upgrade_at
@@ -41,7 +47,7 @@ LAST_UPGRADE_VER=$STAGE_DIR/last_upgrade_ver
 HEALTHY_MARKER=$STAGE_DIR/healthy_marker
 
 # Legacy single-file paths (kept for back-compat — see mode 3 below).
-LEGACY_TARGET=/usr/local/bin/ongrid-edge
+LEGACY_TARGET=__BIN_TARGET__
 LEGACY_PENDING=$STAGE_DIR/pending
 LEGACY_PENDING_SHA=$STAGE_DIR/pending.sha256
 LEGACY_PREVIOUS=$STAGE_DIR/previous
@@ -89,7 +95,7 @@ maybe_rollback() {
       rm -f "$LAST_UPGRADE_AT" "$LAST_UPGRADE_VER"
       # Best-effort: prune the .previous side of every swap target so
       # the disk doesn't fill with old bundles.
-      find /usr/local/bin /usr/local/lib/ongrid-edge -name '*.previous' -type f -delete 2>/dev/null || true
+      find __BIN_DIR__ __LIB_DIR__ -name '*.previous' -type f -delete 2>/dev/null || true
       return 0
     fi
   fi
@@ -101,7 +107,7 @@ maybe_rollback() {
     if [[ -f $prev ]]; then
       mv -f "$prev" "$target" 2>/dev/null && rolled_back=$((rolled_back+1))
     fi
-  done < <(find /usr/local/bin /usr/local/lib/ongrid-edge -name '*.previous' -type f -print0 2>/dev/null)
+  done < <(find __BIN_DIR__ __LIB_DIR__ -name '*.previous' -type f -print0 2>/dev/null)
   log "auto-rollback: restored $rolled_back file(s)"
   # Clear the marker so a stable boot following the rollback doesn't
   # rollback AGAIN in an infinite loop. We deliberately keep

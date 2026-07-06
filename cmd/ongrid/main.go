@@ -143,6 +143,7 @@ import (
 	managerbizreport "github.com/ongridio/ongrid/internal/manager/biz/report"
 	manageraudtdata "github.com/ongridio/ongrid/internal/manager/data/audit/store"
 	managerflowdata "github.com/ongridio/ongrid/internal/manager/data/flow/store"
+	managerinstalldata "github.com/ongridio/ongrid/internal/manager/data/installjob"
 	managerreportdata "github.com/ongridio/ongrid/internal/manager/data/report/store"
 	managerserveraiops "github.com/ongridio/ongrid/internal/manager/server/aiops"
 	managerserveralert "github.com/ongridio/ongrid/internal/manager/server/alert"
@@ -268,6 +269,7 @@ func main() {
 		manageraudtdata.Migrate,
 		managerreportdata.Migrate,
 		managerflowdata.Migrate,
+		managerinstalldata.Migrate,
 	); err != nil {
 		log.Error("run migrations", slog.Any("err", err))
 		os.Exit(1)
@@ -731,6 +733,12 @@ func main() {
 	deviceUC := managerbizdevice.NewUsecase(deviceRepo, edgeDeviceRepo, log)
 	edgeUC := managerbizedge.NewUsecase(edgeRepo, deviceRepo, edgeDeviceRepo, log)
 
+	// Reachability pinger — 定时对所有有 ssh_host 的设备跑 ICMP ping，写回
+	// devices.reachable / last_reachable_at。包在 deviceUC 下游、main 里
+	// 起 ticker。参数暂走默认值（2s timeout / 16 并发）；部署需调节时可
+	// 以加上 ONGRID_PING_TIMEOUT_SEC 等 env（后续按需接）。
+	reachPinger := managerbizdevice.NewPinger(log.With(slog.String("comp", "device-pinger")))
+
 	// Boot backfill: heal "stale online" edge rows. A manager crash or any
 	// pre-PR-(edge-status-fix) deployment could leave edge.status="online"
 	// even though last_seen_at is hours old (frontier closed the session
@@ -825,15 +833,16 @@ func main() {
 	// with a broken script call).
 	installEdgeAddr := os.Getenv("ONGRID_INSTALL_EDGE_ADDR")
 	installHTTPAddr := os.Getenv("ONGRID_INSTALL_HTTP_ADDR")
-	if installEdgeAddr == "" || installHTTPAddr == "" {
-		if cfg.PublicURL != "" {
-			if installEdgeAddr == "" {
-				installEdgeAddr = cfg.PublicURL
-			}
-			if installHTTPAddr == "" {
-				installHTTPAddr = cfg.PublicURL
-			}
-		}
+	// install.sh 期望 host:port 形式（如 --server-http-addr=<host>:8443，
+	// --server-edge-addr=<host>:40012），不要 scheme。cfg.PublicURL 是
+	// "https://host(:port)" 的 canonical URL，必须去 scheme 才能拼到
+	// runCurlPipe 里——否则设备拿到 https://https://host 这种畸形 URL
+	// 就 curl 解析 host="https" port=host:443，TCP RST。
+	if installEdgeAddr == "" && cfg.PublicURL != "" {
+		installEdgeAddr = stripURIScheme(cfg.PublicURL)
+	}
+	if installHTTPAddr == "" && cfg.PublicURL != "" {
+		installHTTPAddr = stripURIScheme(cfg.PublicURL)
 	}
 	// TODO(D1-Wire+config): add explicit `ServerEdgeAddr` / `ServerHTTPAddr`
 	// fields to internal/pkg/config.Config once the install-worker
@@ -930,19 +939,26 @@ func main() {
 	devicesshShellSvc := managerbizdevicessh.NewShellService(sshRouter, deviceRepo, log)
 
 	// --- Install job worker + runner ---
-	installScript := readInstallScript(log)
-	issuer := managerbizedge.NewInstallEdgeIssuer(edgeUC, log)
+	// install.sh 不再由 manager 装进去——设备自己 SSH 上后从 cloud 的
+	// https://<server-http-addr>/install.sh 拉，跟手工安装同语义。binary
+	// 与脚本双源真相的 ENOENT 问题就此消失（见 .record/）。
+	// edgeDeviceRepo 作为 InstallEdgeIssuer 的第二个参数传入：worker
+	// 在 edge 创建后立刻 edge_devices.Link(edge, device, type=host)，
+	// 让 installjob.waitEdgeOnline(device_id) 能查到这个新 edge。
+	issuer := managerbizedge.NewInstallEdgeIssuer(edgeUC, edgeDeviceRepo, log)
 	softDeleter := managerbizedge.NewSSHBulkSoftDelete(db, log)
 	presence := managerbizedge.NewDBEdgePresence(db, log)
 	installer := managerbizinstalljob.NewSSHInstaller(
 		sshRouter,
-		installScript,
 		installEdgeAddr,
 		installHTTPAddr,
 		log,
 	)
 
 	installjobRepo := managerbizinstalljob.NewRepo(db)
+	// 编译期断言：data/installjob.GormRepo 必须满足 biz/installjob.Repo
+	// 全集方法；随 Repo 接口演进多实现修改时即报错。
+	var _ managerbizinstalljob.Repo = (*managerinstalldata.GormRepo)(nil)
 	worker := managerbizinstalljob.NewWorker(
 		installjobRepo,
 		issuer,
@@ -962,7 +978,7 @@ func main() {
 
 	devicesshShellHandler := managerserverdevicessh.NewShellHandler(devicesshShellAdapter{svc: devicesshShellSvc}, log.With(slog.String("comp", "devicessh")))
 	devicesshFSHandler := managerserverdevicessh.NewFSHandler(devicesshFSAdapter{svc: sftpSvc, repo: deviceRepo}, log.With(slog.String("comp", "devicessh-fs")))
-	installJobHandler := managerserverinstalljob.NewHandler(installjobUsecaseAdapter{repo: installjobRepo}, log.With(slog.String("comp", "installjob")))
+	installJobHandler := managerserverinstalljob.NewHandler(installjobUsecaseAdapter{repo: installjobRepo, deviceRepo: deviceRepo, runner: installRunner}, log.With(slog.String("comp", "installjob")))
 
 	// topology layer: nodes / relations / relation types. PR-1
 	// stands up CRUD + 6 built-in relation type seeds; later PRs hook
@@ -2550,6 +2566,29 @@ func main() {
 		}
 	})
 
+	// Reachability pinger: 5 分钟一次对所有有 ssh_host 的设备跑一次
+	// ICMP ping，把结果写回 devices.reachable / last_reachable_at。UI
+	// (Hosts 页面) 按 reachable 渲染状态列——和 edge agent 推送的
+	// Online 解耦，operator 看到的是“网络层是否通”。失败/超时只打
+	// warn，不阻塞 egCtx。
+	eg.Go(func() error {
+		if _, err := deviceUC.PingReachable(egCtx, reachPinger); err != nil {
+			log.Warn("device reachability ping (boot) failed", slog.Any("err", err))
+		}
+		t := time.NewTicker(5 * time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-egCtx.Done():
+				return nil
+			case <-t.C:
+				if _, err := deviceUC.PingReachable(egCtx, reachPinger); err != nil {
+					log.Warn("device reachability ping failed", slog.Any("err", err))
+				}
+			}
+		}
+	})
+
 	// Pipeline evaluator: runs metric_raw / metric_anomaly /
 	// metric_forecast / metric_burn_rate rules on a ticker. Also refreshes
 	// the edge_last_seen_seconds_ago gauge (replacement
@@ -2773,6 +2812,19 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// stripURIScheme 去掉 URL 的 scheme 前缀，返回 host[:port][/path]。
+// 给 install.sh / SSHInstaller 喂的地址用——这两个都不要 scheme。
+// 解析失败时退到裸字符串前缀剥离。
+func stripURIScheme(s string) string {
+	if u, err := neturl.Parse(s); err == nil && u.Host != "" {
+		return u.Host
+	}
+	if i := strings.Index(s, "://"); i >= 0 {
+		return s[i+3:]
+	}
+	return s
 }
 
 func knownLLMProviderIDs() []string {
@@ -3862,8 +3914,15 @@ func devicesshEntryFromBiz(name string, size int64, mode uint32, isDir bool, mti
 // doesn't expose directly. The adapter maps Status → Progress and
 // leaves the message / last_error columns empty until A6 ships a richer
 // error-event stream.
+//
+// Create also pulls the target device's SSH credentials at call time
+// (per plan §凭据策略变更 — request body is ignored) and Enqueues the
+// freshly persisted row on the runner. deviceRepo + runner are wired
+// in main.go's install-job block above.
 type installjobUsecaseAdapter struct {
-	repo managerbizinstalljob.Repo
+	repo       managerbizinstalljob.Repo
+	deviceRepo managerbizdevice.Repo
+	runner     *managerbizinstalljob.Runner
 }
 
 func (a installjobUsecaseAdapter) Get(ctx context.Context, id uint64) (*managerserverinstalljob.Job, error) {
@@ -3888,6 +3947,110 @@ func (a installjobUsecaseAdapter) ListByDevice(ctx context.Context, deviceID uin
 
 func (a installjobUsecaseAdapter) Cancel(ctx context.Context, id uint64) error {
 	return a.repo.UpdateStatus(ctx, id, managerbizinstalljob.StatusCancelled, nil)
+}
+
+// Create implements managerserverinstalljob.Usecase.Create.
+//
+// Flow:
+//  1. Resolve the device row via deviceRepo.Get — returns ErrNotFound
+//     for missing or soft-deleted rows (HTTP handler maps to 404).
+//  2. Validate the device carries the minimum SSH triple (host + user
+//     + (password|key)). Wraps errs.ErrInvalid so HTTPStatus → 400;
+//     a future PR may add a 428 branch in errs.HTTPStatus.
+//  3. Build an InstallJob with Status=queued, host/port/user filled from
+//     the row, and a credentials snapshot (the worker calls
+//     ClearCredentialSnap on terminal transition so plaintext secrets
+//     don't linger beyond the install window). taskName（用户在一键安装
+//     SPA 填的“任务名”）被嵌进 OptionsJSON，worker 之后会用
+//     parseTaskNameFromOptions 把它还原出来传给 installer / issuer。
+//  4. repo.Create persists the row; runner.Enqueue hands it to the
+//     worker pool. If the bounded queue is full Enqueue logs WARN and
+//     drops — the SPA can still GET the row and see status=queued until
+//     the runner drains; surfacing 503 here would mask a real submit
+//     for an operator inspecting the row.
+//
+// The request body is intentionally not consumed for credentials: per
+// plan §凭据策略变更 the SPA's InstallEdgeModal captures ssh_pass /
+// ssh_key_pem as "optional override" but the v1 wiring always reads
+// from the device row. Future PRs may honour the override once the
+// explicit-mode UX lands.
+//
+// taskName（必填）来自 HTTP handler 透传：trim 由 handler 层完成，这里
+// 只负责序列化为合法 JSON。空 taskName 防御性地写到 "{}" —— HTTP 层
+// 必填校验是双保险，但 server side 仍不能依赖单一来源。
+func (a installjobUsecaseAdapter) Create(ctx context.Context, deviceID uint64, taskName, command string) (*managerserverinstalljob.Job, error) {
+	d, err := a.deviceRepo.Get(ctx, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	if d.SSHHost == "" {
+		return nil, fmt.Errorf("installjob: create: %w: ssh_host empty on device %d", errs.ErrInvalid, deviceID)
+	}
+	if d.SSHUser == "" {
+		return nil, fmt.Errorf("installjob: create: %w: ssh_user empty on device %d", errs.ErrInvalid, deviceID)
+	}
+	if d.SSHPassword == "" && d.SSHKey == "" {
+		return nil, fmt.Errorf("installjob: create: %w: ssh_password or ssh_key required on device %d", errs.ErrInvalid, deviceID)
+	}
+	port := d.SSHPort
+	if port == 0 {
+		port = 22
+	}
+	// AuthKind defaults to "password" on the device model when unset; we
+	// carry it through to the job row only if it's a recognised value
+	// so the audit / UI layers don't display a stray empty token.
+	authKind := d.SSHAuthKind
+	if authKind != managerbizinstalljob.AuthKindPassword && authKind != managerbizinstalljob.AuthKindKey {
+		authKind = managerbizinstalljob.AuthKindPassword
+	}
+	// taskName 嵌进 OptionsJSON：最小集 schema {"task_name": "..."}。
+	// install_jobs.options_json 是 MySQL JSON 列，写入空字符串会触发
+	// 3140 Invalid JSON text —— 这里统一编码为合法 JSON object 字符串。
+	// 空 taskName 仍写 "{}"，worker 端 parseTaskNameFromOptions 把空
+	// 当 no-op 处理。
+	optionsJSON, err := encodeInstallJobOptions(taskName, command)
+	if err != nil {
+		return nil, fmt.Errorf("installjob: create: encode options_json: %w", err)
+	}
+	job := &managerbizinstalljob.InstallJob{
+		DeviceID:     deviceID,
+		Status:       managerbizinstalljob.StatusQueued,
+		AuthKind:     authKind,
+		PasswordSnap: d.SSHPassword,
+		KeySnap:      d.SSHKey,
+		Host:         d.SSHHost,
+		Port:         port,
+		User:         d.SSHUser,
+		// options_json 列是 MySQL JSON 类型，不能接受空字符串（会报
+		// 3140 Invalid JSON text）。当前没有真正接入的 options 字段，
+		// 显式赋 "{}" 作为合法 JSON 占位；后续若需要承载真实 options，
+		// 改成 *string / sql.NullString 以支持 NULL 语义更稳妥。
+		OptionsJSON:  optionsJSON,
+		LogOutput:    "",
+		CreatedAt:    time.Now().UTC(),
+		UpdatedAt:    time.Now().UTC(),
+	}
+	created, err := a.repo.Create(ctx, job)
+	if err != nil {
+		return nil, err
+	}
+	a.runner.Enqueue(created.ID)
+	return bizInstallJobToServerJob(created), nil
+}
+
+// encodeInstallJobOptions 序列化 install_jobs.options_json 的当前 schema。
+// 当前字段: task_name + command。command 由前端传入,是前端用 buildInstallCommand
+// 拼好的完整 curl 命令;后端不再自己拼装,只透传给 SSHInstaller 执行。
+func encodeInstallJobOptions(taskName, command string) (string, error) {
+	payload := struct {
+		TaskName string `json:"task_name"`
+		Command  string `json:"command"`
+	}{TaskName: strings.TrimSpace(taskName), Command: strings.TrimSpace(command)}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }
 
 // bizInstallJobToServerJob maps one biz-layer InstallJob row onto the
@@ -3929,28 +4092,14 @@ func bizInstallJobToServerJob(j *managerbizinstalljob.InstallJob) *managerserver
 	}
 }
 
-// readInstallScript loads deploy/install/edge/install.sh from disk for
-// the SSHInstaller. v1 always reads from disk; a future phase may embed
-// the script via //go:embed once the install job feature graduates
-// from "wire it up" to "operator-facing knob" and the script stops
-// changing between commits.
-func readInstallScript(log *slog.Logger) []byte {
-	const rel = "deploy/install/edge/install.sh"
-	data, err := os.ReadFile(rel)
-	if err != nil {
-		if log != nil {
-			log.Warn("installjob: install script not found at " + rel + " — installer will run with empty script and fail at the remote end")
-		}
-		return nil
-	}
-	if log != nil {
-		log.Info("installjob: loaded install script",
-			slog.String("path", rel),
-			slog.Int("bytes", len(data)),
-		)
-	}
-	return data
-}
+// readInstallScript 旧版的磁盘加载函数已被删除。设备上的安装脚本走
+// SSHInstaller.runCurlPipe：设备 SSH 登录后从 cloud 的
+// https://<server-http-addr>/install.sh 本地拉取并 pipe 给 bash，
+// 与手工安装同语义。binary 不再装 install.sh，免除 Dockerfile 多阶段
+// COPY 与 main.go embed 双源真相漂移的隐患（见
+// .record/2026-07-05-fix-installjob-data-layer.md /
+// .record/2026-07-05-fix-installjob-options-json-3140.md 描述的
+// readInstallScript ENOENT 坑）。
 
 type webshellStreamerAdapter struct {
 	c *managersvcfb.Client

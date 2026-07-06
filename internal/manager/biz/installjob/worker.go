@@ -2,6 +2,8 @@ package installjob
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -9,13 +11,17 @@ import (
 
 // EdgeIssuer is the worker-side handle to the edge credential layer.
 //
-// The worker mints a fresh access_key / secret_key BEFORE running
-// the install script — install.sh is invoked with these credentials
-// baked in, so the freshly-installed agent can register with the
-// manager on first boot. Re-issuing on every install rotates any
-// stale credentials left over from a previous (failed) attempt.
+// 设计语义（从 2026-07-06 重构）：前端创建 edge + 拼 cmd（cmd 里嵌
+// 入 edge.access_key/secret_key），后端 worker 拿到 cmd 后只需把
+// 前端创建的 edge 关联到 job.DeviceID。不再 worker 调 CreateEdge
+// —— 那会产生第 2 个 edge（凭证浪费 + 关联错乱）。
+//
+// BindEdgeFromAccessKey 从 cmd 拿到的 access_key 反查 edge.ID，写
+// SetDeviceID + edge_devices Link + install_jobs.edge_id，让 agent
+// register 时 HandleRegister 能查到正确的 device 关联，waitEdgeOnline
+// 也能查到。
 type EdgeIssuer interface {
-	CreateEdgeForDevice(ctx context.Context, deviceID uint64) (accessKey, secretKey string, err error)
+	BindEdgeFromAccessKey(ctx context.Context, deviceID uint64, accessKey, taskName string) error
 }
 
 // DeviceSSHSoftDelete is the worker-side handle to the SSH probe
@@ -45,24 +51,32 @@ type EdgePresence interface {
 //
 //   - Install opens an SSH session using Job.Host/Port/User and the
 //     password/key snapshot on the job row.
-//   - Uploads install.sh to /tmp and runs it with the four canonical
-//     arguments (access-key / secret-key / server-edge-addr /
-//     server-http-addr).
+//   - Runs the command string passed from the frontend (via Worker).
+//     The frontend has already built the canonical curl | bash command
+//     using buildInstallCommand(), so the installer does NOT build
+//     the command itself — it just executes it verbatim.
 //   - Streams stdout/stderr through onLog as they arrive.
 //   - Returns nil on a clean exit; non-nil on any SSH / script / exit
 //     failure. The worker uses a non-nil return as the trigger to
 //     flip Status=Failed (exitCode=-1) and clear the credential snap.
+//
+// cmd 是前端拼好的完整 curl 命令。零兜底:cmd 为空时 installer
+// 直接返回错误,不尝试自己拼装。
 //
 // accessKey / secretKey are the freshly-minted edge credentials from
 // the EdgeIssuer step — they get baked into the install.sh command
 // line so the agent knows how to authenticate with the manager on
 // its first register handshake.
 //
+// taskName 是用户填的“任务名”；installer 负责把它以 --task-name=xxx
+// 参数形式传给设备上的 install.sh。非空时才传（避免对老 install.sh
+// 引入未识别参数）。
+//
 // The callback is invoked synchronously from inside the installer;
 // do NOT block on heavy work in the callback — keep it to "write to
 // DB and return".
 type Installer interface {
-	Install(ctx context.Context, job *InstallJob, accessKey, secretKey string, onLog func(chunk string)) error
+	Install(ctx context.Context, job *InstallJob, accessKey, secretKey, taskName, cmd string, onLog func(chunk string)) error
 }
 
 // WorkerConfig tunes the worker's external IO contract.
@@ -82,7 +96,14 @@ type WorkerConfig struct {
 // Defaults applied when the matching field is zero.
 const (
 	defaultWorkerTimeout    = 10 * time.Minute
-	defaultWaitOnlineWindow = 20 * time.Second
+	// SSH 拨号 + install.sh 下载（~30MB ongrid-edge + 12 个 exporter）
+	// + chcon SELinux relabel + systemd start 的总和在 aarch64
+	// openEuler 24.03 上实测 ~22-25s，frontier handshake 再加 1-3s。
+	// 20s 默认值在双 .repo.SetDeviceID + agent register 链路里偶尔
+	// 触发 false-negative —— 22s 装完、26s 才 online，30s 才能等到。
+	// 60s 给首次装 + 远程下载慢速网络留足余量（fetch_configs 每分钟
+	// 拉一次，只要边缘启动就会 online）。
+	defaultWaitOnlineWindow = 60 * time.Second
 )
 
 // Worker drives one InstallJob through to a terminal state. The
@@ -169,6 +190,19 @@ func (w *Worker) Execute(ctx context.Context, jobID uint64) {
 	}
 	_ = w.repo.AddEvent(execCtx, jobID, EventKindState, string(StatusRunning))
 
+	// 从 install_jobs.options_json 解析 task_name（HTTP 层写入；上游
+	// installjobUsecaseAdapter.Create 把 task_name 嵌进 JSON object）。
+	// 解析失败 / 缺字段 → 空串（视为“未提供 task_name”），下游 installer
+	// 与 issuer 拿到空串时都做 no-op 处理。
+	taskName := parseTaskNameFromOptions(job.OptionsJSON)
+	cmd := parseCommandFromOptions(job.OptionsJSON)
+	if taskName != "" {
+		logCtx = logCtx.With(slog.String("task_name", taskName))
+	}
+	if cmd != "" {
+		logCtx = logCtx.With(slog.String("cmd", cmd))
+	}
+
 	// 2) Mint fresh edge credentials BEFORE the installer runs.
 	// install.sh is invoked with --access-key=... --secret-key=...
 	// baked into the command line; the freshly-installed agent uses
@@ -181,13 +215,48 @@ func (w *Worker) Execute(ctx context.Context, jobID uint64) {
 		_ = w.repo.ClearCredentialSnap(execCtx, jobID)
 		return
 	}
-	accessKey, secretKey, err := w.issuer.CreateEdgeForDevice(execCtx, job.DeviceID)
-	if err != nil {
-		logCtx.Warn("installjob: CreateEdgeForDevice failed", slog.Any("err", err))
-		_ = w.repo.AddEvent(execCtx, jobID, EventKindError, "issue edge cred: "+err.Error())
+	if cmd == "" {
+		// 真正的 install 命令没了，不能继续 — 否则会让 worker 走到
+		// ssh run 一个空字符串（sess.Run("") 立即退出且无诊断信息），
+		// SPA 看到 failed 但 log_output 是空的，无法定位。
+		logCtx.Warn("installjob: command is empty (前端必须通过 POST /install-edge 的 command 字段塞入完整 curl)")
+		_ = w.repo.AddEvent(execCtx, jobID, EventKindError, "empty install command")
 		_ = w.repo.UpdateStatus(execCtx, jobID, StatusFailed, ptr(-1))
 		_ = w.repo.ClearCredentialSnap(execCtx, jobID)
 		return
+	}
+
+	// 解析 cmd 里的 --access-key=... —— 前端 buildInstallCommand()
+	// 拼出的 cmd 必然带 --access-key=<frontend-created-edge.access_key_id>。
+	// worker 拿到 access_key 后反查 edge.ID，把 install_jobs 关联到前
+	// 端创建的 edge；waitEdgeOnline(device_id) 之后才能查到。
+	//
+	// 不再调 issuer.CreateEdgeForDevice —— 那会创建第 2 个 edge（前端
+	// 创一个、worker 创一个），浪费凭证，且 agent 实际 register 的是
+	// 前端 cmd 嵌入的那个 edge（worker 创的 edge 永远收不到 register，
+	// 直接被 worker 软删除），关联错乱、waitEdgeOnline 永远等不到。
+	accessKey, err := parseAccessKeyFromCmd(cmd)
+	if err != nil {
+		logCtx.Warn("installjob: parse --access-key from cmd failed", slog.Any("err", err))
+		_ = w.repo.AddEvent(execCtx, jobID, EventKindError, "parse access-key: "+err.Error())
+		_ = w.repo.UpdateStatus(execCtx, jobID, StatusFailed, ptr(-1))
+		_ = w.repo.ClearCredentialSnap(execCtx, jobID)
+		return
+	}
+	if w.issuer == nil {
+		logCtx.Warn("installjob: no EdgeIssuer wired; cannot bind edge to device")
+		_ = w.repo.UpdateStatus(execCtx, jobID, StatusFailed, ptr(-1))
+		_ = w.repo.ClearCredentialSnap(execCtx, jobID)
+		return
+	}
+	// BindEdgeFromAccessKey 拿到前端创建的 edge.ID，按 job.DeviceID
+	// 关联起来（SetDeviceID + edge_devices Link + install_jobs.edge_id）。
+	// 失败时只记 warn 不中止：agent register 时 HandleRegister 还会
+	// 兜底一次（按 edge.DeviceID 优先 Get device），所以关联丢失不会
+	// 让 install 失败，只是 waitEdgeOnline 可能等到其他 device 下面。
+	if bindErr := w.issuer.BindEdgeFromAccessKey(execCtx, job.DeviceID, accessKey, taskName); bindErr != nil {
+		logCtx.Warn("installjob: bind edge to device failed", slog.Any("err", bindErr))
+		_ = w.repo.AddEvent(execCtx, jobID, EventKindError, "bind edge: "+bindErr.Error())
 	}
 
 	// 3) direct SSH + write install.sh + run it + stream logs.
@@ -197,7 +266,7 @@ func (w *Worker) Execute(ctx context.Context, jobID uint64) {
 		_ = w.repo.ClearCredentialSnap(execCtx, jobID)
 		return
 	}
-	installErr := w.installer.Install(execCtx, job, accessKey, secretKey, func(chunk string) {
+	installErr := w.installer.Install(execCtx, job, "", "", taskName, cmd, func(chunk string) {
 		// Redact the secret key before persisting — the install
 		// script echoes it back at registration time and we don't
 		// want it living in log_output forever. redactSecretKey is
@@ -269,6 +338,83 @@ func redactSecretKey(chunk, secretKey string) string {
 		return chunk
 	}
 	return strings.ReplaceAll(chunk, secretKey, "****")
+}
+
+// parseTaskNameFromOptions 从 install_jobs.options_json 提取 task_name
+// 字段。options_json 当前 schema（最小集）：
+//
+//	{"task_name": "用户填的任务名"}
+//
+// 历史行（{} / 缺字段 / JSON 损坏）一律返回空串 —— 调用方会把空串当
+// no-op 处理（不再写 edge.task_name、也不再传 --task-name 给
+// install.sh），保证不影响老 install_jobs 行的回放 / 升级。
+//
+// 该函数只读自己 schema 内的字段（不反射全 JSON），对后续追加其它
+// options 字段是 forward-compatible 的。
+func parseTaskNameFromOptions(optionsJSON string) string {
+	if strings.TrimSpace(optionsJSON) == "" {
+		return ""
+	}
+	var opts struct {
+		TaskName string `json:"task_name"`
+	}
+	if err := json.Unmarshal([]byte(optionsJSON), &opts); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(opts.TaskName)
+}
+
+// parseCommandFromOptions 从 install_jobs.options_json 提取 command 字段。
+// command 是前端 buildInstallCommand() 拼好的完整 curl 命令,installer 直接执行,
+// 不再自己拼装。command 为空时 installer 直接报错(零兜底)。
+func parseCommandFromOptions(optionsJSON string) string {
+	if strings.TrimSpace(optionsJSON) == "" {
+		return ""
+	}
+	var opts struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal([]byte(optionsJSON), &opts); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(opts.Command)
+}
+
+// parseAccessKeyFromCmd 从前端拼装的完整 curl 命令中提取
+// --access-key=<ak> 的 ak 值。worker 拿到后反查 edge.ID。
+//
+// 包含边界：
+//   - 用字符串扫描而不是 regex，零额外依赖
+//   - 只匹配 `--access-key=VALUE`（等号紧贴），不接受空格分隔（curl/bash
+//     的 CLI 习惯是 `--access-key=value`）；frontend buildInstallCommand
+//     正是这种格式
+//   - VALUE 取到下一个非转义空白；中间转义复杂场景（vaule 含空格）暂未
+//     出现，预留为后续增强
+//   - 重复出现多个 `--access-key=` 时取第一个（防御性，正常仅一个）
+//
+// 错误返回：cmd 里根本找不到 `--access-key=` 前缀，或 VALUE 为空。
+func parseAccessKeyFromCmd(cmd string) (string, error) {
+	const marker = "--access-key="
+	i := strings.Index(cmd, marker)
+	if i < 0 {
+		return "", fmt.Errorf("installjob: cmd missing --access-key= (前端 buildInstallCommand 一定是带上的)")
+	}
+	rest := cmd[i+len(marker):]
+	if rest == "" {
+		return "", fmt.Errorf("installjob: cmd has --access-key= but empty value")
+	}
+	// 截到下一个未转义的空白为止。
+	var end int
+	for end = 0; end < len(rest); end++ {
+		if rest[end] == ' ' || rest[end] == '\t' || rest[end] == '\n' {
+			break
+		}
+	}
+	ak := rest[:end]
+	if ak == "" {
+		return "", fmt.Errorf("installjob: cmd has --access-key= but empty value")
+	}
+	return ak, nil
 }
 
 // ptr is a tiny generic helper so the worker can stash literal

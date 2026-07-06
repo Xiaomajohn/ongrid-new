@@ -154,10 +154,16 @@ func main() {
 	if stageDir == "" {
 		stageDir = "/var/lib/ongrid-edge/.upgrade"
 	}
+	// 监控任务名：install.sh --task-name=NAME 写到 env file，agent 启动时
+	// 读取并在 register_edge 时塞进 HostInfo.TaskName 上报给 manager。
+	// 空字符串由 omitempty 略过，对老 edge / 未指定 task 的手工 install
+	// 都不影响。
+	taskName := os.Getenv("ONGRID_EDGE_TASK_NAME")
 	agent := edgebiz.NewAgent(client, collector, edgebiz.Config{
 		MetricsInterval: cfg.Edge.CollectorInterval,
 		AgentVersion:    version,
 		UpgradeStageDir: stageDir,
+		TaskName:        taskName,
 	}, log)
 
 	// Local /metrics listener for debugging.

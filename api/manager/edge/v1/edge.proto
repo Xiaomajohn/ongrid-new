@@ -45,6 +45,9 @@ message HostInfo {
     string kernel_version = 4 [json_name = "kernel_version"];
     uint32 cpu_count = 5 [json_name = "cpu_count"];
     uint64 mem_total_bytes = 6 [json_name = "mem_total_bytes"];
+    // task_name 由 installjob 写入，作为任务标识供 Edges 页面按 task_name 筛选。
+    // 老 agent / 未走一键安装的 edge 为空字符串。
+    string task_name = 7 [json_name = "task_name"];
 }
 
 // Edge 云端记录的 edge 设备。
@@ -79,8 +82,12 @@ message ListEdgesRequest {
     string status_filter = 1 [json_name = "status_filter"];
     int32 page = 2 [json_name = "page"];
     int32 page_size = 3 [json_name = "page_size"];
-    // 可选按 name 模糊搜索。
+    // name 按 edge.name 精准匹配（空字符串 = 不过滤）。
     string name = 4 [json_name = "name"];
+    // hostname 按 device.hostname 精准匹配（空字符串 = 不过滤）。
+    string hostname = 5 [json_name = "hostname"];
+    // ip 按 device.ip_address 精准匹配（空字符串 = 不过滤）。
+    string ip = 6 [json_name = "ip"];
 }
 
 message ListEdgesResponse {

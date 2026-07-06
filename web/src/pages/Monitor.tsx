@@ -19,6 +19,7 @@ import { UserPanelGrid } from '@/components/monitor/UserPanelGrid';
 import { ProcessTopPanel } from '@/components/monitor/ProcessTopPanel';
 import { useObservability } from '@/store/observability';
 import { listEdges, type Edge, type EdgeRole } from '@/api/edges';
+import { listDevices, type Device } from '@/api/devices';
 import { onDevicesChanged } from '@/lib/events';
 import { injectDeviceIDFilter } from '@/lib/promql';
 import { RoleSelect, type RoleFilterValue } from '@/components/ui';
@@ -338,6 +339,28 @@ export default function MonitorPage() {
     return () => { cancelled = true; unsubscribe(); };
   }, []);
 
+  // mount 时拉一次全量 devices，构造 deviceId → Device 的 map。
+  // 设备下拉 option 文本和进程面板标题用这里回填 device.name / hostname /
+  // ip_address 替代 e.name（探针自动生成的 auto-install-{id}-{unix}）。
+  // 不走 Edges.tsx 的 module-level 缓存：本轮最小改动，不抽 lib。
+  const [deviceMap, setDeviceMap] = useState<Map<number, Device>>(new Map());
+  useEffect(() => {
+    let cancelled = false;
+    listDevices({ limit: 1000 })
+      .then((r) => {
+        if (cancelled) return;
+        const m = new Map<number, Device>();
+        for (const d of r.items ?? []) m.set(d.id, d);
+        setDeviceMap(m);
+      })
+      .catch(() => {
+        /* best-effort：失败时 option 文本回退到 e.name，行为与现状一致 */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const filteredDeviceIDs = useMemo<number[] | null>(() => {
     // Device-pin wins: if the user picked a single device, narrow to it
     // regardless of role. Empty string === no device pin.
@@ -553,12 +576,17 @@ export default function MonitorPage() {
               { value: '', label: tr('全部设备', 'All devices') },
               ...edges
                 .filter((e) => typeof e.device_id === 'number')
-                .map((e) => ({
-                  value: String(e.device_id),
-                  // Show display name + device_id so collisions on the
-                  // same hostname stay distinguishable.
-                  label: `${e.name || tr('(未命名)', '(unnamed)')} (#${e.device_id})`,
-                })),
+                .map((e) => {
+                  const d = deviceMap.get(Number(e.device_id));
+                  const name = d?.name || d?.hostname || d?.ip_address;
+                  return {
+                    value: String(e.device_id),
+                    // Show display name + device_id so collisions on the
+                    // same hostname stay distinguishable. deviceMap 还没
+                    // 就绪时回退到 e.name，行为与改动前一致。
+                    label: `${name || e.name || tr('(未命名)', '(unnamed)')} (#${e.device_id})`,
+                  };
+                }),
             ]}
             // Picking a device clears the role filter — they're
             // mutually exclusive in PromQL semantics here.
@@ -598,11 +626,16 @@ export default function MonitorPage() {
           const did = Number(deviceFilter);
           const e = edges.find((x) => x.device_id === did);
           if (!e) return null;
+          // 用 device 事实回填：deviceMap 命中走 device.name / hostname /
+          // ip_address，都没就回退 e.name / e.id。
+          const d = deviceMap.get(did);
+          const displayName =
+            d?.name || d?.hostname || d?.ip_address || e.name || `#${e.id}`;
           return (
             <ProcessTopPanel
               edgeID={e.id}
               deviceID={did}
-              edgeName={e.name || `#${e.id}`}
+              edgeName={displayName}
               tick={tick}
               fromMs={fromMs}
               toMs={toMs}

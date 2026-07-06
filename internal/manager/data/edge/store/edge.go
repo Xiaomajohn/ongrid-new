@@ -79,6 +79,12 @@ func (r *Repo) GetByName(ctx context.Context, name string) (*model.Edge, error) 
 // Post-split (May 2026): role filtering moved to the device repo —
 // callers that filter by role should query devices and resolve back to
 // edges through the edge_devices junction.
+//
+// Hostname / IP filters look up against the linked Device row (the
+// host where the agent runs). The JOIN is an INNER JOIN — edges with
+// no host device linked yet are filtered out by these predicates,
+// which matches operator intent: "show me the edge on hostname X" only
+// makes sense once the agent has registered.
 func (r *Repo) List(ctx context.Context, f biz.ListFilter) ([]*model.Edge, error) {
 	tx := r.db.WithContext(ctx).Model(&model.Edge{})
 	if f.DeviceID != nil {
@@ -88,8 +94,20 @@ func (r *Repo) List(ctx context.Context, f biz.ListFilter) ([]*model.Edge, error
 	if f.Status != "" {
 		tx = tx.Where("status = ?", f.Status)
 	}
-	if f.Name != "" {
-		tx = tx.Where("name LIKE ?", "%"+f.Name+"%")
+	if f.Name != nil {
+		// 精确匹配 edge.name（不再是 LIKE 模糊搜索）。nil = 不过滤。
+		tx = tx.Where("edges.name = ?", *f.Name)
+	}
+	if f.Hostname != nil || f.IP != nil {
+		// INNER JOIN devices：edge 未绑定 host device 的行会被这两个
+		// 谓词过滤掉，这与操作员的预期一致（没有 host 就不能按 host 过滤）。
+		tx = tx.Joins("JOIN devices d ON d.id = edges.device_id AND d.delete_marker = 0")
+		if f.Hostname != nil {
+			tx = tx.Where("d.hostname = ?", *f.Hostname)
+		}
+		if f.IP != nil {
+			tx = tx.Where("d.ip_address = ?", *f.IP)
+		}
 	}
 	if f.CreatedBy != nil {
 		tx = tx.Where("created_by = ?", *f.CreatedBy)
@@ -168,6 +186,27 @@ func (r *Repo) SetDeviceID(ctx context.Context, edgeID, deviceID uint64) error {
 // the column when a buggy build reports nothing.
 func (r *Repo) SetAgentVersion(ctx context.Context, id uint64, version string) error {
 	res := r.db.WithContext(ctx).Model(&model.Edge{}).Where("id = ?", id).Update("agent_version", version)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return errs.ErrNotFound
+	}
+	return nil
+}
+
+// UpdateTaskName 写入 edge.task_name 任务标识。
+//
+// 用原始 SQL 列名引用而非 model.Edge.TaskName 字段——避免在 PR 合并
+// 顺序上对 Agent1 同步落地的 struct 字段产生强耦合：当 Agent1 的
+// schema PR 尚未合入时，本方法在运行期会因 column not found 而失败
+// （不是编译期），便于在 wiring 检查时再补字段；已经合并的环境下，
+// gorm 的 raw Update 走的是 column 名，与 struct 字段是否声明无关。
+//
+// empty taskName 由 caller 侧过滤（见 biz/edge/repo.go UpdateTaskName
+// 注释）：这里直接照传，避免覆盖 SPA 上手工设置的非空值。
+func (r *Repo) UpdateTaskName(ctx context.Context, id uint64, taskName string) error {
+	res := r.db.WithContext(ctx).Model(&model.Edge{}).Where("id = ?", id).Update("task_name", taskName)
 	if res.Error != nil {
 		return res.Error
 	}

@@ -141,9 +141,11 @@ func (t *QueryEdgesTool) InvokableRun(ctx context.Context, argsJSON string, _ ..
 	}
 
 	// Legacy fallback path (edges usecase only).
+	// 注意：ListFilter.Name 已改为精确匹配（2026-07 后），所以这里不传
+	// Name 字段（in.NameContains 是 substring 语义），substring
+	// 过滤仍然在客户端做（见下面的 strings.Contains 过滤）。
 	all, err := t.edges.List(callCtx, edgebiz.ListFilter{
 		Status: in.Status,
-		Name:   in.NameContains,
 		Limit:  in.Limit,
 	})
 	if err != nil {

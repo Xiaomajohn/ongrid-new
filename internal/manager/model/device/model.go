@@ -86,6 +86,14 @@ type Device struct {
 	Online     bool       `gorm:"not null;default:false"`
 	LastSeenAt *time.Time `gorm:"column:last_seen_at"`
 
+	// Reachable / LastReachableAt 记录后端 ping 服务的可达性结果。
+	// 与 Edge 推送的 Online 解耦：Online 表示"该 host 上有 edge agent 在
+	// 跑"，Reachable 表示"网络层 ping 该 host 通了"。UI 默认按 Reachable
+	// 渲染状态（operator 视角的"机器在线"）。定时 ping 任务每 5 分钟扫一
+	// 遍所有有 ssh_host 的设备，把结果写回这里。
+	Reachable        bool       `gorm:"not null;default:false;column:reachable;index:idx_devices_reachable"`
+	LastReachableAt  *time.Time `gorm:"column:last_reachable_at"`
+
 	// SSH credentials (plaintext, internal-only system). The web SSH +
 	// SFTP + one-click install flows read these directly (no secret-box
 	// envelope) — ongrid is an internal ops platform and the trade-off

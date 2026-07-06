@@ -15,6 +15,7 @@ import {
 import { queryLogsRange, listLogLabels, type LokiStream } from '@/api/logs';
 import { ApiError } from '@/api/client';
 import { listEdges, type Edge, type EdgeRole } from '@/api/edges';
+import { listDevices, type Device } from '@/api/devices';
 import { onDevicesChanged } from '@/lib/events';
 import { Link } from 'react-router-dom';
 import { RoleSelect } from '@/components/ui';
@@ -424,6 +425,28 @@ export default function LogsPage() {
     };
   }, []);
 
+  // mount 时拉一次全量 devices，构造 deviceId → Device 的 map。
+  // 设备下拉 option 文本和 onChange 同步 deviceInput 时用这里回填
+  // device.name / hostname / ip_address，替代 d.name（探针名）。
+  // 不走 Edges.tsx 的 module-level 缓存：本轮最小改动，不抽 lib。
+  const [deviceMap, setDeviceMap] = useState<Map<number, Device>>(new Map());
+  useEffect(() => {
+    let cancelled = false;
+    listDevices({ limit: 1000 })
+      .then((r) => {
+        if (cancelled) return;
+        const m = new Map<number, Device>();
+        for (const d of r.items ?? []) m.set(d.id, d);
+        setDeviceMap(m);
+      })
+      .catch(() => {
+        /* best-effort：失败时回退到 d.name，行为与现状一致 */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Probe Loki for any indexed labels. If Loki has zero label values
   // we know the platform has never received a log push — distinguishes
   // the "fresh install, install an edge" empty state from the "your
@@ -617,18 +640,30 @@ export default function LogsPage() {
                   return;
                 }
                 const match = edges.find((d) => String(d.device_id) === v);
-                setDeviceInput(match ? `${match.name} (#${match.device_id})` : v);
+                if (!match) {
+                  setDeviceInput(v);
+                  return;
+                }
+                // deviceMap 命中走 device 事实，未就绪回退 match.name。
+                const dev = deviceMap.get(Number(match.device_id));
+                const display = dev?.name || dev?.hostname || dev?.ip_address || match.name;
+                setDeviceInput(`${display} (#${match.device_id})`);
               }}
               className={INPUT_BASE}
             >
               <option value="">{tr('全部设备', 'All devices')}</option>
               {edges
                 .filter((d) => d.device_id != null)
-                .map((d) => (
-                  <option key={d.id} value={String(d.device_id)}>
-                    {d.name} (#{d.device_id})
-                  </option>
-                ))}
+                .map((d) => {
+                  // deviceMap 命中走 device 事实，未就绪回退 d.name。
+                  const dev = deviceMap.get(Number(d.device_id));
+                  const name = dev?.name || dev?.hostname || dev?.ip_address || d.name;
+                  return (
+                    <option key={d.id} value={String(d.device_id)}>
+                      {name} (#{d.device_id})
+                    </option>
+                  );
+                })}
             </select>
           </label>
           {/* File / unit — native <select> for visual consistency with

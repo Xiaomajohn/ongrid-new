@@ -169,14 +169,14 @@ func (d *fakeDeviceRepo) UpdateRoles(_ context.Context, id uint64, roles uint8) 
 	return nil
 }
 
-func (d *fakeDeviceRepo) UpdateNameDescription(_ context.Context, id uint64, name, description string) error {
+func (d *fakeDeviceRepo) UpdateNameDescription(_ context.Context, id uint64, name, description, hostname string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	dev, ok := d.byID[id]
 	if !ok {
 		return errs.ErrNotFound
 	}
-	dev.Name, dev.Description = name, description
+	dev.Name, dev.Description, dev.Hostname = name, description, hostname
 	return nil
 }
 
@@ -437,6 +437,17 @@ func (r *fakeRepo) SetAgentVersion(_ context.Context, id uint64, v string) error
 		return errs.ErrNotFound
 	}
 	e.AgentVersion = v
+	return nil
+}
+
+func (r *fakeRepo) UpdateTaskName(_ context.Context, id uint64, t string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.byID[id]
+	if !ok || e.DeletedAt != nil {
+		return errs.ErrNotFound
+	}
+	e.TaskName = t
 	return nil
 }
 

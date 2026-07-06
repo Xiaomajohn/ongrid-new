@@ -24,37 +24,65 @@ trap 'log_error "install-edge failed at line $LINENO"' ERR
 
 SERVICE_USER=ongrid-edge
 SERVICE_GROUP=ongrid-edge
-BIN_DEST=/usr/local/bin/ongrid-edge
-PLUGIN_BIN_DIR=/usr/local/lib/ongrid-edge   # bundled plugin binaries (promtail, etc.)
-STATE_DIR=/var/lib/ongrid-edge               # agent state root (StateDirectory=)
+# --prefix=PATH collapses every ongrid-edge install path (binary, plugin
+# binaries, env file, state dir, log dir) under one root. Default
+# /mnt/data/toos-temp keeps everything together so the operator can wipe
+# the whole install by rm -rf /mnt/data/toos-temp/{bin,lib,etc,var}.
+PREFIX="${ONGRID_EDGE_PREFIX:-/mnt/data/toos-temp}"
+# Layout (matches the original /usr/local{,/lib}/..., /etc/...,
+# /var/lib/..., /var/log/... split, just under PREFIX):
+#   PREFIX/bin/                  ongrid-edge
+#   PREFIX/lib/ongrid-edge/      plugin binaries + apply-pending-upgrade.sh
+#   PREFIX/etc/ongrid-edge/      ongrid-edge.env
+#   PREFIX/var/lib/ongrid-edge/  state, plugin work, upgrade stage
+#   PREFIX/var/log/ongrid-edge/  logs
+BIN_DEST="${PREFIX}/bin/ongrid-edge"
+BIN_DIR="${PREFIX}/bin"
+PLUGIN_BIN_DIR="${PREFIX}/lib/ongrid-edge"   # bundled plugin binaries (promtail, etc.)
+STATE_DIR="${PREFIX}/var/lib/ongrid-edge"    # agent state root (ReadWritePaths=)
 PLUGIN_WORK_DIR="${STATE_DIR}/plugins"       # rendered plugin configs + subprocess logs
-CONFIG_DIR=/etc/ongrid-edge
+CONFIG_DIR="${PREFIX}/etc/ongrid-edge"
 ENV_FILE="${CONFIG_DIR}/ongrid-edge.env"
 UNIT_FILE=/etc/systemd/system/ongrid-edge.service
 UPGRADE_UNIT_FILE=/etc/systemd/system/ongrid-edge-upgrade.service
-LOG_DIR=/var/log/ongrid-edge
+LOG_DIR="${PREFIX}/var/log/ongrid-edge"
+APPLY_HOOK="${PLUGIN_BIN_DIR}/apply-pending-upgrade.sh"
 
 UNINSTALL=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --uninstall) UNINSTALL=1; shift ;;
+        --prefix=*)  PREFIX="${1#*=}"; shift ;;
         -h|--help)
             cat <<EOF
 Usage: sudo ./install-edge.sh [OPTIONS]
 
 Options:
   --uninstall   Stop/disable service and remove files.
+  --prefix=PATH Install root (default /mnt/data/toos-temp); collapses
+                bin/lib/etc/var under PATH.
   -h, --help    Show this help.
 
 Parameters (env vars or interactive prompt):
   ONGRID_CLOUD_ADDR   cloud tunnel endpoint, e.g. ongrid.example.com:40012
   EDGE_ACCESS_KEY     access key (from cloud CreateEdge API)
   EDGE_SECRET_KEY     secret key (from cloud CreateEdge API)
+  ONGRID_EDGE_PREFIX  same as --prefix=PATH; --prefix wins if both are set
 EOF
             exit 0 ;;
         *) log_error "unknown flag: $1"; exit 2 ;;
     esac
 done
+# Re-derive paths so --prefix applies after arg parsing.
+BIN_DEST="${PREFIX}/bin/ongrid-edge"
+BIN_DIR="${PREFIX}/bin"
+PLUGIN_BIN_DIR="${PREFIX}/lib/ongrid-edge"
+STATE_DIR="${PREFIX}/var/lib/ongrid-edge"
+PLUGIN_WORK_DIR="${STATE_DIR}/plugins"
+CONFIG_DIR="${PREFIX}/etc/ongrid-edge"
+ENV_FILE="${CONFIG_DIR}/ongrid-edge.env"
+LOG_DIR="${PREFIX}/var/log/ongrid-edge"
+APPLY_HOOK="${PLUGIN_BIN_DIR}/apply-pending-upgrade.sh"
 
 if [[ $EUID -ne 0 ]]; then
     log_warn "not running as root; re-executing via sudo"
@@ -70,8 +98,8 @@ if [[ $UNINSTALL -eq 1 ]]; then
     systemctl daemon-reload || true
     rm -f "$BIN_DEST"
     rm -rf "$CONFIG_DIR"
-    # keep logs in /var/log/ongrid-edge for post-mortem; operator can rm -rf if desired.
-    log_info "ongrid-edge uninstalled (logs under $LOG_DIR preserved)"
+    # keep logs in $LOG_DIR for post-mortem; operator can rm -rf if desired.
+    log_info "ongrid-edge uninstalled (logs under $LOG_DIR preserved; full wipe: rm -rf ${PREFIX})"
     exit 0
 fi
 
@@ -152,12 +180,13 @@ install -m 0755 -o root -g root "$BIN_SRC" "$BIN_DEST"
 mkdir -p "$PLUGIN_BIN_DIR"
 # Base state dir. The subdirs below (plugins/, .upgrade/) get created and
 # chowned individually, but the agent also needs to own the base
-# /var/lib/ongrid-edge itself so it can create further state dirs at runtime.
-# The unit's StateDirectory= only guarantees that on systemd >= 235; it is
-# silently ignored on older releases (CentOS/RHEL 7 = systemd 219), which
-# otherwise leaves the base root-owned and unwritable by the service user —
-# every collector plugin then fails `configure` and the edge ships no data.
-# Create it explicitly so this holds regardless of systemd version.
+# $STATE_DIR itself so it can create further state dirs at runtime. The
+# unit's StateDirectory= would only guarantee that on systemd >= 235, and
+# (more importantly) it always pins the path to /var/lib/<name> which
+# can't follow an arbitrary --prefix — so the unit doesn't use
+# StateDirectory= at all. ReadWritePaths=$STATE_DIR + this installer's
+# explicit pre-create + chown is what gives the sandboxed agent writability
+# on every systemd version.
 mkdir -p "$STATE_DIR"
 chown "$SERVICE_USER":"$SERVICE_GROUP" "$STATE_DIR" 2>/dev/null || true
 chmod 0755 "$STATE_DIR"
@@ -178,10 +207,24 @@ fi
 # below) before every agent start, and swaps the staged bundle into place.
 # Idempotent / safe with no pending file (exits 0). The oneshot unit
 # references this absolute path. See ADR-018 / ADR-024 / HLD-007.
+#
+# Render placeholders in the template to the operator-chosen --prefix paths
+# so the script knows where the agent stages its upgrade bundle + which
+# directories hold the swap targets (.previous files). The template ships
+# with __STAGE_DIR__ / __BIN_TARGET__ / __BIN_DIR__ / __LIB_DIR__ placeholders
+# (see apply-pending-upgrade.sh header for the contract).
 SWAP_SRC="${SCRIPT_DIR}/apply-pending-upgrade.sh"
 if [[ -f "$SWAP_SRC" ]]; then
-    log_info "installing apply-pending-upgrade.sh to ${PLUGIN_BIN_DIR}/apply-pending-upgrade.sh"
-    install -m 0755 -o root -g root "$SWAP_SRC" "${PLUGIN_BIN_DIR}/apply-pending-upgrade.sh"
+    log_info "installing apply-pending-upgrade.sh to ${APPLY_HOOK}"
+    esc() { printf '%s' "$1" | sed -e 's/[\\|&]/\\&/g'; }
+    sed \
+        -e "s|__STAGE_DIR__|$(esc "${STATE_DIR}/.upgrade")|g" \
+        -e "s|__BIN_TARGET__|$(esc "${BIN_DIR}/ongrid-edge")|g" \
+        -e "s|__BIN_DIR__|$(esc "${BIN_DIR}")|g" \
+        -e "s|__LIB_DIR__|$(esc "${PLUGIN_BIN_DIR}")|g" \
+        "$SWAP_SRC" > "${APPLY_HOOK}.tmp"
+    install -m 0755 -o root -g root "${APPLY_HOOK}.tmp" "${APPLY_HOOK}"
+    rm -f "${APPLY_HOOK}.tmp"
 else
     log_warn "apply-pending-upgrade.sh not bundled; remote upgrade (C11 Phase-B) won't work"
 fi
@@ -189,9 +232,9 @@ fi
 # Stage dir for remote upgrade — edge writes pending binary here, swap
 # script reads it. Pre-create so the agent doesn't need to chown at
 # runtime.
-mkdir -p /var/lib/ongrid-edge/.upgrade
-chown -R "$SERVICE_USER":"$SERVICE_GROUP" /var/lib/ongrid-edge/.upgrade
-chmod 0750 /var/lib/ongrid-edge/.upgrade
+mkdir -p "${STATE_DIR}/.upgrade"
+chown -R "$SERVICE_USER":"$SERVICE_GROUP" "${STATE_DIR}/.upgrade"
+chmod 0750 "${STATE_DIR}/.upgrade"
 
 # otelcol-contrib (traces plugin, ADR-013). Upstream doesn't ship darwin
 # builds in the contrib stream — traces plugin stays disabled on darwin
@@ -257,7 +300,6 @@ mkdir -p "$CONFIG_DIR"
 chmod 750 "$CONFIG_DIR"
 chown root:"$SERVICE_GROUP" "$CONFIG_DIR" 2>/dev/null || true
 
-# Escape sed replacement chars.
 esc() { printf '%s' "$1" | sed -e 's/[\\|&]/\\&/g'; }
 
 TEMPLATE="${SCRIPT_DIR}/ongrid-edge.env.example"
@@ -265,10 +307,20 @@ if [[ ! -f "$TEMPLATE" ]]; then
     log_error "missing template: $TEMPLATE"
     exit 1
 fi
+# Render the template to $ENV_FILE with operator-prefixed plugin / state /
+# upgrade paths so the agent's runtime matches the --prefix layout the
+# systemd unit + apply-pending-upgrade.sh hook are bound to. If the env file
+# already exists (re-run with same keys) we keep its previous values for
+# non-template keys (e.g. ONGRID_EDGE_PLUGIN_LOGS_ENDPOINT that the operator
+# has hand-tuned) by overwriting only the prefix-bound lines.
 sed \
     -e "s|__CLOUD_ADDR__|$(esc "$ONGRID_CLOUD_ADDR")|g" \
     -e "s|__ACCESS_KEY__|$(esc "$EDGE_ACCESS_KEY")|g" \
     -e "s|__SECRET_KEY__|$(esc "$EDGE_SECRET_KEY")|g" \
+    -e "s|__PLUGIN_BIN_DIR__|$(esc "$PLUGIN_BIN_DIR")|g" \
+    -e "s|__PLUGIN_WORK_DIR__|$(esc "$PLUGIN_WORK_DIR")|g" \
+    -e "s|__UPGRADE_STAGE_DIR__|$(esc "${STATE_DIR}/.upgrade")|g" \
+    -e "s|__SCRAPE_CONFIG_FILE__|$(esc "${CONFIG_DIR}/scrape.yaml")|g" \
     "$TEMPLATE" > "$ENV_FILE"
 chmod 640 "$ENV_FILE"
 chown root:"$SERVICE_GROUP" "$ENV_FILE" 2>/dev/null || true
@@ -280,16 +332,38 @@ chmod 750 "$LOG_DIR"
 
 # ---------- systemd units ----------
 log_info "installing systemd units"
+# Render the operator-chosen --prefix into the unit templates so the
+# sandboxed agent + the privileged upgrade oneshot find their binaries +
+# env file under $PREFIX instead of the historical /usr/local{,/lib}/,
+# /etc/, /var/{lib,log}/ defaults. The templates ship with __PREFIX__ /
+# __BIN_DIR__ / __LIB_DIR__ / __ENV_FILE__ / __STATE_DIR__ / __LOG_DIR__
+# placeholders (see ongrid-edge.service / ongrid-edge-upgrade.service).
+# We install to a .tmp first, then atomically install(1) over the live
+# unit so a re-install never leaves the systemd tree half-rendered.
+render_unit() {
+    local template="$1" target="$2"
+    sed \
+        -e "s|__PREFIX__|$(esc "$PREFIX")|g" \
+        -e "s|__BIN_DIR__|$(esc "$BIN_DIR")|g" \
+        -e "s|__LIB_DIR__|$(esc "$PLUGIN_BIN_DIR")|g" \
+        -e "s|__APPLY_HOOK__|$(esc "$APPLY_HOOK")|g" \
+        -e "s|__ENV_FILE__|$(esc "$ENV_FILE")|g" \
+        -e "s|__STATE_DIR__|$(esc "$STATE_DIR")|g" \
+        -e "s|__LOG_DIR__|$(esc "$LOG_DIR")|g" \
+        "$template" > "${target}.tmp"
+    install -m 0644 -o root -g root "${target}.tmp" "$target"
+    rm -f "${target}.tmp"
+}
 # Privileged apply oneshot (ADR-024) — runs apply-pending-upgrade.sh as root
 # before the agent. ongrid-edge.service pulls it via Wants=. Guarded so an
 # older bundle without this file still installs the agent unit.
 UPGRADE_UNIT_SRC="${SCRIPT_DIR}/ongrid-edge-upgrade.service"
 if [[ -f "$UPGRADE_UNIT_SRC" ]]; then
-    install -m 0644 -o root -g root "$UPGRADE_UNIT_SRC" "$UPGRADE_UNIT_FILE"
+    render_unit "$UPGRADE_UNIT_SRC" "$UPGRADE_UNIT_FILE"
 else
     log_warn "ongrid-edge-upgrade.service not bundled; remote whole-bundle upgrade won't apply on this host"
 fi
-install -m 0644 -o root -g root "${SCRIPT_DIR}/ongrid-edge.service" "$UNIT_FILE"
+render_unit "${SCRIPT_DIR}/ongrid-edge.service" "$UNIT_FILE"
 systemctl daemon-reload
 
 log_info "enabling + (re)starting ongrid-edge"
@@ -335,8 +409,11 @@ done
 
 # 1b) state dir writable by the service user. On systemd < 235 (CentOS/RHEL 7)
 # the unit's StateDirectory= is silently ignored, so this probe catches the
-# "online but no data" failure: without a writable /var/lib/ongrid-edge every
-# collector plugin fails `configure` with EACCES.
+# "online but no data" failure: without a writable $STATE_DIR every
+# collector plugin fails `configure` with EACCES. The unit no longer sets
+# StateDirectory= at all (StateDirectory= always pins to /var/lib/<name> and
+# can't follow --prefix); the installer pre-creating + chowning $STATE_DIR
+# is what gives the sandboxed agent writability.
 if command -v runuser >/dev/null 2>&1; then
     SVC_W=(runuser -u "$SERVICE_USER" -- test -w "$STATE_DIR")
 else
@@ -389,11 +466,16 @@ echo ""
 echo "${C_BOLD}${C_CYAN}===============================================================${C_RESET}"
 echo "${C_BOLD}${C_GREEN}  ongrid-edge installed${C_RESET}"
 echo "${C_BOLD}${C_CYAN}===============================================================${C_RESET}"
-echo "Binary:     $BIN_DEST"
-echo "Env file:   $ENV_FILE"
-echo "Unit file:  $UNIT_FILE"
-echo "Logs:       journalctl -u ongrid-edge -f"
-echo "Cloud addr: $ONGRID_CLOUD_ADDR"
+echo "Install root: $PREFIX"
+echo "Binary:       $BIN_DEST"
+echo "Plugin dir:   $PLUGIN_BIN_DIR"
+echo "Env file:     $ENV_FILE"
+echo "State dir:    $STATE_DIR"
+echo "Log dir:      $LOG_DIR"
+echo "Unit file:    $UNIT_FILE"
+echo "Logs:         journalctl -u ongrid-edge -f"
+echo "Cloud addr:   $ONGRID_CLOUD_ADDR"
 echo ""
-echo "Uninstall:  sudo $0 --uninstall"
+echo "Uninstall:    sudo $0 --uninstall --prefix=$PREFIX"
+echo "Full wipe:    sudo rm -rf $PREFIX"
 echo ""

@@ -32,6 +32,9 @@ func newTestRepo(t *testing.T) *Repo {
 	return NewRepo(db)
 }
 
+// ptr 是 *string 字面量的便捷辅助（Go 1.21+ 无 generics 时只能这样写）。
+func ptr(s string) *string { return &s }
+
 func TestSQLiteRoundTrip(t *testing.T) {
 	repo := newTestRepo(t)
 	ctx := context.Background()
@@ -288,7 +291,7 @@ func TestSQLiteListFilters(t *testing.T) {
 		t.Errorf("Alice edges = %d, want 2", len(aliceOnly))
 	}
 
-	byName, err := repo.List(ctx, biz.ListFilter{Name: "bob"})
+	byName, err := repo.List(ctx, biz.ListFilter{Name: ptr("bob-node-1")})
 	if err != nil {
 		t.Fatalf("List by name: %v", err)
 	}

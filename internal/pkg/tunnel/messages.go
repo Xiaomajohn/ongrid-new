@@ -245,6 +245,14 @@ type HostInfo struct {
 	// cannot determine a suitable address (e.g. no non-loopback
 	// interface found).
 	IPAddress string `json:"ip_address,omitempty"`
+
+	// TaskName is the operator-supplied monitoring task name piped in
+	// via install.sh's --task-name flag and persisted in the ongrid-edge
+	// env file (ONGRID_EDGE_TASK_NAME). It identifies which monitoring
+	// "task" this edge was installed for (e.g. one customer / one project
+	// / one SLA scope) so the manager can group / filter edges by it.
+	// Empty string for edges installed without --task-name.
+	TaskName string `json:"task_name,omitempty"`
 }
 
 // RegisterEdgeRequest is the first RPC the edge sends after connecting.

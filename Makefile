@@ -364,27 +364,32 @@ fetch-promtail: ## [release] 下载 promtail 到 bin/<os>-<arch>/promtail (Grafa
 OTELCOL_VERSION ?= 0.118.0
 
 # Auditbeat is Elastic closed-source; offline-only. Mirror from
-# resource/auditbeat/<arch>/auditbeat into bin/<arch>/auditbeat. Missing
-# binaries only warn (no exit non-zero) so other arches can still be
-# packaged; the audit plugin simply won't work on the host where the
-# binary is missing. Operators populate resource/ per
-# resource/auditbeat/README.md.
+# resource/auditbeat/<arch>/auditbeat into bin/<arch>/auditbeat. The
+# binary is intentionally NOT fetched online (build-time no-network
+# policy); if resource/auditbeat/<arch>/auditbeat is missing we hard-
+# fail rather than ship a half-built tarball whose audit plugin will
+# silently never start on the edge. Operators populate resource/ per
+# resource/auditbeat/README.md before running `make stage-auditbeat`.
 .PHONY: stage-auditbeat
-stage-auditbeat: ## [release] 从 resource/auditbeat/ 复制 auditbeat 到 bin/<os>-<arch>/ (linux-only，离线)
-	@for target in $(EDGE_PLUGIN_ARCHES); do \
+stage-auditbeat: ## [release] 从 resource/auditbeat/ 复制 auditbeat 到 bin/<os>-<arch>/ (linux-only，离线；缺失则失败)
+	@fail=0; \
+	for target in $(EDGE_PLUGIN_ARCHES); do \
 		dest=$(BIN_DIR)/$$target/auditbeat; \
 		src=$(RESOURCE_DIR)/$$target/auditbeat; \
 		if [ ! -f $$src ]; then \
-			echo "[auditbeat] $$src missing — drop the binary in per resource/auditbeat/README.md, then re-run"; \
-			echo "[auditbeat]   (or set EDGE_PLUGIN_ARCHES to an arch you have populated)"; \
+			echo "[auditbeat] error: $$src missing — auditbeat is offline-only and is NOT auto-fetched." >&2; \
+			echo "[auditbeat]   place the Elastic auditbeat binary at $$src per resource/auditbeat/README.md," >&2; \
+			echo "[auditbeat]   or set EDGE_PLUGIN_ARCHES to an arch you have populated, then re-run." >&2; \
+			fail=1; \
 			continue; \
 		fi; \
 		mkdir -p $(BIN_DIR)/$$target; \
 		install -m 0755 $$src $$dest; \
 		echo "[auditbeat] staged $$dest (from $$src)"; \
-	done
-	@echo "[auditbeat] note: linux-only (auditd requires Linux kernel audit subsystem)"
-	@echo "[auditbeat] done. Run 'make package' to bake into the release tarball."
+	done; \
+	if [ $$fail -ne 0 ]; then exit 1; fi; \
+	echo "[auditbeat] note: linux-only (auditd requires Linux kernel audit subsystem)"; \
+	echo "[auditbeat] done. Run 'make package' to bake into the release tarball."
 
 .PHONY: fetch-otelcol
 fetch-otelcol: ## [release] 下载 otelcol-contrib 到 bin/<os>-<arch>/otelcol-contrib (linux-only)

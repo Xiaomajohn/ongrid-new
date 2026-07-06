@@ -298,9 +298,29 @@ func (u *Usecase) HandleRegister(ctx context.Context, edgeID uint64, info tunnel
 		IPAddress:     info.IPAddress,
 		Online:        true,
 	}
-	dev, err := u.devices.FindOrCreateByFingerprint(ctx, seed)
-	if err != nil {
-		return fmt.Errorf("upsert device: %w", err)
+	// Install-job 优先 (InstallEdgeIssuer.CreateEdgeForDevice 在 worker
+	// 入口就 SetDeviceID + links.Link(edge, device, host))：如果 edge 已经
+	// 显式关联到某 device，直接用这个 device，不走 fingerprint upsert。
+	// 之前用 FindOrCreateByFingerprint 无条件 upsert 会导致 device 1
+	// (用户手工注册的、fingerprint 是 "manual:...") 被 device 2 (agent
+	// 算出来的) 覆盖，installjob 的 waitEdgeOnline(device_id=1) 永远等不到。
+	// Get 失败（device 已被删除/换 ID）才退到 fingerprint upsert —— 这是
+	// 一键安装重新触发的兜底，不该在此正常路径触发。
+	var dev *devicemodel.Device
+	if edge.DeviceID != nil && *edge.DeviceID != 0 {
+		if d, err := u.devices.Get(ctx, *edge.DeviceID); err == nil && d != nil {
+			dev = d
+		} else if u.log != nil {
+			u.log.Warn("installjob-linked device missing, falling back to fingerprint upsert",
+				"edge_id", edgeID, "device_id", *edge.DeviceID, "err", err)
+		}
+	}
+	if dev == nil {
+		var err error
+		dev, err = u.devices.FindOrCreateByFingerprint(ctx, seed)
+		if err != nil {
+			return fmt.Errorf("upsert device: %w", err)
+		}
 	}
 	if err := u.devices.UpdateHostFacts(ctx, dev.ID, devicebiz.HostFacts{
 		Hostname:      info.Hostname,
@@ -361,6 +381,16 @@ func (u *Usecase) HandleRegister(ctx context.Context, edgeID uint64, info tunnel
 	if v := strings.TrimSpace(agentVersion); v != "" && v != edge.AgentVersion {
 		if err := u.repo.SetAgentVersion(ctx, edgeID, v); err != nil {
 			return fmt.Errorf("set agent version: %w", err)
+		}
+	}
+	// Persist task_name（install.sh --task-name=NAME 透传过来的监控任务名）：
+	// 空字符串保留旧值（不覆盖 SPA 上手工设置的非空 task_name）。
+	// 不是 host fact，是 edge 自身的标识，所以走 edge repo 而不是 device
+	// repo。UpdateTaskName 用 column 名字面量引用，model/edge.TaskName
+	// 字段由 Agent1 同步加上 + AutoMigrate 建列。
+	if t := strings.TrimSpace(info.TaskName); t != "" && t != edge.TaskName {
+		if err := u.repo.UpdateTaskName(ctx, edgeID, t); err != nil {
+			return fmt.Errorf("update task name: %w", err)
 		}
 	}
 	return nil
