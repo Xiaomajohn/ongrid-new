@@ -28,22 +28,28 @@ export type OpenShellParams = {
 
 const SUBPROTOCOL = 'ongrid.shell.v1';
 
+// ShellRoute picks between the two /v1/devices/:id/shell* endpoints.
+//   - 'tunnel' — /shell        — walks the device's online edge.
+//   - 'direct' — /shell-direct — walks direct SSH from manager to IP.
+export type ShellRoute = 'tunnel' | 'direct';
+
 export function openShellSocket(
   deviceId: number | string,
   token: string,
-  params: OpenShellParams = {},
+  params: OpenShellParams & { route?: ShellRoute } = {},
 ): WebSocket {
   const id = encodeURIComponent(String(deviceId));
   const qs = new URLSearchParams({ token }).toString();
+  const suffix = params.route === 'direct' ? '/shell-direct' : '/shell';
 
   let url: string;
   if (params.baseUrl) {
-    url = `${params.baseUrl.replace(/\/$/, '')}/api/v1/devices/${id}/shell?${qs}`;
+    url = `${params.baseUrl.replace(/\/$/, '')}/api/v1/devices/${id}${suffix}?${qs}`;
   } else {
     // Derive ws/wss from the current page so dev (vite proxy) and prod
     // (nginx) both work without config.
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    url = `${proto}//${window.location.host}/api/v1/devices/${id}/shell?${qs}`;
+    url = `${proto}//${window.location.host}/api/v1/devices/${id}${suffix}?${qs}`;
   }
 
   const ws = new WebSocket(url, [SUBPROTOCOL]);
@@ -150,10 +156,12 @@ export function killShellSession(id: string): Promise<void> {
 // are returned authoritatively before the upgrade test.
 export async function probeShellPreflight(
   deviceId: number | string,
+  opts: { route?: ShellRoute } = {},
 ): Promise<{ status: number; message: string } | null> {
   const id = encodeURIComponent(String(deviceId));
+  const suffix = opts.route === 'direct' ? '/shell-direct' : '/shell';
   try {
-    const res = await fetch(`/api/v1/devices/${id}/shell`, {
+    const res = await fetch(`/api/v1/devices/${id}${suffix}`, {
       method: 'GET',
       headers: {
         Accept: 'text/plain',

@@ -17,7 +17,7 @@
 //     finalize the audit row without waiting for TCP timeout.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { Power, RotateCw, Terminal as TerminalIcon } from 'lucide-react';
 import { Modal } from '@/components/Modal';
 import { Button } from '@/components/ui/Button';
@@ -28,6 +28,7 @@ import {
   probeShellPreflight,
   sendControl,
   type ShellControlFrameIn,
+  type ShellRoute,
 } from '@/api/webshell';
 import { getToken } from '@/store/auth';
 import { usePermissions } from '@/store/me';
@@ -71,8 +72,22 @@ export default function DeviceShellPage() {
   // happens — backend rejects too (skill execute / shell open both
   // require non-viewer), but stopping at the page boundary keeps the
   // user from staring at a half-loaded terminal that 403s on connect.
-  const { deviceId = '' } = useParams<{ deviceId: string }>();
+  // 同一页面被两个 route 复用：
+  //   /devices/:deviceId/shell[-direct] — 探针视角
+  //   /hosts/:hostId/shell[-direct]    — 实体设备视角
+  // 两边的路径段都是 Prom label device_id（非 edge.id），只是 param
+  // 名不同。原先只读 deviceId，hosts 路由下取不到 → 拼出
+  // /api/v1/devices//shell-direct 双斜杠 → 后端 400。这里统一兜底
+  // 取 deviceId || hostId，保证两条入口都能解析到同一个 device id。
+  const routeParams = useParams<{ deviceId?: string; hostId?: string }>();
+  const deviceId = routeParams.deviceId || routeParams.hostId || '';
   const navigate = useNavigate();
+  const location = useLocation();
+  // 根据当前 pathname 是否以 /shell-direct 结尾，决定走哪个 transport：
+  // - /shell        → tunnel（默认，监控页入口）
+  // - /shell-direct → direct（设备页入口，直连设备 IP）
+  // 这是页面级 route 锁定：用户手工在地址栏改 URL 也不影响其他页的默认行为。
+  const shellRoute: ShellRoute = location.pathname.endsWith('/shell-direct') ? 'direct' : 'tunnel';
   if (!canMutate) {
     return (
       <main className="anim-fade flex flex-1 flex-col overflow-hidden p-6">
@@ -229,7 +244,7 @@ export default function DeviceShellPage() {
       // a real Chinese message — browsers don't expose upgrade-time
       // HTTP status to JS, only WS code 1006. If the probe returns a
       // non-OK status we abort before opening the socket.
-      const probe = await probeShellPreflight(deviceId);
+      const probe = await probeShellPreflight(deviceId, { route: shellRoute });
       if (probe) {
         const fatal = explainPreflight(probe.status, probe.message);
         if (fatal) {
@@ -240,7 +255,7 @@ export default function DeviceShellPage() {
         }
       }
 
-      const ws = openShellSocket(deviceId, token);
+      const ws = openShellSocket(deviceId, token, { route: shellRoute });
       wsRef.current = ws;
       const encoder = new TextEncoder();
 
@@ -315,7 +330,7 @@ export default function DeviceShellPage() {
           // manager replies with 429 / 503 / 403 we now know what went
           // wrong and can retell the user. Probe is fire-and-forget so
           // we don't block the close handler.
-          void probeShellPreflight(deviceId).then((p) => {
+          void probeShellPreflight(deviceId, { route: shellRoute }).then((p) => {
             if (!p) return;
             const detail = explainPreflight(p.status, p.message);
             if (detail) writeBanner(ansiRed(detail));

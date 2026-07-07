@@ -1212,6 +1212,34 @@ func main() {
 	pluginConfigUC.SetNotifier(fbClient)
 	pluginConfigUC.SetDatabaseMetricsSecretWriter(fbClient)
 
+	// frontierbound 启动 race 防护。
+	//
+	// 背景: fbsvc.NewService 内部走 client.NewRetryEndWithDialer。Install
+	// 的 9 个 c.Register(register_edge / heartbeat / push_host_metrics /
+	// push_prom_samples / get_plugin_configs / shell_output / shell_exit
+	// + 3 个 lifecycle)把 register 包写进 writeInCh 并等 broker ACK 才返回
+	// ——所以 Install 返回后 manager 端认为"handler 装好了"。但 ACK 跟
+	// broker 端 service 表的可见性之间存在 race:13:07 那次启动后
+	// 13:14:21 首个 edge register 成功,但其后的 push/heartbeat 一直报
+	// record not found(manager 端 grep 不到 handler log,broker 端 service
+	// 表只对 register_edge 可见,其他 method 仍"待 register")。
+	// docker compose restart ongrid 重启后该现象消失。
+	//
+	// 修复:在 Install 之后、HTTP server 启动前插一段 warmup(默认 5s),
+	// 给 broker 端把 service 表填满的时间窗口。可响应 rootCtx 取消,
+	// SIGTERM 不会被暖 5s 拦住。
+	if !cfg.FrontierClient.Disabled && cfg.FrontierClient.Warmup > 0 {
+		log.Info("frontierbound: warmup window — letting broker flush service table",
+			slog.Duration("d", cfg.FrontierClient.Warmup))
+		select {
+		case <-time.After(cfg.FrontierClient.Warmup):
+			log.Info("frontierbound: warmup complete")
+		case <-rootCtx.Done():
+			log.Info("frontierbound: warmup aborted by shutdown")
+			return
+		}
+	}
+
 	// WebSSH HTTP handler — uses fbClient.OpenStream to layer ssh +
 	// pty over a raw byte stream into edge:127.0.0.1:22. SSH client
 	// runs in the manager; edge is a dumb byte forwarder.
@@ -2417,6 +2445,11 @@ func main() {
 			edgeHandler.Register(protected)
 			webshellHandler.Register(protected)
 			deviceHandler.Register(protected)
+			// per-device monitor panel route (Logs page's 监控 dropdown data
+			// source). Lives under /v1/devices/{id}/monitors so the SPA can
+			// pull a device's bound panels without knowing the monitor
+			// service's full surface.
+			managerserverdevice.RegisterDeviceMonitors(protected, monitorSvc)
 			// A5 per-device SSH / SFTP / install-job routes — same
 			// auth surface as webshell (uses the per-device token
 			// model the SPA already understands).
@@ -3747,6 +3780,10 @@ func (a edgesGetAdapter) Get(ctx context.Context, id uint64) (string, error) {
 // DevicesshService contract. The two parallel types are structurally
 // identical — a manual field copy on the request and a direct return on
 // the handle is enough because Go interface satisfaction is structural.
+//
+// Route is transported as a string at the server boundary (avoids
+// importing the biz enum up the server→HTTP layer dependency graph);
+// here we map it back to a RouteKind the router understands.
 type devicesshShellAdapter struct {
 	svc *managerbizdevicessh.ShellService
 }
@@ -3758,7 +3795,23 @@ func (a devicesshShellAdapter) OpenShell(ctx context.Context, deviceID uint64, u
 		Term:    opts.Term,
 		SSHUser: opts.SSHUser,
 		SSHPass: opts.SSHPass,
+		Route:   routeStringToKind(opts.Route),
 	})
+}
+
+// routeStringToKind maps the HTTP-layer string hint back to the biz
+// enum. Unknown values fall through to RouteKindAuto so a future
+// transport added at the server layer doesn't accidentally route to
+// direct or tunnel.
+func routeStringToKind(s string) managerbizdevicessh.RouteKind {
+	switch s {
+	case "direct":
+		return managerbizdevicessh.RouteKindDirect
+	case "tunnel":
+		return managerbizdevicessh.RouteKindTunnel
+	default:
+		return managerbizdevicessh.RouteKindAuto
+	}
 }
 
 // devicesshFSAdapter bridges the biz-side SFTPService (which takes a
@@ -3945,6 +3998,23 @@ func (a installjobUsecaseAdapter) ListByDevice(ctx context.Context, deviceID uin
 	return out, nil
 }
 
+// ListByEdge implements managerserverinstalljob.Usecase.ListByEdge.
+// 监控设备页面要按 edge 而不是 device 取最近一次安装日志。委托
+// Repo.ListByEdge——biz 层 Repo contract 已加入同名方法。biz→server
+// 的字段映射在 bizInstallJobToServerJob 里统一走，避免在这里再写
+// 一遍逐字段拷贝。
+func (a installjobUsecaseAdapter) ListByEdge(ctx context.Context, edgeID uint64, limit int) ([]*managerserverinstalljob.Job, error) {
+	rows, err := a.repo.ListByEdge(ctx, edgeID, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*managerserverinstalljob.Job, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, bizInstallJobToServerJob(r))
+	}
+	return out, nil
+}
+
 func (a installjobUsecaseAdapter) Cancel(ctx context.Context, id uint64) error {
 	return a.repo.UpdateStatus(ctx, id, managerbizinstalljob.StatusCancelled, nil)
 }
@@ -3975,9 +4045,11 @@ func (a installjobUsecaseAdapter) Cancel(ctx context.Context, id uint64) error {
 // from the device row. Future PRs may honour the override once the
 // explicit-mode UX lands.
 //
-// taskName（必填）来自 HTTP handler 透传：trim 由 handler 层完成，这里
-// 只负责序列化为合法 JSON。空 taskName 防御性地写到 "{}" —— HTTP 层
-// 必填校验是双保险，但 server side 仍不能依赖单一来源。
+// taskName 来自 HTTP handler 透传：trim 由 handler 层完成，本层只负责
+// 序列化为合法 JSON。 taskName 是可选字段——空串表示未提供，下游 worker
+// 走 no-op 路径：install.sh 不带 --task-name，BindEdgeFromAccessKey 也
+// 不动 edge.task_name。非空时会与 command 一起嵌进 install_jobs.options_json
+// 以供审计 / 按任务名筛查。
 func (a installjobUsecaseAdapter) Create(ctx context.Context, deviceID uint64, taskName, command string) (*managerserverinstalljob.Job, error) {
 	d, err := a.deviceRepo.Get(ctx, deviceID)
 	if err != nil {
@@ -4054,9 +4126,11 @@ func encodeInstallJobOptions(taskName, command string) (string, error) {
 }
 
 // bizInstallJobToServerJob maps one biz-layer InstallJob row onto the
-// server-side wire DTO. Credential columns + log buffer are dropped on
-// purpose — the server contract is presentation-only, secrets live in
-// transient worker memory + audit only.
+// server-side wire DTO. Credential columns are dropped on purpose —
+// the server contract is presentation-only, secrets live in transient
+// worker memory + audit only. LogOutput IS exposed (status="timeout"
+// 并不代表 install 未跑，透传能让日志面板在 install 已跑完但 edge
+// register 超时的场景里仍然能看到 install.sh 的输出尾巴）。
 //
 // Progress is a coarse status mapping:
 //   - queued    → 0
@@ -4083,9 +4157,11 @@ func bizInstallJobToServerJob(j *managerbizinstalljob.InstallJob) *managerserver
 	return &managerserverinstalljob.Job{
 		ID:         j.ID,
 		DeviceID:   j.DeviceID,
+		EdgeID:     j.EdgeID,
 		Kind:       "edge_install",
 		Status:     string(j.Status),
 		Progress:   progress,
+		LogOutput:  j.LogOutput,
 		CreatedAt:  j.CreatedAt,
 		StartedAt:  j.StartedAt,
 		FinishedAt: j.FinishedAt,

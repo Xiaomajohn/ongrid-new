@@ -48,14 +48,27 @@ const (
 // SSH credential field on this struct — the install worker carries
 // those in transient memory and the audit row, not in the install
 // job row. The wire contract scrub list is enforced here.
+//
+// LogOutput is exposed so the InstallLogPanel (web/src/components/...)
+// can render the captured install.sh stream without a separate
+// download. It is purely the install output (curl-pipe stdout/stderr
+// already redacted by the worker) — it must NEVER include SSH
+// credentials, since the worker scrubs the secret_key before persisting
+// (see biz/installjob.Worker.Execute -> redactSecretKey).
 type Job struct {
 	ID         uint64     `json:"id"`
 	DeviceID   uint64     `json:"device_id"`
+	// EdgeID 可空：某些历史安装任务创建时还没有 edge 记录（一键安装
+	// 路径里 edge 由 worker 在 waitEdgeOnline 之后才回写），也有手动
+	// 安装走 SSHInstaller 但未创建 edge 的场景。`omitempty` 让 null 不
+	// 出现在 JSON 输出里，前端 InstallJob 类型同步为可选。
+	EdgeID     *uint64    `json:"edge_id,omitempty"`
 	Kind       string     `json:"kind"`     // edge_install | edge_upgrade | patch
 	Status     string     `json:"status"`
 	Progress   int        `json:"progress"` // 0..100; UI fills bars from this
 	Message    string     `json:"message,omitempty"`
 	LastError  string     `json:"last_error,omitempty"`
+	LogOutput  string     `json:"log_output,omitempty"` // 已脱密的 install.sh 输出尾巴
 	CreatedAt  time.Time  `json:"created_at"`
 	StartedAt  *time.Time `json:"started_at,omitempty"`
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
@@ -67,12 +80,20 @@ type Job struct {
 type Usecase interface {
 	Get(ctx context.Context, id uint64) (*Job, error)
 	ListByDevice(ctx context.Context, deviceID uint64, limit int) ([]*Job, error)
+	// ListByEdge 按监控设备 edge 维度列安装任务。一台 device 可装多个
+	// edge（不同 task_name），监控设备页面要按 edge 而不是 device 取
+	// 最近一次的安装日志，所以新增该方法。SPA 端走 GET /v1/edges/{id}
+	// /install-jobs。
+	ListByEdge(ctx context.Context, edgeID uint64, limit int) ([]*Job, error)
 	Cancel(ctx context.Context, id uint64) error
 	// Create enqueues a one-shot install-edge job for the given device.
 	//
-	// taskName 是一键安装的“任务名”（用户在 SPA 的 InstallEdgeModal 输
-	// 入），必填。它会落到 install_jobs.options_json（供后续按任务名筛
-	// 选 / 审计），并一路透传到：
+	// taskName 可选。任务名已上改由 CreateEdgeModal 填到 edge.task_name，
+	// 本接口不再二次询问。 trim 后为空白视为“未提供”，下游 worker 走
+	// no-op 路径：install_sh 只不带 --task-name，BindEdgeFromAccessKey
+	// 也不动 edge.task_name（保持 agent register 时可能上报的值）。
+	// 非空时依然会写入 install_jobs.options_json（按任务名筛查 / 审计），
+	// 并一路透传到：
 	//   - biz/edge.InstallEdgeIssuer.CreateEdgeForDevice → edge.task_name
 	//     列（Agent1 同步增加；本 PR 用 repo.UpdateTaskName 在创建后追
 	//     写一次）
@@ -121,11 +142,13 @@ func NewHandler(uc Usecase, log *slog.Logger) *Handler {
 //	POST /v1/devices/{id}/install-edge
 //	GET  /v1/install-jobs/{id}
 //	GET  /v1/devices/{id}/install-jobs?limit=20
+//	GET  /v1/edges/{id}/install-jobs?limit=20
 //	POST /v1/install-jobs/{id}:cancel
 func (h *Handler) Register(r chi.Router) {
 	r.Get("/v1/install-jobs/{id}", h.get)
 	r.Post("/v1/devices/{id}/install-edge", h.createInstall)
 	r.Get("/v1/devices/{id}/install-jobs", h.listByDevice)
+	r.Get("/v1/edges/{id}/install-jobs", h.listByEdge)
 	r.Post("/v1/install-jobs/{id}:cancel", h.cancel)
 }
 
@@ -138,6 +161,13 @@ func deviceIDFrom(r *http.Request) (uint64, error) {
 		return 0, errors.Join(errs.ErrInvalid, err)
 	}
 	return id, nil
+}
+
+// edgeIDFrom 与 deviceIDFrom 同语义——仅 chi 路由占位符同名 "id"，
+// 这里复用同一套解析逻辑以便给 listByEdge 复用。函数名区分调用点，
+// 让 reader 一眼看到是给 edge 路由用的。
+func edgeIDFrom(r *http.Request) (uint64, error) {
+	return deviceIDFrom(r)
 }
 
 func writeJSONStatus(w http.ResponseWriter, code int, body any) {
@@ -234,15 +264,50 @@ func (h *Handler) listByDevice(w http.ResponseWriter, r *http.Request) {
 	writeJSONStatus(w, http.StatusOK, map[string]any{"items": rows, "total": len(rows)})
 }
 
+// listByEdge: GET /v1/edges/{id}/install-jobs?limit=20
+//
+// 监控设备页面（日志入口在 edge 行右侧）按 edge 维度查最近一次安装
+// 日志。一台 device 可能装多个 edge（不同 task_name），按 device 维
+// 度的 listByDevice 会把多个 edge 的安装混在一起；这里走 ListByEdge
+// 只取该 edge 自己的任务，限流 / 默认值与 listByDevice 对齐。
+func (h *Handler) listByEdge(w http.ResponseWriter, r *http.Request) {
+	if _, ok := tenantctx.From(r.Context()); !ok {
+		writeErr(w, errs.ErrUnauthorized)
+		return
+	}
+	edgeID, err := edgeIDFrom(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	limit := 20
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	rows, err := h.uc.ListByEdge(r.Context(), edgeID, limit)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSONStatus(w, http.StatusOK, map[string]any{"items": rows, "total": len(rows)})
+}
+
 // installCreateReq 是 POST /v1/devices/{id}/install-edge 的请求体。
 // 字段名与 SPA 的 InstallEdgeOptions（web/src/api/devices.ts）对齐：
-//   - task_name 必填，由 InstallEdgeModal 端做 trim+非空校验
+//   - task_name 可选。任务名由「新建 Edge」流程在 CreateEdgeModal 填入
+//     edge.task_name，本路径不再二次询问。 trim 后为空白时视为未提供，
+//     下游 worker 与 BindEdgeFromAccessKey 走 no-op 处理。
 //   - ssh_pass / ssh_key_pem 是可选的“覆盖 DB 凭据”字段；当前 v1 wiring
 //     不读，保留是为了后续 explicit-mode UX（见 plan §凭据策略变更）
 type installCreateReq struct {
-	TaskName  string `json:"task_name"`
-	Command   string `json:"command,omitempty"` // 前端拼好的完整 curl 安装命令,后端不再自己拼
-	SSHPass   string `json:"ssh_pass,omitempty"`
+	TaskName  string `json:"task_name,omitempty"` // 任务名（可选），由「新建 Edge」填入
+	Command   string `json:"command,omitempty"`   // 前端拼好的完整 curl 安装命令，后端不再自己拼
+	SSHPass   string `json:"ssh_pass,omitempty"`  // 覆盖 DB 中的 SSH 密码（可选）
 	SSHKeyPEM string `json:"ssh_key_pem,omitempty"`
 }
 
@@ -259,10 +324,11 @@ type installCreateReq struct {
 //
 // Error mapping (via errs.HTTPStatus):
 //   - 401 when the request has no tenant in context.
-//   - 400 when path id is not a uint, body JSON is malformed, task_name
-//     缺失/为空白（必填；SPA 端 InstallEdgeModal 也会 trim+非空校验，
-//     这里是双保险），or the device row is missing the minimum SSH
-//     triple (host + user + (password|key)).
+//   - 400 when path id is not a uint, body JSON is malformed, or the
+//     device row is missing the minimum SSH triple
+//     (host + user + (password|key)). task_name 不再必填，空串与缺字段
+//     都被允许——binstall 调 GetByAccessKey 后 BindEdgeFromAccessKey 收
+//     尾处理。
 //   - 404 when the device id doesn't resolve to a live row (natural
 //     Repo.Get propagation; soft-deleted devices also 404).
 //   - 500 on any other internal failure.
@@ -281,8 +347,9 @@ func (h *Handler) createInstall(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	// 允许 body 缺失 / 为空 —— task_name 必填校验放在下方统一处理；
-	// 这里只负责把 body 解析失败映射成 400。
+	// 允许 body 缺失 / 为空。 task_name 改可选：任务名由「新建 Edge」流
+	// 程填入 edge.task_name，本路径不再必填；trim 后为空白视为“未提供
+	// task_name”，下游 worker / BindEdgeFromAccessKey 走 no-op 路径。
 	var req installCreateReq
 	if r.Body != nil {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
@@ -291,10 +358,6 @@ func (h *Handler) createInstall(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	taskName := strings.TrimSpace(req.TaskName)
-	if taskName == "" {
-		writeErr(w, errors.Join(errs.ErrInvalid, fmt.Errorf("task_name is required")))
-		return
-	}
 	job, err := h.uc.Create(r.Context(), deviceID, taskName, req.Command)
 	if err != nil {
 		writeErr(w, err)

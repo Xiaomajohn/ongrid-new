@@ -12,6 +12,7 @@ import (
 	model "github.com/ongridio/ongrid/internal/manager/model/edge"
 	"github.com/ongridio/ongrid/internal/pkg/errs"
 	"github.com/ongridio/ongrid/internal/pkg/tunnel"
+	"gorm.io/plugin/soft_delete"
 )
 
 // fakeDeviceRepo is the in-memory devicebiz.Repo used by HandleRegister
@@ -211,6 +212,24 @@ func (d *fakeDeviceRepo) Count(_ context.Context) (int64, error) {
 func (d *fakeDeviceRepo) Delete(_ context.Context, id uint64) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	dev, ok := d.byID[id]
+	if !ok {
+		return errs.ErrNotFound
+	}
+	// 软删（与 store 行为一致）：把 DeleteMarker 推到当前毫秒，DeletedAt 同步；
+	// 行依然留在 map 里，List 默认 scope 才会过滤它。
+	now := time.Now()
+	dev.DeletedAt = &now
+	dev.DeleteMarker = soft_delete.DeletedAt(now.UnixMilli())
+	return nil
+}
+
+// HardDelete 在测试 fake 里等价于 Delete（直接丢行）—— fake 不区分
+// 软删 / 硬删的物理存储语义，但接口签名必须存在，否则 NewUsecase 的
+// Repo 约束无法满足。
+func (d *fakeDeviceRepo) HardDelete(_ context.Context, id uint64) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	if _, ok := d.byID[id]; !ok {
 		return errs.ErrNotFound
 	}
@@ -218,8 +237,33 @@ func (d *fakeDeviceRepo) Delete(_ context.Context, id uint64) error {
 	return nil
 }
 
+// Restore 模拟 store.Unscoped 把 DeleteMarker / DeletedAt 清零的语义。
+// 行本来就在 map 里，所以只是把软删标记抹掉。
+func (d *fakeDeviceRepo) Restore(_ context.Context, id uint64) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	dev, ok := d.byID[id]
+	if !ok {
+		return errs.ErrNotFound
+	}
+	dev.DeletedAt = nil
+	dev.DeleteMarker = 0
+	return nil
+}
+
 func (d *fakeDeviceRepo) ReconcileOfflineOrphans(_ context.Context) (int64, error) {
 	return 0, nil
+}
+
+// UpdateReachability / ListReachableTargets 是 device biz 的接口成员，
+// 边 / HandleRegister 这条测试路径用不到，但 Go 的方法集强约束
+// fakeDeviceRepo 必须实现完整 Repo。空实现即可。
+func (d *fakeDeviceRepo) UpdateReachability(_ context.Context, _ uint64, _ bool, _ *time.Time) error {
+	return nil
+}
+
+func (d *fakeDeviceRepo) ListReachableTargets(_ context.Context) ([]*devicemodel.Device, error) {
+	return nil, nil
 }
 
 func (d *fakeDeviceRepo) SetSSHCredentials(_ context.Context, id uint64, c devicebiz.SSHCredentials) error {

@@ -5,13 +5,13 @@
 # ongrid-edge.service pulls in (Wants= + After=) so this runs before every
 # agent start — including each Restart=always auto-restart. It runs as a
 # separate root unit (not the agent's own ExecStartPre) because ongrid-edge
-# runs sandboxed + non-root and cannot write /usr/local; the old
+# runs sandboxed + non-root and cannot write EDGE_ROOT/bin; the old
 # `ExecStartPre=-+...` relied on the `+` root-exec prefix, which systemd < 231
 # (CentOS 7 = 219) silently ignores, so the swap never applied there.
 #
 # Looks for a staged upgrade bundle the agent dropped at
-# /var/lib/ongrid-edge/.upgrade/incoming/ and atomically swaps every file
-# listed in MANIFEST.txt into its declared dest path.
+# EDGE_ROOT/var/lib/ongrid-edge/.upgrade/incoming/ and atomically swaps every
+# file listed in MANIFEST.txt into its declared dest path.
 #
 # Three modes covered, in priority order:
 #
@@ -23,9 +23,9 @@
 #                    sha256, then for each one back up to <dest>.previous
 #                    and rename a fresh copy into place.
 #  3. Single-file  — legacy path (ADR-018 / C11 Phase-B): one binary at
-#                    .upgrade/pending swapped over /usr/local/bin/
-#                    ongrid-edge. Kept for back-compat with edges that
-#                    haven't been bundle-upgraded yet.
+#                    .upgrade/pending swapped over EDGE_ROOT/bin/ongrid-edge.
+#                    Kept for back-compat with edges that haven't been
+#                    bundle-upgraded yet.
 #
 # Idempotent + best-effort: if nothing's staged or anything goes wrong
 # at validate-time, exit 0 so systemd starts whatever binary is on disk.
@@ -34,11 +34,12 @@
 set -uo pipefail
 
 # Paths are placeholders — install.sh / install-edge.sh render them to the
-# operator-chosen --prefix (default /mnt/data/toos-temp) at install time:
-#   __STAGE_DIR__   PREFIX/var/lib/ongrid-edge/.upgrade  (agent stage dir)
-#   __BIN_TARGET__  PREFIX/bin/ongrid-edge                (legacy swap target)
-#   __BIN_DIR__     PREFIX/bin                            (swap parent for *.previous)
-#   __LIB_DIR__     PREFIX/lib/ongrid-edge                (plugin bin parent)
+# operator-chosen --prefix (default /mnt/data/tools-temp) + the ongrid-edge
+# namespace layer (EDGE_ROOT=${PREFIX}/ongrid-edge) at install time:
+#   __STAGE_DIR__   EDGE_ROOT/var/lib/ongrid-edge/.upgrade  (agent stage dir)
+#   __BIN_TARGET__  EDGE_ROOT/bin/ongrid-edge                (legacy swap target)
+#   __BIN_DIR__     EDGE_ROOT/bin                            (swap parent for *.previous)
+#   __LIB_DIR__     EDGE_ROOT/lib/ongrid-edge                (plugin bin parent)
 STAGE_DIR=__STAGE_DIR__
 INCOMING_DIR=$STAGE_DIR/incoming
 MANIFEST=$INCOMING_DIR/MANIFEST.txt

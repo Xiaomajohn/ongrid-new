@@ -1,4 +1,4 @@
-# 2026-07-05 edge 安装路径 prefix 化（统一到 /mnt/data/toos-temp）
+# 2026-07-05 edge 安装路径 prefix 化（统一到 /mnt/data/tools-temp）
 
 ## 背景
 
@@ -6,12 +6,12 @@ edge 设备的安装文件（binary / 插件二进制 / env 配置 / state / log
 在 5 个根目录（`/usr/local/bin`、`/usr/local/lib`、`/etc/`、`/var/lib/`、
 `/var/log/`），operator 难以一眼看清安装范围、备份、清理也容易漏。本次需求：
 把所有 edge 安装路径收敛到一个 operator 指定的 PREFIX（默认
-`/mnt/data/toos-temp`）下，且 PREFIX 通过 `--prefix=PATH` 命令行参数控制。
+`/mnt/data/tools-temp`）下，且 PREFIX 通过 `--prefix=PATH` 命令行参数控制。
 
 ## 新布局
 
 ```
-${PREFIX}/                                    默认 /mnt/data/toos-temp
+${PREFIX}/                                    默认 /mnt/data/tools-temp
 ├── bin/
 │   └── ongrid-edge                            原 /usr/local/bin/ongrid-edge
 ├── lib/
@@ -38,7 +38,7 @@ ${PREFIX}/                                    默认 /mnt/data/toos-temp
 
 ### 1. 路径参数化：引入 `--prefix=PATH`
 
-所有 edge 安装 / 卸载脚本接受 `--prefix=PATH`（默认 `/mnt/data/toos-temp`），
+所有 edge 安装 / 卸载脚本接受 `--prefix=PATH`（默认 `/mnt/data/tools-temp`），
 同时尊重等价的 `ONGRID_EDGE_PREFIX` 环境变量（命令行优先）。涉及：
 
 - `deploy/install/edge/install.sh`（curl-pipe / UI 一键安装入口）：
@@ -58,7 +58,7 @@ ${PREFIX}/                                    默认 /mnt/data/toos-temp
   `__LIB_DIR__` / `__APPLY_HOOK__` / `__ENV_FILE__` / `__STATE_DIR__` /
   `__LOG_DIR__` 占位符，由 `render_unit()` 函数 sed 注入。
 - `deploy/install/edge/uninstall.sh`（curl-pipe 卸载）：
-  新增 `--prefix=PATH`（默认 `/mnt/data/toos-temp`），所有清理路径
+  新增 `--prefix=PATH`（默认 `/mnt/data/tools-temp`），所有清理路径
   基于 PREFIX；`pkill -f` 的 regex 改用 `${BIN_DIR}/ongrid-edge|${LIB_DIR}/`，
   旧的 `/usr/local/{bin,lib}/ongrid-edge` 硬编码移除。
 
@@ -95,7 +95,7 @@ find /usr/local/bin /usr/local/lib/ongrid-edge -name '*.previous' ...   # 两处
 `__LIB_DIR__`），install-edge.sh 在 sed 注入时根据 `--prefix` 渲染，
 install.sh 通过 nginx 下载下来的版本不再硬编码（每次重装都会重新拉取）。
 这样：
-- 默认 `--prefix=/mnt/data/toos-temp` → hook 写入
+- 默认 `--prefix=/mnt/data/tools-temp` → hook 写入
   `${PREFIX}/var/lib/ongrid-edge/.upgrade/...` / 备份 + swap
   `${PREFIX}/bin/ongrid-edge` / `${PREFIX}/lib/ongrid-edge/...`
 - 自定义 `--prefix=...` → 一致跟随
@@ -114,7 +114,7 @@ bundle MANIFEST.txt 第 4 列 `dest_path` 原本硬编码
   实际未改，保持原状
 
 **不进本 PR 的原因**：bundle 是云端共享、分发给所有 edge 的「通用」升级包。
-每个 edge 可能用不同 prefix（默认 `/mnt/data/toos-temp`，但允许 operator
+每个 edge 可能用不同 prefix（默认 `/mnt/data/tools-temp`，但允许 operator
 自定义），要让 MANIFEST dest_path 与每台 edge 对齐，必须在云端 build bundle
 时知道这台 edge 的 prefix 并单独打包，逻辑上是从「云端统一下发」变成「云端
 按 edge 个性化打包」，跨多个子系统（device 注册、bundle 仓、edge 元数据），
@@ -151,7 +151,7 @@ sed 渲染时填入 prefix 路径。Go 端 `internal/pkg/config` 的默认值（
 
 ## 兼容性
 
-- **默认行为**：`--prefix` 缺省 `/mnt/data/toos-temp`，**所有老 operator 的
+- **默认行为**：`--prefix` 缺省 `/mnt/data/tools-temp`，**所有老 operator 的
   /usr/local/... 默认路径不再生效**。但本项目 edge 端 cmd 的内部默认值仍
   保留（`ONGRID_EDGE_PLUGIN_BIN_DIR` 默认 `/usr/local/lib/ongrid-edge` 等），
   只是我们 ENV_FILE 现在显式注入 prefix 路径覆盖，所以 agent 永远用 prefix
@@ -175,18 +175,18 @@ sed 渲染时填入 prefix 路径。Go 端 `internal/pkg/config` 的默认值（
 
 - 路径追踪：
   ```
-  edge install (PREFIX=/mnt/data/toos-temp)
-    ├─ curl /install.sh | bash --access-key=... --prefix=/mnt/data/toos-temp
+  edge install (PREFIX=/mnt/data/tools-temp)
+    ├─ curl /install.sh | bash --access-key=... --prefix=/mnt/data/tools-temp
     │   → render systemd units with ${PREFIX} inline
-    │   → write ENV_FILE with ONGRID_EDGE_PLUGIN_BIN_DIR=/mnt/data/toos-temp/lib/ongrid-edge ...
+    │   → write ENV_FILE with ONGRID_EDGE_PLUGIN_BIN_DIR=/mnt/data/tools-temp/lib/ongrid-edge ...
     │   → fetch plugins (promtail/otelcol/...) into ${PREFIX}/lib/ongrid-edge/
     │   → fetch apply-pending-upgrade.sh into ${PREFIX}/lib/ongrid-edge/
     │   → systemd daemon-reload + restart
     │
     └─ systemd unit ongrid-edge.service
-        EnvironmentFile=/mnt/data/toos-temp/etc/ongrid-edge/ongrid-edge.env
-        ExecStart=/mnt/data/toos-temp/bin/ongrid-edge
-        ReadWritePaths=/mnt/data/toos-temp/var/lib/ongrid-edge /mnt/data/toos-temp/var/log/ongrid-edge
+        EnvironmentFile=/mnt/data/tools-temp/etc/ongrid-edge/ongrid-edge.env
+        ExecStart=/mnt/data/tools-temp/bin/ongrid-edge
+        ReadWritePaths=/mnt/data/tools-temp/var/lib/ongrid-edge /mnt/data/tools-temp/var/log/ongrid-edge
 
   edge upgrade (cloud side，**本 PR 不改造**)
     └─ build-edge-bundle.sh 仍按原版生成 MANIFEST dest_path=/usr/local/bin/ongrid-edge
@@ -195,12 +195,12 @@ sed 渲染时填入 prefix 路径。Go 端 `internal/pkg/config` 的默认值（
         → tar → nginx /edge/edge-bundle-linux-amd64-v0.7.200.tar.gz
 
   edge agent upgrade (edge side)
-    └─ MethodFetchPackage drops bundle into /mnt/data/toos-temp/var/lib/ongrid-edge/.upgrade/incoming/
+    └─ MethodFetchPackage drops bundle into /mnt/data/tools-temp/var/lib/ongrid-edge/.upgrade/incoming/
     └─ systemd pulls ongrid-edge-upgrade.service oneshot
-        ExecStart=/mnt/data/toos-temp/lib/ongrid-edge/apply-pending-upgrade.sh
-        → apply-pending-upgrade.sh reads __STAGE_DIR__=/mnt/data/toos-temp/var/lib/ongrid-edge/.upgrade
+        ExecStart=/mnt/data/tools-temp/lib/ongrid-edge/apply-pending-upgrade.sh
+        → apply-pending-upgrade.sh reads __STAGE_DIR__=/mnt/data/tools-temp/var/lib/ongrid-edge/.upgrade
         → swap each MANIFEST entry to __BIN_TARGET__=/usr/local/bin/ongrid-edge（MANIFEST 原版路径）
-        ⚠ 与 systemd ExecStart=/mnt/data/toos-temp/bin/ongrid-edge 不一致（遗留问题）
+        ⚠ 与 systemd ExecStart=/mnt/data/tools-temp/bin/ongrid-edge 不一致（遗留问题）
   ```
   本 PR 覆盖的链路（首次安装 + 卸载 + 本地 upgrade stage）全通：
   UI 触发 → curl → bash → systemd unit 渲染 → ENV_FILE override → plugin

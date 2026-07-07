@@ -94,16 +94,18 @@ type WorkerConfig struct {
 }
 
 // Defaults applied when the matching field is zero.
+//
+// Timeout 是 install job 整体的硬性上限（防 worker 槽被单个 job 永久 pin
+// 死）。改成 24h 后相当于“只要 install.sh 没退 worker 就不退”，符合
+// “如果安装不完就一直不退出”的语义；如果未来想重新启用严格超时，改回
+// 10*time.Minute 即可，env 里也能 override。
 const (
-	defaultWorkerTimeout    = 10 * time.Minute
-	// SSH 拨号 + install.sh 下载（~30MB ongrid-edge + 12 个 exporter）
-	// + chcon SELinux relabel + systemd start 的总和在 aarch64
-	// openEuler 24.03 上实测 ~22-25s，frontier handshake 再加 1-3s。
-	// 20s 默认值在双 .repo.SetDeviceID + agent register 链路里偶尔
-	// 触发 false-negative —— 22s 装完、26s 才 online，30s 才能等到。
-	// 60s 给首次装 + 远程下载慢速网络留足余量（fetch_configs 每分钟
-	// 拉一次，只要边缘启动就会 online）。
-	defaultWaitOnlineWindow = 60 * time.Second
+	defaultWorkerTimeout = 24 * time.Hour
+	// waitEdgeOnline 改为 best-effort：只短暂探一下 agent 有没有 register，
+	// 失败不阻塞 worker 终态判定。install.sh 跑完 self-check passed 后即
+	// 视为 install 完成；agent 是否 register 由 edge.presence 后续异步追踪，
+	// UI 侧通过 edges.status 自行观察，job 状态不会再出现 "timeout"。
+	defaultWaitOnlineWindow = 5 * time.Second
 )
 
 // Worker drives one InstallJob through to a terminal state. The
@@ -154,7 +156,11 @@ func NewWorker(repo Repo, issuer EdgeIssuer, softDelete DeviceSSHSoftDelete, ins
 //
 // State machine:
 //
-//	queued ──▶ running ──▶ (success | failed | timeout)
+//	queued ──▶ running ──▶ (success | failed)
+//
+// (timeout 分支已废弃：waitEdgeOnline 改为 best-effort，install.sh
+// 跑完 self-check passed 后即视为 install 完成，agent 是否 register
+// 是 secondary 状态，由 edge.presence 后续异步追踪。详见常量注释。)
 //
 // The runner enqueues a jobID; the worker fetches the row, flips
 // status, mints fresh edge credentials (BEFORE the install script
@@ -298,14 +304,22 @@ func (w *Worker) Execute(ctx context.Context, jobID uint64) {
 		}
 	}
 
-	// 5) wait until the freshly-installed edge comes online so the
-	// UI sees a confirmed-success state instead of a race window
-	// where install completed but the agent hasn't phoned home yet.
+	// 5) best-effort wait until the freshly-installed edge comes online.
+	//
+	// 改了：waitEdgeOnline 不再阻塞 install job 终态判定。
+	// install.sh 跑完 self-check passed 后即视为 install 完成；
+	// agent 是否 register 是 secondary 状态，由 edge.presence 后续异步追踪，
+	// UI 侧通过 edges.status 自行观察。
+	//
+	// 失败时仅 warn log，不 UpdateStatus StatusTimeout，不 return，
+	// 让 worker 走到 success 路径 —— 这样 job 状态不会再卡在
+	// "timeout"，符合用户“如果安装不完就一直不退出”的语义。
+	// 即便 install.sh 真的卡住，defaultWorkerTimeout（24h）兜底，
+	// 不会让 worker 槽永久 pin 死。
 	if err := w.waitEdgeOnline(execCtx, job.DeviceID, w.cfg.WaitOnline); err != nil {
-		logCtx.Warn("installjob: edge did not come online in time", slog.Any("err", err))
-		_ = w.repo.UpdateStatus(execCtx, jobID, StatusTimeout, nil)
-		_ = w.repo.ClearCredentialSnap(execCtx, jobID)
-		return
+		logCtx.Warn("installjob: edge did not come online within wait window (best-effort, not failing job)",
+			slog.Any("err", err),
+			slog.Duration("wait_window", w.cfg.WaitOnline))
 	}
 
 	// 6) success.

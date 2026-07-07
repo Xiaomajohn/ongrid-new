@@ -8,6 +8,7 @@ import (
 
 	"gorm.io/gorm"
 
+	biz "github.com/ongridio/ongrid/internal/manager/biz/monitor"
 	model "github.com/ongridio/ongrid/internal/manager/model/monitor"
 	"github.com/ongridio/ongrid/internal/pkg/errs"
 )
@@ -22,12 +23,30 @@ type Repo struct {
 // NewRepo builds the repo around an opened *gorm.DB.
 func NewRepo(db *gorm.DB) *Repo { return &Repo{db: db} }
 
-// List returns every panel ordered by (ordinal asc, id asc). Stable
+// List returns panels ordered by (ordinal asc, id asc). Stable
 // ordering ensures the SPA renders panels deterministically across
-// refreshes.
-func (r *Repo) List(ctx context.Context) ([]*model.Panel, error) {
+// refreshes. Filtering is opt-in: an empty ListFilter returns every
+// live (non-soft-deleted) panel.
+//
+// When ListFilter.DeviceID is non-nil, the result includes both
+// device-bound panels (device_id = f.DeviceID) and global panels
+// (device_id IS NULL). Rationale: the Logs page's "监控" dropdown
+// picks the operator's device first, then surfaces every panel that
+// could apply to it — and a "global" panel is, by definition, the
+// one that applies to all devices. Excluding globals from a
+// device-scoped view left the dropdown effectively empty whenever
+// the operator had only created unbound panels.
+func (r *Repo) List(ctx context.Context, f biz.ListFilter) ([]*model.Panel, error) {
+	tx := r.db.WithContext(ctx).Model(&model.Panel{})
+	if f.DeviceID != nil {
+		tx = tx.Where("device_id = ? OR device_id IS NULL", *f.DeviceID)
+	}
+	if f.IncludeDeleted {
+		// Bypass the GORM soft-delete scope so soft-deleted rows surface.
+		tx = tx.Unscoped()
+	}
 	var out []*model.Panel
-	if err := r.db.WithContext(ctx).
+	if err := tx.
 		Order("ordinal asc").
 		Order("id asc").
 		Find(&out).Error; err != nil {
@@ -125,11 +144,50 @@ func (r *Repo) SetSyncResult(ctx context.Context, id uint64, errMsg string) erro
 
 // Delete removes the row with the given id. Missing row surfaces as
 // errs.ErrNotFound.
-func (r *Repo) Delete(ctx context.Context, id uint64) error {
+//
+// hard=false (default) → soft delete: GORM stamps deleted_at + bumps
+// delete_marker, and the row is hidden from default-scope List calls.
+// hard=true → physical delete: the row is gone from the table entirely.
+// This matches the device model semantics: default behaviour is
+// "operator can recover", `?hard=true` is the un-recoverable path used
+// for GDPR-style "really scrub this" flows.
+func (r *Repo) Delete(ctx context.Context, id uint64, hard bool) error {
 	if id == 0 {
 		return fmt.Errorf("%w: id required", errs.ErrInvalid)
 	}
-	res := r.db.WithContext(ctx).Delete(&model.Panel{}, id)
+	q := r.db.WithContext(ctx)
+	if hard {
+		q = q.Unscoped()
+	}
+	res := q.Delete(&model.Panel{}, id)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return errs.ErrNotFound
+	}
+	return nil
+}
+
+// Restore un-soft-deletes a previously soft-deleted panel. No-op when
+// the row is already live (delete_marker == 0). Implemented via
+// Unscoped so the WHERE doesn't filter out the row we're trying to
+// revive. Missing id surfaces as errs.ErrNotFound so callers can tell
+// "id never existed" from "id was already live" (idempotent case).
+func (r *Repo) Restore(ctx context.Context, id uint64) error {
+	if id == 0 {
+		return fmt.Errorf("%w: id required", errs.ErrInvalid)
+	}
+	now := time.Now().UTC()
+	res := r.db.WithContext(ctx).
+		Unscoped().
+		Model(&model.Panel{}).
+		Where("id = ?", id).
+		Updates(map[string]any{
+			"deleted_at":    nil,
+			"delete_marker": 0,
+			"updated_at":    now,
+		})
 	if res.Error != nil {
 		return res.Error
 	}

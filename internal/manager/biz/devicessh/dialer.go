@@ -48,6 +48,36 @@ func (p Purpose) String() string {
 	}
 }
 
+// RouteKind lets the caller force a specific transport (direct vs
+// tunnel) instead of letting the Router pick. Used by the split
+// WebSSH endpoints: /v1/devices/{id}/shell always walks the tunnel
+// via edge (monitor-page flow), /v1/devices/{id}/shell-direct always
+// walks direct SSH from manager to the device's IP (host-page flow).
+// RouteKindAuto preserves the historical Router.Pick behaviour and
+// is what the SFTP service (which doesn't care which transport wins)
+// uses today.
+type RouteKind int
+
+const (
+	RouteKindAuto RouteKind = iota
+	RouteKindDirect
+	RouteKindTunnel
+)
+
+// String returns the wire / log form of a RouteKind.
+func (k RouteKind) String() string {
+	switch k {
+	case RouteKindDirect:
+		return "direct"
+	case RouteKindTunnel:
+		return "tunnel"
+	case RouteKindAuto:
+		return "auto"
+	default:
+		return "unknown"
+	}
+}
+
 // ErrSSHConfigMissing is returned by Router.Pick when no credentials are
 // available (neither edge-tunnel nor direct-SSH). It's exported so HTTP
 // handlers can map it to 428 Precondition Required via errs.HTTPStatus.

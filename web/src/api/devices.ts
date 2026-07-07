@@ -25,6 +25,12 @@ export type Device = {
   // — points at the row in topology.nodes that fronts this
   // device. Null until topology.Migrate's backfill has run.
   node_id?: number | null;
+  // — soft-delete sentinel. null/missing ⇒ row is live; non-null ⇒ row
+  // was soft-deleted. Only present in the response when the operator
+  // passes `include_deleted=true` to listDevices (the default-scope
+  // request still strips soft-deleted rows at the server, so the SPA
+  // only ever sees this set when it explicitly asked for it).
+  deleted_at?: string | null;
   // — basic host facts. Present once the linked edge has reported its
   // host_info at least once; absent on rows only seeded via topology
   // discovery. Frontend treats undefined as "not yet known".
@@ -146,8 +152,30 @@ export function updateDeviceRoles(id: string | number, roles: string[]) {
   );
 }
 
-export function deleteDevice(id: string | number) {
-  return request<void>('DELETE', `/devices/${encodeURIComponent(String(id))}`);
+// deleteDevice removes a device row.
+//
+// `hard` defaults to false on the wire (soft delete, the operator can
+// revive it via restoreDevice). Pass `{ hard: true }` for the
+// un-recoverable path — only the admin UI should ever call this.
+export function deleteDevice(
+  id: string | number,
+  opts: { hard?: boolean } = {},
+) {
+  const qs = opts.hard ? '?hard=true' : '';
+  return request<void>(
+    'DELETE',
+    `/devices/${encodeURIComponent(String(id))}${qs}`,
+  );
+}
+
+// restoreDevice revives a soft-deleted device. Admin-only on the
+// server. Returns the post-restore DTO so the SPA can swap it into the
+// list without a follow-up GET.
+export function restoreDevice(id: string | number) {
+  return request<Device>(
+    'POST',
+    `/devices/${encodeURIComponent(String(id))}/restore`,
+  );
 }
 
 export function listDeviceEdges(id: string | number) {
@@ -232,9 +260,12 @@ export interface InstallJob {
 }
 
 export interface InstallEdgeOptions {
-  // 任务名（必填），会写入 edge 任务标识，供 Edges 页面按 task_name 筛选。
-  // 空字符串会被后端拒绝——前端在 InstallEdgeModal 做 trim 后校验。
-  task_name: string;
+  // 任务名（可选）。任务名由「新建 Edge」流程（CreateEdgeModal）填入并
+  // 直接写入 edge.task_name，本接口（POST /v1/devices/{id}/install-edge）
+  // 不再二次询问。前端两个安装弹窗均不再要求用户填这一字段；留空、null
+  // 或省略该字段都被后端允许，edge.task_name 保持原值（由 agent 上报时
+  // 补填或手动 Edit Edge 补填）。
+  task_name?: string;
   // 前端拼好的完整 curl 安装命令，后端不再自己拼装，直接 SSH 执行。
   command?: string;
   ssh_pass?: string;
@@ -272,6 +303,21 @@ export function listInstallJobsByDevice(
   return request<{ items: InstallJob[] }>(
     'GET',
     `/devices/${encodeURIComponent(String(deviceId))}/install-jobs?limit=${limit}`,
+  );
+}
+
+// listInstallJobsByEdge 按监控设备 edge 维度拉最近一批安装任务。一台
+// device 可以装多个 edge（不同 task_name），Hosts 页面仅能按 device 查；
+// 监控设备页面（Edges.tsx）的「日志」按钮走这里。后端对应
+// GET /v1/edges/{id}/install-jobs，默认 limit=20，与 listInstallJobsByDevice
+// 对齐。Hosts 页面的日志入口被需求调整掉，本函数仅 Edges 页使用。
+export function listInstallJobsByEdge(
+  edgeId: string | number,
+  limit = 20,
+) {
+  return request<{ items: InstallJob[] }>(
+    'GET',
+    `/edges/${encodeURIComponent(String(edgeId))}/install-jobs?limit=${limit}`,
   );
 }
 

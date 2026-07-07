@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { Plus, RotateCw, Trash2, MoreVertical, Copy, Check, ExternalLink, TerminalSquare } from 'lucide-react';
+import { Plus, RotateCw, Trash2, MoreVertical, Copy, Check, ExternalLink, TerminalSquare, Power, ScrollText } from 'lucide-react';
 import { StatusPill } from '@/components/StatusPill';
 import { Modal } from '@/components/Modal';
 import { cn } from '@/lib/cn';
@@ -25,10 +25,19 @@ import {
   upgradeEdgeAgent,
   upgradeEdgePackage,
 } from '@/api/edges';
+import { listDevices, listInstallJobsByEdge, type Device, type InstallJob } from '@/api/devices';
 import { getManagerVersion } from '@/api/version';
 import { usePermissions } from '@/store/me';
 import { notifyDevicesChanged } from '@/lib/events';
 import { useI18n } from '@/i18n/locale';
+import { EdgeInstallModal } from '@/components/EdgeInstallModal';
+import { InstallLogPanel } from '@/components/InstallLogPanel';
+
+// 把创建时一次性回显的 secret_key 暂存到 sessionStorage：这样刷新页面
+// 后「手动安装」弹窗仍能拼出完整 curl 命令，不必再让用户回 SecretReveal
+// 里复制。键名带 edge.id 避免互相覆盖。sessionStorage 随 tab 关闭而清
+// 空，敏感性窗口仅限当前会话。
+const SECRET_KEY_STORAGE_PREFIX = 'ongrid.edge.secret_key.';
 
 // filter 状态：name / hostname / ip 走 EdgesFilterBar（本地 state），
 // roles 继续走 ?roles= URL（Sidebar 入口控制）。两者合并到 listEdges。
@@ -88,6 +97,24 @@ export default function EdgesPage() {
       .then((r) => setManagerVersion(r.manager_version || ''))
       .catch(() => setManagerVersion(''));
   }, []);
+  // 加载设备列表供 CreateEdgeModal「所属设备」下拉使用。best-effort：
+  // 失败时 CreateEdgeModal 的 select 只显示「请先到主机页添加设备」提示，
+  // 仍然可以创建不关联设备的 edge（保留旧行为）。
+  useEffect(() => {
+    let cancelled = false;
+    void listDevices({ limit: 1000 })
+      .then((r) => {
+        if (cancelled) return;
+        setDeviceOptions(r.items ?? []);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setDeviceOptions([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [createOpen, setCreateOpen] = useState(false);
   const [secretReveal, setSecretReveal] = useState<{
     title: string;
@@ -96,6 +123,18 @@ export default function EdgesPage() {
   } | null>(null);
   const [rolesEditTarget, setRolesEditTarget] = useState<Edge | null>(null);
   const [upgradeTarget, setUpgradeTarget] = useState<Edge | null>(null);
+  // 行操作栏「安装」入口的目标 edge。点开 EdgeInstallModal 后内部会
+  // 自己拉 device 详情 + secret_key（从 sessionStorage）。
+  const [installTarget, setInstallTarget] = useState<Edge | null>(null);
+  // 一键安装启动后跳到 InstallLogPanel tail 日志。
+  const [activeInstallJob, setActiveInstallJob] = useState<{ edgeId: number; jobId: number } | null>(null);
+  // 每行 edge 最近一次安装任务（key=edge.id），用于「日志」按钮的
+  // 可点击状态判定。mount 后后台拉一次（limit=1），失败容忍。
+  const [installJobHistory, setInstallJobHistory] = useState<Record<number, InstallJob>>({});
+  // CreateEdgeModal 用的设备下拉选项：mount 时拉一次全量 devices。
+  // deviceMap 命中后用 device.name / hostname / ip_address 替代 e.name
+  // 显示，让 operator 选「所属设备」时一眼认出来。
+  const [deviceOptions, setDeviceOptions] = useState<Device[]>([]);
   // per-row "整包升级" busy state + last-result toast. We don't
   // open a modal — the action is single-click and the result lands in
   // the existing toast pipeline.
@@ -137,13 +176,59 @@ export default function EdgesPage() {
   }, [refresh]);
   usePoll(refresh, 10_000);
 
-  async function onCreate(name: string) {
-    const created: CreateEdgeResponse = await createEdge({ name });
+  // 后台拉每个 edge 最近一次安装任务，按 edge.id 索引。点击「日志」
+  // 按钮时直接打开对应的 InstallLogPanel，无需再次 round-trip。
+  // 失败容忍：该 edge 暂时没有 install_jobs 行时 map 里没有它的 key，
+  // 「日志」按钮自然灰显。
+  useEffect(() => {
+    if (edges.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      const next: Record<number, InstallJob> = { ...installJobHistory };
+      await Promise.all(
+        edges.map(async (e) => {
+          try {
+            const r = await listInstallJobsByEdge(e.id, 1);
+            const j = r.items?.[0];
+            if (j) next[e.id] = j;
+          } catch {
+            /* ignore — edge has no install jobs yet */
+          }
+        }),
+      );
+      if (!cancelled) setInstallJobHistory(next);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // 故意只依赖 edges 长度变化时的 edges 列表；installJobHistory 自己
+    // 变化时不重跑，避免 fetch-set-fetch 的无限循环。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [edges]);
+
+  // createEdge 的扩展签名：name + 可选 device_id + 可选 task_name。
+  // CreateEdgeModal 把表单的「所属设备 / 任务名」传过来。后端在 create
+  // 路径上直接写 device_id + task_name，不再依赖 install 路径补写。
+  async function onCreate(name: string, deviceID: number | null, taskName: string) {
+    const created: CreateEdgeResponse = await createEdge({
+      name,
+      device_id: deviceID ?? undefined,
+      task_name: taskName.trim() || undefined,
+    });
     setSecretReveal({
       title: tr('已创建设备', 'Device created'),
       accessKey: created.access_key_id,
       secretKey: created.secret_key,
     });
+    // 暂存到 sessionStorage，给 EdgeInstallModal 「手动安装」section 用。
+    try {
+      sessionStorage.setItem(
+        `${SECRET_KEY_STORAGE_PREFIX}${created.id}`,
+        created.secret_key,
+      );
+    } catch {
+      /* sessionStorage 不可用（隐私模式 / 配额满）不影响主流程 */
+    }
     void refresh();
   }
 
@@ -156,6 +241,13 @@ export default function EdgesPage() {
         accessKey,
         secretKey: r.secret_key,
       });
+      // 轮换后覆盖 sessionStorage 里的旧 secret_key，弹窗手动安装命令
+      // 立即可用新凭据。
+      try {
+        sessionStorage.setItem(`${SECRET_KEY_STORAGE_PREFIX}${id}`, r.secret_key);
+      } catch {
+        /* noop */
+      }
     } catch (err) {
       alert((err as Error).message || tr('轮换失败', 'Rotate failed'));
     }
@@ -379,6 +471,19 @@ export default function EdgesPage() {
                           <span>{tr('查看图表', 'View chart')}</span>
                         </button>
                         <ShellButton edge={e} canMutate={canMutate} />
+                        <InstallButton
+                          edge={e}
+                          canMutate={canMutate}
+                          onClick={() => setInstallTarget(e)}
+                        />
+                        <LogButton
+                          edge={e}
+                          lastJob={installJobHistory[e.id]}
+                          onClick={() => {
+                            const j = installJobHistory[e.id];
+                            if (j) setActiveInstallJob({ edgeId: e.id, jobId: j.id });
+                          }}
+                        />
                         <RowMenu
                           onRotate={() => onRotate(e.id, e.name, e.access_key_id)}
                           onDelete={() => onDelete(e.id, e.name)}
@@ -398,11 +503,39 @@ export default function EdgesPage() {
 
       <CreateEdgeModal
         open={createOpen}
+        deviceOptions={deviceOptions}
         onClose={() => setCreateOpen(false)}
-        onSubmit={async (name) => {
-          await onCreate(name);
+        onSubmit={async (name, deviceID, taskName) => {
+          await onCreate(name, deviceID, taskName);
           setCreateOpen(false);
         }}
+      />
+
+      {/* 「安装」弹窗：手动安装 + 一键安装二选一。secretKey 从
+          sessionStorage 取（创建/轮换时暂存）。一键安装复用设备 SSH
+          凭据，启动后切到 InstallLogPanel tail 日志。 */}
+      <EdgeInstallModal
+        open={!!installTarget}
+        edge={installTarget}
+        secretKey={
+          installTarget
+            ? sessionStorage.getItem(`${SECRET_KEY_STORAGE_PREFIX}${installTarget.id}`) ??
+              undefined
+            : undefined
+        }
+        onClose={() => setInstallTarget(null)}
+        onStarted={(jobId) => {
+          if (!installTarget) return;
+          setActiveInstallJob({ edgeId: installTarget.id, jobId });
+          setInstallTarget(null);
+          void refresh();
+        }}
+      />
+
+      <InstallLogPanel
+        jobId={activeInstallJob?.jobId ?? 0}
+        open={!!activeInstallJob}
+        onClose={() => setActiveInstallJob(null)}
       />
 
       <SecretRevealModal
@@ -889,6 +1022,99 @@ function ShellButton({ edge, canMutate }: { edge: Edge; canMutate: boolean }) {
   );
 }
 
+// 行操作栏「安装」按钮：点击后弹 EdgeInstallModal，提供手动安装
+// (buildInstallCommand 拼出的 curl 一行) + 一键安装 (复用设备 SSH 凭据
+// POST /devices/{id}/install-edge)。
+// 只读账号禁用；未关联设备的 edge 也可以点，弹窗里手动安装照常工作
+// 只是「一键安装」区会显示「该 edge 未关联所属设备」提示。
+function InstallButton({
+  edge,
+  canMutate,
+  onClick,
+}: {
+  edge: Edge;
+  canMutate: boolean;
+  onClick(): void;
+}) {
+  const { tr } = useI18n();
+  const disabled = !canMutate;
+  const reason = !canMutate
+    ? tr('只读账号不能安装', 'Viewer accounts cannot install')
+    : '';
+  if (disabled) {
+    return (
+      <span
+        title={reason}
+        aria-label={reason}
+        className="mr-1 inline-flex cursor-not-allowed items-center gap-1 rounded-md px-2 py-1 text-xs text-zinc-600"
+      >
+        <Power size={14} />
+        <span>{tr('安装', 'Install')}</span>
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={tr(
+        `安装 · ${edge.name || `edge #${edge.id}`}`,
+        `Install · ${edge.name || `edge #${edge.id}`}`,
+      )}
+      aria-label={tr('安装', 'Install')}
+      className="mr-1 inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
+    >
+      <Power size={14} />
+      <span>{tr('安装', 'Install')}</span>
+    </button>
+  );
+}
+
+// ----- LogButton -----
+// 安装日志入口：仅在该 edge 有最近一次安装任务时显示可点击；否则灰显。
+// 按 edge 而不是 device 维度查日志——一台 device 可装多个 edge
+// （不同 task_name），device 维度会串到一起失去归属语义。后端对应
+// GET /v1/edges/{id}/install-jobs，由 installJobHistory 在 mount 后
+// 预拉一次（limit=1），这里只读 map。
+function LogButton({
+  edge,
+  lastJob,
+  onClick,
+}: {
+  edge: Edge;
+  lastJob?: InstallJob;
+  onClick(): void;
+}) {
+  const { tr } = useI18n();
+  const disabled = !lastJob;
+  const reason = !lastJob
+    ? tr('该监控设备尚无安装任务', 'No install job for this edge yet')
+    : '';
+  if (disabled) {
+    return (
+      <span
+        title={reason}
+        aria-label={reason}
+        className="mr-1 inline-flex cursor-not-allowed items-center gap-1 rounded-md px-2 py-1 text-xs text-zinc-600"
+      >
+        <ScrollText size={14} />
+        <span>{tr('日志', 'Log')}</span>
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={tr(`查看 ${edge.name} 最近一次安装日志 (#${lastJob!.id})`, `View latest install log (#${lastJob!.id})`)}
+      className="mr-1 inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
+    >
+      <ScrollText size={14} />
+      <span>{tr('日志', 'Log')}</span>
+    </button>
+  );
+}
+
 function RowMenu({
   onRotate,
   onDelete,
@@ -1010,21 +1236,37 @@ function RowMenu({
 
 function CreateEdgeModal({
   open,
+  deviceOptions,
   onClose,
   onSubmit,
 }: {
   open: boolean;
+  // 设备下拉选项来源。父组件 mount 时拉一次全量 devices，按列表展示
+  // 「设备名 (#id) / 主机名 / IP」。空数组时下拉只含「未选择」一项。
+  deviceOptions: Device[];
   onClose(): void;
-  onSubmit(name: string): Promise<void>;
+  // onSubmit 接受 name + 可选 device_id + 可选 task_name。后端在
+  // create 路径上直接写 device_id + task_name。
+  onSubmit(
+    name: string,
+    deviceID: number | null,
+    taskName: string,
+  ): Promise<void>;
 }) {
   const { tr } = useI18n();
   const [name, setName] = useState('');
+  // 「所属设备」下拉：'__none__' = 不关联（保留 fingerprint 兑底路径），
+  // 数字 = 对应 device.id。空字符串作为初值在 select 中不友好，用 sentinel。
+  const [deviceID, setDeviceID] = useState<string>('__none__');
+  const [taskName, setTaskName] = useState('');
   const [pending, setPending] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) {
       setName('');
+      setDeviceID('__none__');
+      setTaskName('');
       setErr(null);
       setPending(false);
     }
@@ -1037,7 +1279,11 @@ function CreateEdgeModal({
     try {
       // Empty name is allowed; backend will mint a 10-char id as the
       // default label.
-      await onSubmit(name.trim());
+      const trimmedName = name.trim();
+      const trimmedTask = taskName.trim();
+      const parsedDeviceID =
+        deviceID === '__none__' || deviceID === '' ? null : Number(deviceID);
+      await onSubmit(trimmedName, parsedDeviceID, trimmedTask);
     } catch (e) {
       setErr((e as Error).message || tr('创建失败', 'Create failed'));
     } finally {
@@ -1084,12 +1330,62 @@ function CreateEdgeModal({
           if (e.key === 'Enter') void go();
         }}
       />
-      <p className="mt-2 text-[11px] text-zinc-500">
+      <p className="mt-1 text-[11px] text-zinc-500">
         {tr(
           '名称可留空。设备上线后会自动以上报的主机名填入。创建后将一次性显示 secret_key，关闭弹窗后无法再次查看。',
           'Name may be left blank — it auto-fills with the reported hostname on first heartbeat. secret_key is shown once after creation and cannot be retrieved again.',
         )}
       </p>
+
+      {/* 所属设备 + 任务名 — 创建时直接关联到一台主机设备，操作栏
+          「安装」即可直接用该设备的 SSH 凭据一键安装。两者都可空，
+          选「不选择」就走原 fingerprint 兑底路径。 */}
+      <div className="mt-3">
+        <label
+          htmlFor="edge-device"
+          className="mb-1 block text-[11px] text-zinc-500"
+        >
+          {tr('所属设备', 'Host device')}
+        </label>
+        <select
+          id="edge-device"
+          value={deviceID}
+          onChange={(e) => setDeviceID(e.target.value)}
+          className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 focus:border-zinc-600 focus:outline-none"
+        >
+          <option value="__none__">
+            {tr('不选择（agent 上线时按指纹关联）', 'Not selected (link by fingerprint on agent register)')}
+          </option>
+          {deviceOptions.map((d) => (
+            <option key={d.id} value={String(d.id)} className="bg-zinc-900">
+              {d.name || d.hostname || d.ip_address || `host #${d.id}`} (#{d.id})
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <div className="mt-3">
+        <label
+          htmlFor="edge-task-name"
+          className="mb-1 block text-[11px] text-zinc-500"
+        >
+          {tr('任务名', 'Task name')}
+        </label>
+        <input
+          id="edge-task-name"
+          value={taskName}
+          onChange={(e) => setTaskName(e.target.value)}
+          placeholder={tr('如：产品A测试', 'e.g. Product A test')}
+          className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-600 focus:border-zinc-600 focus:outline-none"
+        />
+        <p className="mt-1 text-[11px] text-zinc-500">
+          {tr(
+            '该名称会写入 edge 任务标识，可在 Edges 页面按任务名筛选。',
+            'This name is written into the edge task identifier and can be used to filter on the Edges page.',
+          )}
+        </p>
+      </div>
+
       {err && (
         <div
           role="alert"

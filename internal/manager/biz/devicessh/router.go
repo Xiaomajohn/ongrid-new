@@ -75,20 +75,74 @@ func NewRouter(direct *DirectDialer, tunnel *TunnelDialer, links LinksLookup, ed
 // Pick returns the Dialer appropriate for the call. See struct comment
 // for the decision tree.
 //
+// route forces a transport:
+//   - RouteKindDirect — bypass edge lookup, use direct SSH only.
+//   - RouteKindTunnel — require an online edge for this device; if no
+//     online edge exists the error is ErrTunnelNotImplemented so the
+//     HTTP layer can render a 503.
+//   - RouteKindAuto   — historical behaviour (tunnel when an online
+//     edge exists, fall through to direct otherwise). SFTP / SFTP-only
+//     callers should pass RouteKindAuto.
+//
 // Errors:
 //
 //   - ErrSSHConfigMissing  — direct path is the only option but device
 //     lacks host/user/credential.
+//   - ErrTunnelNotImplemented — caller asked for tunnel but no online
+//     edge exists.
 //   - errDialerUnwired (501) — production wiring forgot the direct
 //     dialer.
 //   - any wrapped DB / transport error from the link or edge lookup.
-func (r *Router) Pick(ctx context.Context, d *device.Device, purpose Purpose) (Dialer, error) {
+func (r *Router) Pick(ctx context.Context, d *device.Device, purpose Purpose, route RouteKind) (Dialer, error) {
 	if r == nil {
 		return nil, fmt.Errorf("%w", errRouterNotConstructed)
 	}
 	if d == nil {
 		return nil, fmt.Errorf("%w: device is nil", ErrSSHConfigMissing)
 	}
+
+	// Direct branch is always callable; Tunnel branch needs the
+	// dialer to be wired.
+	switch route {
+	case RouteKindDirect:
+		if r.direct == nil {
+			return nil, fmt.Errorf("%w: direct dialer nil", errDialerUnwired)
+		}
+		if err := checkDeviceForDirect(d); err != nil {
+			return nil, err
+		}
+		return r.direct, nil
+	case RouteKindTunnel:
+		if r.tunnel == nil {
+			return nil, fmt.Errorf("%w: tunnel dialer nil", errDialerUnwired)
+		}
+		if r.links == nil || r.edges == nil {
+			return nil, fmt.Errorf("%w", ErrTunnelNotImplemented)
+		}
+		edgeID, lerr := r.links.LookupEdgeForDevice(ctx, d.ID)
+		if lerr != nil {
+			if errors.Is(lerr, errs.ErrNotFound) {
+				return nil, fmt.Errorf("%w: device has no edge attached", ErrTunnelNotImplemented)
+			}
+			return nil, fmt.Errorf("devicessh.router: links.LookupEdgeForDevice(%d): %w", d.ID, lerr)
+		}
+		if edgeID == 0 {
+			return nil, fmt.Errorf("%w: device has no edge attached", ErrTunnelNotImplemented)
+		}
+		status, sErr := r.edges.Get(ctx, edgeID)
+		if sErr != nil {
+			if errors.Is(sErr, errs.ErrNotFound) {
+				return nil, fmt.Errorf("%w: edge vanished mid-flight", ErrTunnelNotImplemented)
+			}
+			return nil, fmt.Errorf("devicessh.router: edges.Get(%d): %w", edgeID, sErr)
+		}
+		if status != edgemodel.StatusOnline {
+			return nil, fmt.Errorf("%w: edge %d status=%s", ErrTunnelNotImplemented, edgeID, status)
+		}
+		return r.tunnel, nil
+	}
+
+	// RouteKindAuto — historical decision tree follows.
 	if r.direct == nil {
 		return nil, fmt.Errorf("%w: direct dialer nil", errDialerUnwired)
 	}
@@ -126,10 +180,14 @@ func (r *Router) Pick(ctx context.Context, d *device.Device, purpose Purpose) (D
 // Used by the SFTP service to start an sftp subsystem without paying for
 // a separate tunnel/session dance.
 //
+// route follows the same semantics as Pick. SFTP callers pass
+// RouteKindAuto so the historical decision tree wins; shell callers
+// that need to lock down a transport should request it explicitly.
+//
 // Returns the same error envelopes as Pick. The caller is responsible
 // for Close()ing the returned client.
-func (r *Router) MustConnect(ctx context.Context, d *device.Device, purpose Purpose) (*ssh.Client, error) {
-	dialer, err := r.Pick(ctx, d, purpose)
+func (r *Router) MustConnect(ctx context.Context, d *device.Device, purpose Purpose, route RouteKind) (*ssh.Client, error) {
+	dialer, err := r.Pick(ctx, d, purpose, route)
 	if err != nil {
 		return nil, err
 	}

@@ -63,26 +63,27 @@ SERVER_HTTP_ADDR=""
 # 时由 operator 直接在命令行给。空字符串表示不设置，edge 端 HostInfo.TaskName
 # 留空，manager 端 SetTaskName 不会覆盖已有值。
 TASK_NAME=""
-# --prefix=PATH collapses every ongrid-edge install path (binary, plugin
-# binaries, env file, state dir, log dir) under one root. Default
-# /mnt/data/toos-temp keeps everything together so the operator can wipe
-# the whole install by rm -rf /mnt/data/toos-temp/{bin,lib,etc,var}. All
-# other path constants below are derived from this single knob.
-PREFIX="/mnt/data/toos-temp"
+# --prefix=PATH 给出一个 operator 指定的根目录，edge 安装路径全部嵌套在
+# ${PREFIX}/ongrid-edge/ 下面，作为单一命名空间（避免污染 PREFIX 根目录里
+# 的其他工具）。默认 /mnt/data/tools-temp，operator 只需清理整个命名空间：
+#   rm -rf /mnt/data/tools-temp/ongrid-edge
+# 所有其他路径常量都从 EDGE_ROOT=${PREFIX}/ongrid-edge 派生而来。
+PREFIX="/mnt/data/tools-temp"
+EDGE_ROOT="${PREFIX}/ongrid-edge"
 
-# Layout (matches the original /usr/local{,/lib}/..., /etc/...,
-# /var/lib/..., /var/log/... split, just under PREFIX):
-#   PREFIX/bin/                  ongrid-edge
-#   PREFIX/lib/ongrid-edge/      plugin binaries + apply-pending-upgrade.sh
-#   PREFIX/etc/ongrid-edge/      ongrid-edge.env
-#   PREFIX/var/lib/ongrid-edge/  state, plugin work, upgrade stage
-#   PREFIX/var/log/ongrid-edge/  logs
-BIN_DIR="${PREFIX}/bin"
-LIB_DIR="${PREFIX}/lib/ongrid-edge"
-ENV_DIR="${PREFIX}/etc/ongrid-edge"
+# Layout（嵌套在 PREFIX/ongrid-edge/ 下，与原本 /usr/local{,/lib}/...、
+# /etc/...、/var/lib/...、/var/log/... 的语义一致）：
+#   EDGE_ROOT/bin/                  ongrid-edge
+#   EDGE_ROOT/lib/ongrid-edge/      plugin binaries + apply-pending-upgrade.sh
+#   EDGE_ROOT/etc/ongrid-edge/      ongrid-edge.env
+#   EDGE_ROOT/var/lib/ongrid-edge/  state, plugin work, upgrade stage
+#   EDGE_ROOT/var/log/ongrid-edge/  logs
+BIN_DIR="${EDGE_ROOT}/bin"
+LIB_DIR="${EDGE_ROOT}/lib/ongrid-edge"
+ENV_DIR="${EDGE_ROOT}/etc/ongrid-edge"
 ENV_FILE="${ENV_DIR}/ongrid-edge.env"
-STATE_DIR="${PREFIX}/var/lib/ongrid-edge"
-LOG_DIR="${PREFIX}/var/log/ongrid-edge"
+STATE_DIR="${EDGE_ROOT}/var/lib/ongrid-edge"
+LOG_DIR="${EDGE_ROOT}/var/log/ongrid-edge"
 APPLY_HOOK="${LIB_DIR}/apply-pending-upgrade.sh"
 
 SERVICE_FILE="/etc/systemd/system/ongrid-edge.service"
@@ -110,7 +111,7 @@ Required (install):
   --server-http-addr=HOST[:PORT]   http endpoint, e.g. ongrid.example.com:8443
 
 Other:
-  --prefix=PATH                     install root (default /mnt/data/toos-temp);
+  --prefix=PATH                     install root (default /mnt/data/tools-temp);
                                     consolidates bin/lib/etc/var under PATH
   --task-name=NAME                  监控任务名（写入 env file，agent 启动后上报给 manager）
   --uninstall                      stop + remove ongrid-edge (keeps PREFIX/var/log)
@@ -137,12 +138,13 @@ for arg in "$@"; do
 done
 
 # Re-derive paths after --prefix may have overridden the default.
-BIN_DIR="${PREFIX}/bin"
-LIB_DIR="${PREFIX}/lib/ongrid-edge"
-ENV_DIR="${PREFIX}/etc/ongrid-edge"
+EDGE_ROOT="${PREFIX}/ongrid-edge"
+BIN_DIR="${EDGE_ROOT}/bin"
+LIB_DIR="${EDGE_ROOT}/lib/ongrid-edge"
+ENV_DIR="${EDGE_ROOT}/etc/ongrid-edge"
 ENV_FILE="${ENV_DIR}/ongrid-edge.env"
-STATE_DIR="${PREFIX}/var/lib/ongrid-edge"
-LOG_DIR="${PREFIX}/var/log/ongrid-edge"
+STATE_DIR="${EDGE_ROOT}/var/lib/ongrid-edge"
+LOG_DIR="${EDGE_ROOT}/var/log/ongrid-edge"
 APPLY_HOOK="${LIB_DIR}/apply-pending-upgrade.sh"
 
 # --- root check --------------------------------------------------------------
@@ -177,7 +179,7 @@ if [[ $UNINSTALL -eq 1 ]]; then
     rm -f "$SERVICE_FILE" "$UPGRADE_SERVICE_FILE" "${BIN_DIR}/ongrid-edge"
     rm -rf "$ENV_DIR"
     systemctl daemon-reload || true
-    log_ok "uninstalled (logs under $LOG_DIR preserved; full wipe: rm -rf ${PREFIX})"
+    log_ok "uninstalled (logs under $LOG_DIR preserved; full wipe: rm -rf ${EDGE_ROOT})"
     exit 0
 fi
 
@@ -272,7 +274,7 @@ rm -f "$TMP_HOOK"
 #
 # The agent's plugin supervisor runs promtail (logs), node_exporter
 # (hostmetrics), process_exporter (procmetrics), otelcol-contrib (traces),
-# and database exporters (databasemetrics)
+# auditbeat (audit) and database exporters (databasemetrics)
 # as subprocesses, expecting them under ${LIB_DIR}. The old curl-pipe
 # installer fetched ONLY the agent binary, so every edge enrolled via the UI
 # one-liner came up with an empty plugin dir → all plugins "crashed: binary
@@ -280,7 +282,10 @@ rm -f "$TMP_HOOK"
 # an extracted tarball, did install them — but nobody uses that for
 # enrollment.) Fetch them here from the same /edge/ static path the agent
 # binary came from. Best-effort per binary: a missing one only disables its
-# plugin, surfaced loudly in the self-check below.
+# plugin, surfaced loudly in the self-check below. auditbeat is offline-only
+# (Elastic closed-source) and only exists when an operator staged it into
+# the tarball / nginx path; the curl-pipe installer tolerates its absence so
+# dev boxes without auditbeat still get the other plugins installed.
 fetch_plugin_bin() {
     local name="$1" dest="${LIB_DIR}/$1"
     local url="https://${SERVER_HTTP_ADDR}/edge/${name}-${OS}-${ARCH}"
@@ -294,7 +299,7 @@ fetch_plugin_bin() {
     fi
     rm -f "$tmp"
 }
-for pbin in promtail node_exporter process_exporter otelcol-contrib mysqld_exporter postgres_exporter redis_exporter mongodb_exporter; do
+for pbin in promtail node_exporter process_exporter otelcol-contrib mysqld_exporter postgres_exporter redis_exporter mongodb_exporter auditbeat; do
     fetch_plugin_bin "$pbin"
 done
 
@@ -381,7 +386,7 @@ chmod 0755 "$STATE_DIR"
 cat > "$UPGRADE_SERVICE_FILE" <<EOF
 [Unit]
 Description=ongrid edge pending-upgrade apply (root, pre-start)
-# ${APPLY_HOOK} — rendered from --prefix (default /mnt/data/toos-temp).
+# ${APPLY_HOOK} — rendered from --prefix (default /mnt/data/tools-temp).
 Documentation=file://${APPLY_HOOK}
 Before=ongrid-edge.service
 After=local-fs.target
@@ -510,12 +515,15 @@ printf '\n'
 echo
 echo "${C_BOLD}${C_CYAN}--- self-check ---${C_RESET}"
 SELFCHECK_FAIL=0
-for tool in promtail otelcol-contrib node_exporter process_exporter mysqld_exporter postgres_exporter redis_exporter mongodb_exporter; do
+for tool in promtail otelcol-contrib node_exporter process_exporter mysqld_exporter postgres_exporter redis_exporter mongodb_exporter auditbeat; do
     if [[ -x "${LIB_DIR}/${tool}" ]]; then
         log_ok "plugin binary present: ${tool}"
     else
-        log_error "plugin binary MISSING: ${LIB_DIR}/${tool} — that plugin will not run"
-        SELFCHECK_FAIL=1
+        log_warn "plugin binary missing: ${LIB_DIR}/${tool} — that plugin will not run (auditbeat is optional; rest surface a hard problem)"
+        # auditbeat 缺席不阻断 self-check（离线资源包可能不含），其他 plugin 缺席计 hard-fail
+        if [[ "${tool}" != "auditbeat" ]]; then
+            SELFCHECK_FAIL=1
+        fi
     fi
 done
 # State dir must exist and be writable by the service user. On systemd < 235

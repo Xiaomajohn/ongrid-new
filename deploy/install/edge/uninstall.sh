@@ -11,8 +11,9 @@
 
 set -euo pipefail
 
-# --prefix=PATH mirrors install.sh / install-edge.sh (default /mnt/data/toos-temp).
-PREFIX="${ONGRID_EDGE_PREFIX:-/mnt/data/toos-temp}"
+# --prefix=PATH 与 install.sh / install-edge.sh 一致（默认 /mnt/data/tools-temp）。
+# edge 的所有路径嵌套在 ${PREFIX}/ongrid-edge/ 下面，卸载时同样依 PREFIX 拼接。
+PREFIX="${ONGRID_EDGE_PREFIX:-/mnt/data/tools-temp}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --prefix=*) PREFIX="${1#*=}"; shift ;;
@@ -21,7 +22,7 @@ while [[ $# -gt 0 ]]; do
 Usage: sudo $0 [OPTIONS]
 
 Options:
-  --prefix=PATH   Install root to uninstall (default /mnt/data/toos-temp).
+  --prefix=PATH   Install root to uninstall (default /mnt/data/tools-temp).
                   Must match the --prefix used at install time; otherwise
                   the wipe misses the actual on-disk install.
   -h, --help      Show this help.
@@ -31,11 +32,13 @@ EOF
     esac
 done
 
-BIN_DIR="${PREFIX}/bin"
-LIB_DIR="${PREFIX}/lib/ongrid-edge"
-ENV_DIR="${PREFIX}/etc/ongrid-edge"
-LOG_DIR="${PREFIX}/var/log/ongrid-edge"
-STATE_DIR="${PREFIX}/var/lib/ongrid-edge"
+# 所有路径从 EDGE_ROOT=${PREFIX}/ongrid-edge 派生，与 install.sh / install-edge.sh 保持一致。
+EDGE_ROOT="${PREFIX}/ongrid-edge"
+BIN_DIR="${EDGE_ROOT}/bin"
+LIB_DIR="${EDGE_ROOT}/lib/ongrid-edge"
+ENV_DIR="${EDGE_ROOT}/etc/ongrid-edge"
+LOG_DIR="${EDGE_ROOT}/var/log/ongrid-edge"
+STATE_DIR="${EDGE_ROOT}/var/lib/ongrid-edge"
 SERVICE_FILE="/etc/systemd/system/ongrid-edge.service"
 UPGRADE_SERVICE_FILE="/etc/systemd/system/ongrid-edge-upgrade.service"
 SERVICE_USER="ongrid-edge"
@@ -65,9 +68,9 @@ systemctl disable ongrid-edge ongrid-edge-upgrade ongrid-node-exporter ongrid-pr
 # subprocess plugins by binary path. Matches every plugin (promtail,
 # otelcol-contrib, node_exporter, process_exporter, ...) without
 # enumerating them. The path is prefix-bound; for the default
-# --prefix=/mnt/data/toos-temp it becomes:
-#   /mnt/data/toos-temp/bin/ongrid-edge
-#   /mnt/data/toos-temp/lib/ongrid-edge/...
+# --prefix=/mnt/data/tools-temp it becomes:
+#   /mnt/data/tools-temp/bin/ongrid-edge
+#   /mnt/data/tools-temp/lib/ongrid-edge/...
 pkill -9 -f "${BIN_DIR}/ongrid-edge|${LIB_DIR}/" 2>/dev/null || true
 
 rm -f "$SERVICE_FILE" "$UPGRADE_SERVICE_FILE" "${BIN_DIR}/ongrid-edge"
@@ -85,4 +88,4 @@ if id -u "$SERVICE_USER" >/dev/null 2>&1; then
     userdel "$SERVICE_USER" 2>/dev/null || true
 fi
 
-echo "[OK] ongrid-edge uninstalled (install root was $PREFIX; full wipe: rm -rf $PREFIX)"
+echo "[OK] ongrid-edge uninstalled (install root was $EDGE_ROOT; full wipe: rm -rf $EDGE_ROOT)"

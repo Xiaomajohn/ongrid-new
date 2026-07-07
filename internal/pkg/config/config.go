@@ -245,6 +245,15 @@ type FrontierClientConfig struct {
 	// broker — features that require fbClient (webssh, edge reverse
 	// calls) error at call site rather than failing manager startup.
 	Disabled bool
+	// Warmup 是 frontierbound.Install 完成后、HTTP server 启动前的一段
+	// 静默等待时间。fbsvc.NewService 内部走 client.NewRetryEndWithDialer，
+	// Install 的 9 个 c.Register 内部把 register 包塞进 writeInCh 后等
+	// broker ACK，但 ACK 跟 broker 端 service 表落地之间存在可观测 race：
+	// 13:07 启动后 7 分钟内 broker 端 service 表只对 register_edge 可见，
+	// push/heartbeat 报 record not found。给 5s 让 broker 端把 service
+	// 表填全是当前已知的最低成本止血；env 化后 e2e / staging 可调 0。
+	// env: ONGRID_FRONTIER_WARMUP; default 5s; <=0 关闭。
+	Warmup time.Duration
 }
 
 // DBConfig selects the backend (MySQL by default, SQLite opt-in) and
@@ -422,6 +431,7 @@ func Load() (*Config, error) {
 	c.FrontierClient.Addr = getEnv("ONGRID_FRONTIER_ADDR", "frontier:40011")
 	c.FrontierClient.ServiceName = getEnv("ONGRID_FRONTIER_SERVICE_NAME", "ongrid-manager")
 	c.FrontierClient.Disabled = getEnvBool("ONGRID_FRONTIER_DISABLED", false)
+	c.FrontierClient.Warmup = getEnvDuration("ONGRID_FRONTIER_WARMUP", 5*time.Second)
 
 	c.Prom.Enabled = getEnvBool("ONGRID_PROM_ENABLED", false)
 	c.Prom.URL = getEnv("ONGRID_PROM_URL", "http://prometheus:9090")

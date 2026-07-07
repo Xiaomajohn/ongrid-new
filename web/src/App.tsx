@@ -13,6 +13,10 @@ const EdgeDetailPage = lazy(() => import('@/pages/EdgeDetail'));
 // DeviceShellPage，沿用 Prom label device_id 完成 on-grid 反向连接。
 const HostsPage = lazy(() => import('@/pages/Hosts'));
 const HostDetailPage = lazy(() => import('@/pages/HostDetail'));
+// MonitorDeviceDetail = host 视角下的「监控设备详情」：从 HostDetail 拆出来的
+// 监控维度（指标 / 探针 / 元数据）独立成一条 /hosts/:hostId/monitor 子路由，
+// 使 HostDetail 恢复为只承载主机视角（basic / topology / meta）的纯粹页面。
+const MonitorDeviceDetailPage = lazy(() => import('@/pages/MonitorDeviceDetail'));
 const DeviceFilesPage = lazy(() => import('@/pages/DeviceFiles'));
 const DeviceShellPage = lazy(() => import('@/pages/DeviceShell'));
 const DashboardPage = lazy(() => import('@/pages/Dashboard'));
@@ -106,13 +110,26 @@ export default function App() {
         <Route path="/devices" element={<EdgesPage />} />
         <Route path="/devices/:edgeId" element={<EdgeDetailPage />} />
         {/* WebSSH: deviceId is the Prom-label device_id, not the edge.id.
-            See DeviceShell.tsx for the rationale. */}
+            See DeviceShell.tsx for the rationale. /shell walks the
+            tunnel-via-edge transport (monitor-page flow); /shell-direct
+            forces direct SSH from manager to the device's IP (host-page
+            flow). Both reuse DeviceShellPage — the page reads its own
+            URL and passes the route hint down to the WS layer. */}
         <Route path="/devices/:deviceId/shell" element={<DeviceShellPage />} />
+        <Route path="/devices/:deviceId/shell-direct" element={<DeviceShellPage />} />
         {/* 实体设备视角的 /hosts 路由：与 /devices（探针视角）并列但查询的是 Device 实体。
-            /hosts/:hostId/shell 同样走 DeviceShellPage，仅 path 参数语义从 deviceId → hostId。 */}
+            /hosts/:hostId/shell 同 DeviceShellPage，沿用 Prom label device_id
+            完成 on-grid 反向连接。/hosts/:hostId/shell-direct 强制走 direct，
+            是 host 页默认入口（设备页连接也是这种语义）。 */}
         <Route path="/hosts" element={<HostsPage />} />
         <Route path="/hosts/:hostId" element={<HostDetailPage />} />
+        {/* 监控设备详情：同 hostId 下挂在 /monitor 子路径上。从 HostDetail
+            拆出指标 + 探针后形成显式「主机视角 ↔ 监控视角」路由对。
+            HostDetail 头部已加「监控设备」按钮跳到这里，这里头部再加
+            「主机详情」回去，让运维在两页之间一眼能找到出口。 */}
+        <Route path="/hosts/:hostId/monitor" element={<MonitorDeviceDetailPage />} />
         <Route path="/hosts/:hostId/shell" element={<DeviceShellPage />} />
+        <Route path="/hosts/:hostId/shell-direct" element={<DeviceShellPage />} />
         {/* SFTP file browser lives under /devices/:id/files (the device-id
             path mirrors /devices/:id/shell so it's reachable both from the
             Hosts list ("文件" button) and any direct bookmark). */}

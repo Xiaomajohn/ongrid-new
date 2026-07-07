@@ -94,7 +94,7 @@ func (s *SFTPService) withSFTP(
 	if s.Router == nil {
 		return nil, nil, fmt.Errorf("devicessh: sftp service: router not wired")
 	}
-	client, err := s.Router.MustConnect(ctx, d, purpose)
+	client, err := s.Router.MustConnect(ctx, d, purpose, RouteKindAuto)
 	if err != nil {
 		return nil, nil, err
 	}

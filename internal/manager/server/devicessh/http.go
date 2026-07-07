@@ -47,12 +47,23 @@ type DevicesshService interface {
 // resolves them against the stored credentials plus an optional
 // ad-hoc override (the SPA sends overrides when the operator wants
 // a one-off user without rotating the stored credentials).
+//
+// Route lets the handler pin a transport (direct vs tunnel) so we can
+// split the WebSSH surface into two endpoints with predictable
+// semantics: /shell forces tunnel (used by monitor page), /shell-direct
+// forces direct SSH (used by hosts page). See Register.
 type ShellOpts struct {
 	Cols    int
 	Rows    int
 	Term    string
 	SSHUser string
 	SSHPass string
+	// Route is a string-typed transport hint that the wiring adapter
+	// converts to biz/devicessh.RouteKind. "" means "let the biz
+	// layer pick" (RouteKindAuto). "direct" / "tunnel" pin the
+	// transport. Defined as a string here (rather than reusing the
+	// biz enum) so this server file stays free of biz-import cycles.
+	Route string
 }
 
 // ShellHandle is the minimal contract the HTTP layer pumps the
@@ -110,12 +121,19 @@ func NewShellHandler(svc DevicesshService, log *slog.Logger) *ShellHandler {
 	}
 }
 
-// Register attaches the WS shell route on r. Single endpoint, kept
-// out of the (auth-required) group so a future public-tenant mode
-// can decorate it with its own authz; today the manager's existing
-// auth.Middleware wraps the whole /api/* group.
+// Register attaches the WS shell routes on r. Two endpoints are wired
+// in one call so the handler stays a single object:
+//
+//	/v1/devices/{id}/shell        — tunnel-via-edge flow (Monitor page)
+//	/v1/devices/{id}/shell-direct — direct SSH from manager to the
+//	                                 device's IP (Hosts page)
+//
+// A future public-tenant mode can decorate either with its own authz;
+// today the manager's existing auth.Middleware wraps the whole
+// /api/* group.
 func (h *ShellHandler) Register(r chi.Router) {
-	r.Get("/v1/devices/{id}/shell", h.handle)
+	r.Get("/v1/devices/{id}/shell", h.handleTunnel)
+	r.Get("/v1/devices/{id}/shell-direct", h.handleDirect)
 }
 
 // --- wire frames ---
@@ -142,7 +160,7 @@ type ctlFrame struct {
 // handle is the WS upgrade entry point. Mirrors the existing
 // manager/server/webshell.openShell flow but delegates the
 // device→edge→ssh plumbing to the A3-injected DevicesshService.
-func (h *ShellHandler) handle(w http.ResponseWriter, r *http.Request) {
+func (h *ShellHandler) handle(w http.ResponseWriter, r *http.Request, route string) {
 	tenant, ok := tenantctx.From(r.Context())
 	if !ok {
 		writeErr(w, errs.ErrUnauthorized)
@@ -204,6 +222,7 @@ func (h *ShellHandler) handle(w http.ResponseWriter, r *http.Request) {
 		Term:    term,
 		SSHUser: open.SSHUser,
 		SSHPass: open.SSHPass,
+		Route:   route,
 	})
 	if err != nil {
 		_ = conn.WriteMessage(websocket.TextMessage, jsonMust(map[string]any{
@@ -225,6 +244,22 @@ func (h *ShellHandler) handle(w http.ResponseWriter, r *http.Request) {
 	_ = conn.WriteJSON(map[string]any{"type": "ready"})
 
 	pumpAndTeardown(conn, handle, h.log)
+}
+
+// handleTunnel is the monitor-page WS endpoint. Forces the tunnel
+// transport (route must walk the device's online edge); if no online
+// edge exists the biz layer returns ErrTunnelNotImplemented and the
+// SPA shows "edge offline, retry later".
+func (h *ShellHandler) handleTunnel(w http.ResponseWriter, r *http.Request) {
+	h.handle(w, r, "tunnel")
+}
+
+// handleDirect is the host-page WS endpoint. Forces direct SSH from
+// the manager to the device's IP (route ignores edge status). If the
+// device row lacks ssh_host / ssh_user / ssh_password-or-key the biz
+// layer returns ErrSSHConfigMissing (HTTP 428 Precondition Required).
+func (h *ShellHandler) handleDirect(w http.ResponseWriter, r *http.Request) {
+	h.handle(w, r, "direct")
 }
 
 // pumpAndTeardown runs the bidirectional forwarder. Mirrors the

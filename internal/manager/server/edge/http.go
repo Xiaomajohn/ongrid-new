@@ -39,7 +39,7 @@ const roleAdmin = "admin"
 // exists so tests can swap in a fake without constructing a full biz stack;
 // *service/edge.Service satisfies it by structural typing.
 type EdgeService interface {
-	Create(ctx context.Context, name string, createdBy *uint64) (*biz.CreateResult, error)
+	Create(ctx context.Context, name string, createdBy *uint64, opts ...biz.CreateOption) (*biz.CreateResult, error)
 	List(ctx context.Context, f biz.ListFilter) ([]*model.Edge, error)
 	Get(ctx context.Context, id uint64) (*model.Edge, error)
 	Delete(ctx context.Context, id uint64) error
@@ -322,6 +322,13 @@ func (h *Handler) requireAdmin(next http.Handler) http.Handler {
 
 type createReq struct {
 	Name string `json:"name"`
+	// 所属设备 ID（可选）。传了就立即在 edge 行写 device_id + edge_devices
+	// 关联 —— 不再等 agent register 阶段 fingerprint upsert。0 / 缺失
+	// 表示“暂不关联”，保持原有 fingerprint 流程。
+	DeviceID uint64 `json:"device_id"`
+	// 任务名（可选）。传了就直接写 edge.task_name，不再依赖 install
+	// 路径的 BindEdgeFromAccessKey 补写。trim 后空串等同于未传。
+	TaskName string `json:"task_name"`
 }
 
 type createResp struct {
@@ -398,7 +405,17 @@ func (h *Handler) createEdge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	uid := t.UserID
-	res, err := h.svc.Create(r.Context(), req.Name, &uid)
+	// 透传“所属设备 + 任务名”选项给 biz.Usecase.Create：device_id > 0
+	// 会立刻 SetDeviceID + edge_devices Link，task_name 会直接写
+	// edge.task_name。两者都可选，缺失 / 为 0 / 空串都是 no-op。
+	var createOpts []biz.CreateOption
+	if req.DeviceID > 0 {
+		createOpts = append(createOpts, biz.WithDeviceID(req.DeviceID))
+	}
+	if t := strings.TrimSpace(req.TaskName); t != "" {
+		createOpts = append(createOpts, biz.WithTaskName(t))
+	}
+	res, err := h.svc.Create(r.Context(), req.Name, &uid, createOpts...)
 	if err != nil {
 		writeErr(w, err)
 		return

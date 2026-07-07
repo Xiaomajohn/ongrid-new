@@ -46,9 +46,10 @@ export type Edge = {
   // its most recent register_edge handshake. Empty string means the agent
   // declined to report (e.g. pre-introduction binary).
   agent_version?: string;
-  // 任务名 — 安装时由 operator 在 InstallEdgeModal 输入，后端落地到 edge
-  // 行。空字符串表示后端预存的数据未携带该字段；UI 渲染为空时显示 —。
-  // 后端新增精准查询参数 name / hostname / ip 的依据字段之一。
+  // 任务名 — 由「新建 Edge」流程在 CreateEdgeModal 填入并直接写入
+  // edge.task_name；「安装 Edge」弹窗不再二次询问。空字符串表示创建时未携
+  // 带该字段；UI 渲染为空时显示 —。后端新增精准查询参数 name / hostname /
+  // ip 的依据字段之一。
   task_name?: string;
 };
 
@@ -162,8 +163,21 @@ export function getEdge(id: string | number) {
   return request<Edge>('GET', `/edges/${encodeURIComponent(String(id))}`);
 }
 
-export function createEdge(input: { name: string }) {
-  return request<CreateEdgeResponse>('POST', '/edges', input);
+export function createEdge(input: {
+  name: string;
+  // 所属设备 ID（可选）。传了就创建时直接写 edge.device_id + edge_devices
+  // 关联，不再等 agent register 指纹 upsert。0 / undefined = 不关联，
+  // 保留 fingerprint 兑底路径。
+  device_id?: number;
+  // 任务名（可选）。直接写 edge.task_name，不再依赖 install 流程的
+  // BindEdgeFromAccessKey 补写。空串等同于不传。
+  task_name?: string;
+}) {
+  return request<CreateEdgeResponse>('POST', '/edges', {
+    name: input.name,
+    device_id: input.device_id,
+    task_name: input.task_name,
+  });
 }
 
 export function deleteEdge(id: string | number) {

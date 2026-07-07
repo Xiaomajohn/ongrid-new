@@ -24,28 +24,30 @@ trap 'log_error "install-edge failed at line $LINENO"' ERR
 
 SERVICE_USER=ongrid-edge
 SERVICE_GROUP=ongrid-edge
-# --prefix=PATH collapses every ongrid-edge install path (binary, plugin
-# binaries, env file, state dir, log dir) under one root. Default
-# /mnt/data/toos-temp keeps everything together so the operator can wipe
-# the whole install by rm -rf /mnt/data/toos-temp/{bin,lib,etc,var}.
-PREFIX="${ONGRID_EDGE_PREFIX:-/mnt/data/toos-temp}"
-# Layout (matches the original /usr/local{,/lib}/..., /etc/...,
-# /var/lib/..., /var/log/... split, just under PREFIX):
-#   PREFIX/bin/                  ongrid-edge
-#   PREFIX/lib/ongrid-edge/      plugin binaries + apply-pending-upgrade.sh
-#   PREFIX/etc/ongrid-edge/      ongrid-edge.env
-#   PREFIX/var/lib/ongrid-edge/  state, plugin work, upgrade stage
-#   PREFIX/var/log/ongrid-edge/  logs
-BIN_DEST="${PREFIX}/bin/ongrid-edge"
-BIN_DIR="${PREFIX}/bin"
-PLUGIN_BIN_DIR="${PREFIX}/lib/ongrid-edge"   # bundled plugin binaries (promtail, etc.)
-STATE_DIR="${PREFIX}/var/lib/ongrid-edge"    # agent state root (ReadWritePaths=)
-PLUGIN_WORK_DIR="${STATE_DIR}/plugins"       # rendered plugin configs + subprocess logs
-CONFIG_DIR="${PREFIX}/etc/ongrid-edge"
+# --prefix=PATH 给出一个 operator 指定的根目录，edge 安装路径全部嵌套在
+# ${PREFIX}/ongrid-edge/ 下面，作为单一命名空间（避免污染 PREFIX 根目录里
+# 的其他工具）。默认 /mnt/data/tools-temp，operator 只需清理整个命名空间：
+#   rm -rf /mnt/data/tools-temp/ongrid-edge
+# 所有路径从 EDGE_ROOT=${PREFIX}/ongrid-edge 派生而来。
+PREFIX="${ONGRID_EDGE_PREFIX:-/mnt/data/tools-temp}"
+EDGE_ROOT="${PREFIX}/ongrid-edge"
+# Layout（嵌套在 EDGE_ROOT/ 下，与原本 /usr/local{,/lib}/...、
+# /etc/...、/var/lib/...、/var/log/... 的语义一致）：
+#   EDGE_ROOT/bin/                  ongrid-edge
+#   EDGE_ROOT/lib/ongrid-edge/      plugin binaries + apply-pending-upgrade.sh
+#   EDGE_ROOT/etc/ongrid-edge/      ongrid-edge.env
+#   EDGE_ROOT/var/lib/ongrid-edge/  state, plugin work, upgrade stage
+#   EDGE_ROOT/var/log/ongrid-edge/  logs
+BIN_DEST="${EDGE_ROOT}/bin/ongrid-edge"
+BIN_DIR="${EDGE_ROOT}/bin"
+PLUGIN_BIN_DIR="${EDGE_ROOT}/lib/ongrid-edge"   # bundled plugin binaries (promtail, etc.)
+STATE_DIR="${EDGE_ROOT}/var/lib/ongrid-edge"    # agent state root (ReadWritePaths=)
+PLUGIN_WORK_DIR="${STATE_DIR}/plugins"          # rendered plugin configs + subprocess logs
+CONFIG_DIR="${EDGE_ROOT}/etc/ongrid-edge"
 ENV_FILE="${CONFIG_DIR}/ongrid-edge.env"
 UNIT_FILE=/etc/systemd/system/ongrid-edge.service
 UPGRADE_UNIT_FILE=/etc/systemd/system/ongrid-edge-upgrade.service
-LOG_DIR="${PREFIX}/var/log/ongrid-edge"
+LOG_DIR="${EDGE_ROOT}/var/log/ongrid-edge"
 APPLY_HOOK="${PLUGIN_BIN_DIR}/apply-pending-upgrade.sh"
 
 UNINSTALL=0
@@ -59,7 +61,7 @@ Usage: sudo ./install-edge.sh [OPTIONS]
 
 Options:
   --uninstall   Stop/disable service and remove files.
-  --prefix=PATH Install root (default /mnt/data/toos-temp); collapses
+  --prefix=PATH Install root (default /mnt/data/tools-temp); collapses
                 bin/lib/etc/var under PATH.
   -h, --help    Show this help.
 
@@ -74,14 +76,15 @@ EOF
     esac
 done
 # Re-derive paths so --prefix applies after arg parsing.
-BIN_DEST="${PREFIX}/bin/ongrid-edge"
-BIN_DIR="${PREFIX}/bin"
-PLUGIN_BIN_DIR="${PREFIX}/lib/ongrid-edge"
-STATE_DIR="${PREFIX}/var/lib/ongrid-edge"
+EDGE_ROOT="${PREFIX}/ongrid-edge"
+BIN_DEST="${EDGE_ROOT}/bin/ongrid-edge"
+BIN_DIR="${EDGE_ROOT}/bin"
+PLUGIN_BIN_DIR="${EDGE_ROOT}/lib/ongrid-edge"
+STATE_DIR="${EDGE_ROOT}/var/lib/ongrid-edge"
 PLUGIN_WORK_DIR="${STATE_DIR}/plugins"
-CONFIG_DIR="${PREFIX}/etc/ongrid-edge"
+CONFIG_DIR="${EDGE_ROOT}/etc/ongrid-edge"
 ENV_FILE="${CONFIG_DIR}/ongrid-edge.env"
-LOG_DIR="${PREFIX}/var/log/ongrid-edge"
+LOG_DIR="${EDGE_ROOT}/var/log/ongrid-edge"
 APPLY_HOOK="${PLUGIN_BIN_DIR}/apply-pending-upgrade.sh"
 
 if [[ $EUID -ne 0 ]]; then
@@ -99,7 +102,7 @@ if [[ $UNINSTALL -eq 1 ]]; then
     rm -f "$BIN_DEST"
     rm -rf "$CONFIG_DIR"
     # keep logs in $LOG_DIR for post-mortem; operator can rm -rf if desired.
-    log_info "ongrid-edge uninstalled (logs under $LOG_DIR preserved; full wipe: rm -rf ${PREFIX})"
+    log_info "ongrid-edge uninstalled (logs under $LOG_DIR preserved; full wipe: rm -rf ${EDGE_ROOT})"
     exit 0
 fi
 
@@ -477,5 +480,5 @@ echo "Logs:         journalctl -u ongrid-edge -f"
 echo "Cloud addr:   $ONGRID_CLOUD_ADDR"
 echo ""
 echo "Uninstall:    sudo $0 --uninstall --prefix=$PREFIX"
-echo "Full wipe:    sudo rm -rf $PREFIX"
+echo "Full wipe:    sudo rm -rf $EDGE_ROOT"
 echo ""

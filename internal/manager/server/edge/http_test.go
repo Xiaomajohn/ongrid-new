@@ -87,6 +87,9 @@ func (d *fakeDeviceRepo) ClearSSHCredentialsField(context.Context, uint64, strin
 func (d *fakeDeviceRepo) SetSSHCredentialsIAW(context.Context, uint64, devicebiz.SSHCredentialsIAW) error {
 	return nil
 }
+// TouchSSHSuccess records an SSH success on a device. Also exposed on
+// the device server's tests (not just the edge server), so the edge
+// handler tests can wire a stub.
 func (d *fakeDeviceRepo) TouchSSHSuccess(context.Context, uint64) error    { return nil }
 func (d *fakeDeviceRepo) TouchSSHError(context.Context, uint64, string) error {
 	return nil
@@ -105,6 +108,27 @@ func (d *fakeDeviceRepo) Delete(_ context.Context, id uint64) error {
 		return errs.ErrNotFound
 	}
 	delete(d.byID, id)
+	return nil
+}
+
+// HardDelete is the un-recoverable path; test fake drops the row the
+// same way the soft path does — the test surface doesn't model
+// soft-delete state.
+func (d *fakeDeviceRepo) HardDelete(_ context.Context, id uint64) error {
+	if _, ok := d.byID[id]; !ok {
+		return errs.ErrNotFound
+	}
+	delete(d.byID, id)
+	return nil
+}
+
+// Restore is a no-op for the test fake (no soft-delete state modelled);
+// returns ErrNotFound for ids the test didn't seed, matching the
+// production behaviour for "id never existed".
+func (d *fakeDeviceRepo) Restore(_ context.Context, id uint64) error {
+	if _, ok := d.byID[id]; !ok {
+		return errs.ErrNotFound
+	}
 	return nil
 }
 
@@ -136,7 +160,7 @@ type fakeSvc struct {
 	lastRolesNames  []string
 }
 
-func (f *fakeSvc) Create(_ context.Context, _ string, createdBy *uint64) (*biz.CreateResult, error) {
+func (f *fakeSvc) Create(_ context.Context, _ string, createdBy *uint64, _ ...biz.CreateOption) (*biz.CreateResult, error) {
 	f.lastCreatedBy = createdBy
 	return f.createResp, f.createErr
 }

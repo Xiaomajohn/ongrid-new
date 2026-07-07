@@ -94,10 +94,59 @@ type CreateResult struct {
 	SecretKey string // plaintext; never stored
 }
 
+// createOptions carries the optional knobs for Usecase.Create. nil/zero
+// values mean "no change" — the existing single-shot "create + wait for
+// register" flow keeps working with no opts. New options:
+//   - WithDeviceID : immediately SetDeviceID on the new edge (skips the
+//     "wait for agent register to fingerprint" round trip). Used by the
+//     SPA when the operator picks a host device at create time.
+//   - WithTaskName : write edge.task_name now (not waiting for install
+//     worker to do it). The same install worker that previously wrote
+//     task_name (bind path) will skip if the value is already set, so
+//     the behaviour is idempotent.
+type createOptions struct {
+	deviceID *uint64
+	taskName string
+}
+
+// CreateOption is the func-options shim for Usecase.Create.
+type CreateOption func(*createOptions)
+
+// WithDeviceID links the new edge to the given host device at create
+// time (sets the legacy 1:1 Edge.DeviceID pointer). Use when the
+// operator already knows which device this edge will sit on — saves a
+// "agent fingerprint match" round-trip. deviceID == 0 is a no-op.
+func WithDeviceID(deviceID uint64) CreateOption {
+	return func(o *createOptions) {
+		if deviceID == 0 {
+			return
+		}
+		o.deviceID = &deviceID
+	}
+}
+
+// WithTaskName writes edge.task_name at create time. The install
+// worker later skips UpdateTaskName when the field is already set
+// (see biz/edge/install_creds.go:BindEdgeFromAccessKey). Empty /
+// whitespace-only is a no-op.
+func WithTaskName(taskName string) CreateOption {
+	return func(o *createOptions) {
+		if strings.TrimSpace(taskName) == "" {
+			return
+		}
+		o.taskName = strings.TrimSpace(taskName)
+	}
+}
+
 // Create registers a new edge. It generates a 24-char URL-safe AccessKeyID,
 // a 32-char URL-safe SecretKey, argon2id-hashes the secret, and inserts the
 // row. Status starts as offline and flips to online on first tunnel handshake.
-func (u *Usecase) Create(ctx context.Context, name string, createdBy *uint64) (*CreateResult, error) {
+//
+// Optional opts (CreateOption) post-link the edge to a host device and/or
+// stamp its task_name before the row is returned. Failures in those
+// post-link steps are logged and best-effort: the row itself is already
+// persisted, and the install worker / register path will retry later.
+func (u *Usecase) Create(ctx context.Context, name string, createdBy *uint64, opts ...CreateOption) (*CreateResult, error) {
 	if u.repo == nil {
 		return nil, errs.ErrNotWiredYet
 	}
@@ -105,6 +154,11 @@ func (u *Usecase) Create(ctx context.Context, name string, createdBy *uint64) (*
 	// Empty is allowed — edge.HandleRegister back-fills the name with
 	// the host's reported hostname on first tunnel handshake. The SPA
 	// shows "(待主机上线)" placeholder for blank names in the meantime.
+
+	var o createOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
 
 	ak, err := randomURLSafe(accessKeyEntropyBytes)
 	if err != nil {
@@ -125,6 +179,10 @@ func (u *Usecase) Create(ctx context.Context, name string, createdBy *uint64) (*
 		SecretKeyHash: hash,
 		Status:        model.StatusOffline,
 		CreatedBy:     createdBy,
+		// task_name 在创建时就可写入 —— install 路径的 BindEdgeFromAccessKey
+		// 会跳过非空值，避免覆盖。operator 在 SPA 表单填的任务名通过这里
+		// 直接落地，不再依赖 install 流程。
+		TaskName: o.taskName,
 	}
 	if err := u.repo.Create(ctx, e); err != nil {
 		return nil, fmt.Errorf("create edge: %w", err)
@@ -134,6 +192,31 @@ func (u *Usecase) Create(ctx context.Context, name string, createdBy *uint64) (*
 	}
 	if u.plugins != nil {
 		u.seedDefaultPlugins(ctx, e.ID)
+	}
+	// Post-link: SPA 表单选了"所属设备"就在这里把 edge.device_id 写上。
+	// 失败不阻塞 edge 创建 —— HandleRegister / install worker 的 Get(device)
+	// 失败会自然降级到 fingerprint upsert 兜底。
+	if o.deviceID != nil {
+		if err := u.repo.SetDeviceID(ctx, e.ID, *o.deviceID); err != nil {
+			if u.log != nil {
+				u.log.Warn("create edge: SetDeviceID failed",
+					slog.Uint64("edge_id", e.ID),
+					slog.Uint64("device_id", *o.deviceID),
+					slog.Any("err", err))
+			}
+		}
+		// 同时写 edge_devices M:N 关联 —— HandleRegister 走 edge_devices
+		// 优先，再回退到 edge.device_id。
+		if u.links != nil {
+			if err := u.links.Link(ctx, e.ID, *o.deviceID, devicemodel.EdgeDeviceRelationHost); err != nil {
+				if u.log != nil {
+					u.log.Warn("create edge: edge_devices Link failed",
+						slog.Uint64("edge_id", e.ID),
+						slog.Uint64("device_id", *o.deviceID),
+						slog.Any("err", err))
+				}
+			}
+		}
 	}
 	return &CreateResult{Edge: e, AccessKey: ak, SecretKey: sk}, nil
 }

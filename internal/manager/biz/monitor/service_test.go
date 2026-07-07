@@ -24,7 +24,7 @@ type fakeRepo struct {
 
 func newFakeRepo() *fakeRepo { return &fakeRepo{rows: map[uint64]*model.Panel{}, nextID: 0} }
 
-func (r *fakeRepo) List(_ context.Context) ([]*model.Panel, error) {
+func (r *fakeRepo) List(_ context.Context, _ ListFilter) ([]*model.Panel, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := make([]*model.Panel, 0, len(r.rows))
@@ -98,13 +98,25 @@ func (r *fakeRepo) SetSyncResult(_ context.Context, id uint64, msg string) error
 	return nil
 }
 
-func (r *fakeRepo) Delete(_ context.Context, id uint64) error {
+func (r *fakeRepo) Delete(_ context.Context, id uint64, _ bool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, ok := r.rows[id]; !ok {
 		return errs.ErrNotFound
 	}
 	delete(r.rows, id)
+	return nil
+}
+
+func (r *fakeRepo) Restore(_ context.Context, id uint64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// Test fakes don't model soft-delete state; the no-op (no ErrNotFound
+	// for an id we know) is enough to satisfy the contract.
+	_, ok := r.rows[id]
+	if !ok {
+		return errs.ErrNotFound
+	}
 	return nil
 }
 

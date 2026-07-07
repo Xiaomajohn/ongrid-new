@@ -320,6 +320,13 @@ func (r *Repo) GetMany(ctx context.Context, ids []uint64) (map[uint64]*model.Dev
 // List returns devices matching f.
 func (r *Repo) List(ctx context.Context, f biz.ListFilter) ([]*model.Device, error) {
 	tx := r.db.WithContext(ctx).Model(&model.Device{})
+	// include_deleted=true opts out of the GORM soft-delete scope. We
+	// split here instead of `tx.Unscoped().Where(delete_marker=0)` for
+	// the default-scope branch so the surrounding default behaviour
+	// (hidden soft-deleted rows) stays the same as before the change.
+	if f.IncludeDeleted {
+		tx = tx.Unscoped()
+	}
 	switch {
 	case f.RolesUnknownOnly:
 		tx = tx.Where("roles = ?", 0)
@@ -360,6 +367,45 @@ func (r *Repo) Count(ctx context.Context) (int64, error) {
 // Delete soft-deletes a device by id.
 func (r *Repo) Delete(ctx context.Context, id uint64) error {
 	res := r.db.WithContext(ctx).Delete(&model.Device{}, id)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return errs.ErrNotFound
+	}
+	return nil
+}
+
+// HardDelete physically removes the device row. This bypasses the GORM
+// soft-delete scope; once it returns nil the row is gone from the
+// table. Use only when the operator explicitly wants a hard wipe —
+// the soft Delete path is the default and is reversible via Restore.
+func (r *Repo) HardDelete(ctx context.Context, id uint64) error {
+	res := r.db.WithContext(ctx).Unscoped().Delete(&model.Device{}, id)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return errs.ErrNotFound
+	}
+	return nil
+}
+
+// Restore un-soft-deletes a previously soft-deleted device row.
+// Unscoped so the WHERE doesn't filter out the row we're trying to
+// revive; missing id → ErrNotFound so callers can tell "id never
+// existed" from "id was already live" (idempotent case).
+func (r *Repo) Restore(ctx context.Context, id uint64) error {
+	now := time.Now().UTC()
+	res := r.db.WithContext(ctx).
+		Unscoped().
+		Model(&model.Device{}).
+		Where("id = ?", id).
+		Updates(map[string]any{
+			"deleted_at":    nil,
+			"delete_marker": 0,
+			"updated_at":    now,
+		})
 	if res.Error != nil {
 		return res.Error
 	}

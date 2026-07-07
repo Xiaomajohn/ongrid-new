@@ -16,5 +16,6 @@ export {
   installEdge,
   getInstallJob,
   listInstallJobsByDevice,
+  listInstallJobsByEdge,
   cancelInstallJob,
 } from './devices';

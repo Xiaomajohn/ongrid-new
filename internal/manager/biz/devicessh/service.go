@@ -15,12 +15,19 @@ import (
 // without field-by-field translation. Declaring a parallel type here
 // avoids the import cycle that would arise if biz/devicessh imported
 // server/devicessh (the server package already imports the biz layer).
+//
+// Route pins the transport the caller wants. Defaults to
+// RouteKindAuto (historical behaviour: tunnel when an online edge
+// exists, direct otherwise). The /shell-direct endpoint overrides
+// this to RouteKindDirect; /shell (the monitor-flow endpoint) leaves
+// it as Auto or pins RouteKindTunnel — see server/devicessh/http.go.
 type ShellOpts struct {
 	Cols    int
 	Rows    int
 	Term    string
 	SSHUser string
 	SSHPass string
+	Route   RouteKind
 }
 
 // ShellHandle is the minimal Read/Write/Close contract the biz layer
@@ -114,7 +121,7 @@ func (s *ShellService) OpenShell(ctx context.Context, deviceID uint64, user *ten
 		dev.SSHPassword = opts.SSHPass
 	}
 
-	dialer, err := s.router.Pick(ctx, dev, PurposeShell)
+	dialer, err := s.router.Pick(ctx, dev, PurposeShell, opts.Route)
 	if err != nil {
 		return nil, err
 	}

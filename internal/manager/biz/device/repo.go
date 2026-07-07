@@ -18,7 +18,10 @@ import (
 // RolesUnknownOnly, when true, narrows to rows with roles == 0 (the
 // "未分类" bucket); it is mutually exclusive with RolesAny — set one or
 // the other, not both. Online filters by the live online flag.
-// Hostname / Name are substring matches.
+// Hostname / Name are substring matches. IncludeDeleted opts out of the
+// GORM soft-delete scope so callers (Logs page's "显示已删除" toggle)
+// can surface soft-deleted rows in a "已删除" UI list. Default false
+// keeps the default-scope behaviour (no soft-deleted rows visible).
 type ListFilter struct {
 	RolesAny         uint8
 	RolesUnknownOnly bool
@@ -27,6 +30,7 @@ type ListFilter struct {
 	Name             string
 	Limit            int
 	Offset           int
+	IncludeDeleted   bool
 }
 
 // Repo is the device persistence contract. The sqlite/mysql implementation
@@ -123,6 +127,16 @@ type Repo interface {
 	// Delete soft-deletes a device (does NOT touch its junction rows;
 	// callers should remove the junction first if they want a clean cut).
 	Delete(ctx context.Context, id uint64) error
+
+	// HardDelete physically removes the row from the table. This is the
+	// un-recoverable path; prefer Delete (soft) unless the operator
+	// explicitly wants the row gone (e.g. audit remediation, GDPR-style
+	// "really scrub this" flows).
+	HardDelete(ctx context.Context, id uint64) error
+
+	// Restore un-soft-deletes a previously soft-deleted device row.
+	// Idempotent on already-live rows; missing id → ErrNotFound.
+	Restore(ctx context.Context, id uint64) error
 
 	// ReconcileOfflineOrphans flips online=true devices back to offline
 	// when none of their linked (non-deleted) edges is online. Heals

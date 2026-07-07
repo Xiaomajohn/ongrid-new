@@ -64,6 +64,23 @@ func (r *gormRepo) ListByDevice(ctx context.Context, deviceID uint64, limit int)
 	return jobs, nil
 }
 
+// ListByEdge 拉取某 edge（监控设备）最新一批安装任务。一台主机可能
+// 装 0~N 个 edge（不同 task_name），按 device 维度的 ListByDevice 会
+// 把不同 edge 的安装任务混在一起；监控设备视角下需要按 edge 维度取。
+// install_jobs.edge_id 是可空列；本方法仅查 edge_id = ? 的行，
+// 未关联 edge 的旧任务不会被命中。
+func (r *gormRepo) ListByEdge(ctx context.Context, edgeID uint64, limit int) ([]*InstallJob, error) {
+	var jobs []*InstallJob
+	q := r.db.WithContext(ctx).Where("edge_id = ?", edgeID).Order("id DESC")
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
+	if err := q.Find(&jobs).Error; err != nil {
+		return nil, err
+	}
+	return jobs, nil
+}
+
 // UpdateStatus 单 UPDATE 完成 status 翻转与时间戳标记的同步落库，
 // 保证行不会处于 status/started_at/finished_at 不一致的中间态。
 func (r *gormRepo) UpdateStatus(ctx context.Context, id uint64, status Status, exitCode *int) error {

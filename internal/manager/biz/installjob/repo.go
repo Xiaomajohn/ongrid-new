@@ -36,6 +36,10 @@ type Repo interface {
 	// ListByDevice 按 device 拉最新一批任务，limit<=0 不加 LIMIT。
 	ListByDevice(ctx context.Context, deviceID uint64, limit int) ([]*InstallJob, error)
 
+	// ListByEdge 按 edge 维度拉最新一批安装任务。一台 device 可装
+	// 0~N 个 edge，监控设备页面需要按 edge 而不是 device 查日志。
+	ListByEdge(ctx context.Context, edgeID uint64, limit int) ([]*InstallJob, error)
+
 	// UpdateStatus 一次 UPDATE 完成 status + 时间戳同步翻转。
 	UpdateStatus(ctx context.Context, id uint64, status Status, exitCode *int) error
 

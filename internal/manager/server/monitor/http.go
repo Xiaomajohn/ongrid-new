@@ -6,8 +6,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -20,11 +22,12 @@ import (
 // PanelService is the narrow biz contract the handler needs.
 // *biz/monitor.Service satisfies it.
 type PanelService interface {
-	List(ctx context.Context) ([]*model.Panel, error)
+	List(ctx context.Context, f biz.ListFilter) ([]*model.Panel, error)
 	Get(ctx context.Context, id uint64) (*model.Panel, error)
 	Create(ctx context.Context, in biz.CreateInput) (*model.Panel, error)
 	Update(ctx context.Context, id uint64, in biz.UpdateInput) (*model.Panel, error)
-	Delete(ctx context.Context, id uint64) error
+	Delete(ctx context.Context, id uint64, hard bool) error
+	Restore(ctx context.Context, id uint64) error
 }
 
 // Handler bundles the routes.
@@ -37,10 +40,11 @@ func NewHandler(svc PanelService) *Handler { return &Handler{svc: svc} }
 
 // Register attaches routes:
 //
-//	GET    /v1/monitor/panels         (any auth user)
-//	POST   /v1/monitor/panels         (admin)
-//	PATCH  /v1/monitor/panels/{id}    (admin)
-//	DELETE /v1/monitor/panels/{id}    (admin)
+//	GET    /v1/monitor/panels                     (any auth user)
+//	POST   /v1/monitor/panels                     (admin)
+//	PATCH  /v1/monitor/panels/{id}                (admin)
+//	DELETE /v1/monitor/panels/{id}?hard=true      (admin)
+//	POST   /v1/monitor/panels/{id}/restore        (admin)
 //
 // Listing is open to any authenticated operator so dashboards render
 // for all users; mutations are admin-gated to mirror the rest of the
@@ -50,17 +54,41 @@ func (h *Handler) Register(r chi.Router) {
 	r.Post("/v1/monitor/panels", h.create)
 	r.Patch("/v1/monitor/panels/{id}", h.update)
 	r.Delete("/v1/monitor/panels/{id}", h.delete)
+	r.With(h.requireAdminMW).Post("/v1/monitor/panels/{id}/restore", h.restore)
 }
 
 type listResp struct {
 	Panels []*model.Panel `json:"panels"`
 }
 
+// panelItem is the wire shape returned by create / update / restore
+// handlers. The model.Panel's json tags already cover the common fields
+// (id / title / type / promql / legend / unit / ordinal / sync_*/time
+// stamps), so re-embedding *model.Panel gives us those for free; we add
+// the DeviceID / DeletedAt explicit copies so a nil-valued field is
+// omitted from the wire (model.Panel declares DeviceID as *uint64
+// `json:"device_id,omitempty"`, so re-embedding still drops nil
+// correctly). Keeping the same JSON keys as the model means the SPA can
+// keep using its existing MonitorPanel type.
+type panelItem struct {
+	*model.Panel
+}
+
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
-	if !requireUser(w, r) {
+	if !h.requireUser(w, r) {
 		return
 	}
-	out, err := h.svc.List(r.Context())
+	q := r.URL.Query()
+	f := biz.ListFilter{IncludeDeleted: parseBool(q.Get("include_deleted"))}
+	if v := q.Get("device_id"); v != "" {
+		n, err := strconv.ParseUint(v, 10, 64)
+		if err != nil {
+			writeErr(w, errors.Join(errs.ErrInvalid, fmt.Errorf("device_id: %w", err)))
+			return
+		}
+		f.DeviceID = &n
+	}
+	out, err := h.svc.List(r.Context(), f)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -69,7 +97,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
-	if !requireAdmin(w, r) {
+	if !h.requireAdmin(w, r) {
 		return
 	}
 	var in biz.CreateInput
@@ -82,11 +110,11 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, saved)
+	writeJSON(w, http.StatusOK, &panelItem{Panel: saved})
 }
 
 func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
-	if !requireAdmin(w, r) {
+	if !h.requireAdmin(w, r) {
 		return
 	}
 	id, err := parseID(r)
@@ -104,11 +132,11 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, saved)
+	writeJSON(w, http.StatusOK, &panelItem{Panel: saved})
 }
 
 func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
-	if !requireAdmin(w, r) {
+	if !h.requireAdmin(w, r) {
 		return
 	}
 	id, err := parseID(r)
@@ -116,14 +144,51 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	if err := h.svc.Delete(r.Context(), id); err != nil {
+	hard := parseBool(r.URL.Query().Get("hard"))
+	if err := h.svc.Delete(r.Context(), id, hard); err != nil {
 		writeErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// restore revives a soft-deleted panel. Admin only — a restore can
+// re-introduce a panel the operator had explicitly retired, so we
+// don't want any-authed callers triggering it accidentally.
+func (h *Handler) restore(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAdmin(w, r) {
+		return
+	}
+	id, err := parseID(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := h.svc.Restore(r.Context(), id); err != nil {
+		writeErr(w, err)
+		return
+	}
+	// Re-read so the caller sees the post-restore row (deleted_at cleared).
+	saved, err := h.svc.Get(r.Context(), id)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, &panelItem{Panel: saved})
+}
+
 // --- helpers ---
+
+// parseBool accepts the same wire-truthy spellings the rest of the
+// handler set uses (true/1/yes vs false/0/no). Unknown / empty defaults
+// to false so query-string omission continues to mean "default scope".
+func parseBool(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "true", "1", "yes":
+		return true
+	}
+	return false
+}
 
 func parseID(r *http.Request) (uint64, error) {
 	raw := chi.URLParam(r, "id")
@@ -137,7 +202,7 @@ func parseID(r *http.Request) (uint64, error) {
 	return id, nil
 }
 
-func requireAdmin(w http.ResponseWriter, r *http.Request) bool {
+func (h *Handler) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	t, ok := tenantctx.From(r.Context())
 	if !ok {
 		writeErr(w, errs.ErrUnauthorized)
@@ -150,12 +215,23 @@ func requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
-func requireUser(w http.ResponseWriter, r *http.Request) bool {
+func (h *Handler) requireUser(w http.ResponseWriter, r *http.Request) bool {
 	if _, ok := tenantctx.From(r.Context()); !ok {
 		writeErr(w, errs.ErrUnauthorized)
 		return false
 	}
 	return true
+}
+
+// requireAdminMW returns a chi-compatible middleware that enforces admin
+// role. Used by Register to gate the /restore route.
+func (h *Handler) requireAdminMW(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !h.requireAdmin(w, r) {
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 type errorBody struct {

@@ -16,6 +16,7 @@ import { queryLogsRange, listLogLabels, type LokiStream } from '@/api/logs';
 import { ApiError } from '@/api/client';
 import { listEdges, type Edge, type EdgeRole } from '@/api/edges';
 import { listDevices, type Device } from '@/api/devices';
+import { listDeviceMonitors, type MonitorPanel } from '@/api/monitorPanels';
 import { onDevicesChanged } from '@/lib/events';
 import { Link } from 'react-router-dom';
 import { RoleSelect } from '@/components/ui';
@@ -214,6 +215,19 @@ export default function LogsPage() {
   const [deviceInput, setDeviceInput] = useState('');
   const [roleFilter, setRoleFilter] = useState<'' | EdgeRole>('');
   const [filenameFilter, setFilenameFilter] = useState(''); // value = unit OR filename label
+  // Monitor (panel) filter — narrows logs by the device's bound
+  // monitor_panels row. Only meaningful once a device is picked;
+  // `monitorOptions` is the per-device panel list returned by
+  // /v1/devices/{id}/monitors. UI is a UI hint — Loki's stream label
+  // set doesn't carry monitor_id, so picking a panel does not change
+  // the actual LogQL. (See plan §7.3 for the rationale.)
+  const [monitorFilter, setMonitorFilter] = useState('');
+  const [monitorOptions, setMonitorOptions] = useState<MonitorPanel[]>([]);
+  const [monitorLoading, setMonitorLoading] = useState(false);
+  // Shared toggle for the two "显示已删除" checkboxes (device + monitor).
+  // One state so the operator doesn't have to flip two switches when
+  // they want to see soft-deleted rows in both dropdowns at once.
+  const [showDeleted, setShowDeleted] = useState(false);
   const [edges, setEdges] = useState<Edge[]>([]);
   const [rows, setRows] = useState<LogRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -429,15 +443,23 @@ export default function LogsPage() {
   // 设备下拉 option 文本和 onChange 同步 deviceInput 时用这里回填
   // device.name / hostname / ip_address，替代 d.name（探针名）。
   // 不走 Edges.tsx 的 module-level 缓存：本轮最小改动，不抽 lib。
+  //
+  // 数据源从「带 edge 的 device 子集」改为「全量 device」——这样没装
+  // edge 的纯 host 也能选。include_deleted 由 showDeleted 联动。
+  // 同时保留一份 devices: Device[] 给下拉框 option 列表用（map 只能
+  // 按 id 取值；下拉要遍历整个集合）。
   const [deviceMap, setDeviceMap] = useState<Map<number, Device>>(new Map());
+  const [devices, setDevices] = useState<Device[]>([]);
   useEffect(() => {
     let cancelled = false;
-    listDevices({ limit: 1000 })
+    listDevices({ limit: 1000, include_deleted: showDeleted })
       .then((r) => {
         if (cancelled) return;
+        const items = r.items ?? [];
         const m = new Map<number, Device>();
-        for (const d of r.items ?? []) m.set(d.id, d);
+        for (const d of items) m.set(d.id, d);
         setDeviceMap(m);
+        setDevices(items);
       })
       .catch(() => {
         /* best-effort：失败时回退到 d.name，行为与现状一致 */
@@ -445,7 +467,47 @@ export default function LogsPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [showDeleted]);
+
+  // 设备选中后拉该 device 关联的 monitor_panels。include_deleted 由
+  // showDeleted 联动，device 清空则清空 options。失败时静默留空列表
+  // （设备下拉框仍可用）。
+  useEffect(() => {
+    if (!deviceFilter) {
+      setMonitorOptions([]);
+      setMonitorFilter('');
+      setMonitorLoading(false);
+      return;
+    }
+    const deviceId = Number(deviceFilter);
+    if (!Number.isFinite(deviceId) || deviceId <= 0) {
+      setMonitorOptions([]);
+      setMonitorLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setMonitorLoading(true);
+    listDeviceMonitors(deviceId, { include_deleted: showDeleted })
+      .then((rows) => {
+        if (cancelled) return;
+        setMonitorOptions(rows);
+        // 如果当前选中的 monitor 已不在新列表中（含被切到 deleted
+        // 视图后又被排除），重置回「不限」，避免 LogQL 与 UI 不一致。
+        setMonitorFilter((cur) =>
+          cur && !rows.some((p) => String(p.id) === cur) ? '' : cur,
+        );
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setMonitorOptions([]);
+      })
+      .finally(() => {
+        if (!cancelled) setMonitorLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [deviceFilter, showDeleted]);
 
   // Probe Loki for any indexed labels. If Loki has zero label values
   // we know the platform has never received a log push — distinguishes
@@ -625,9 +687,11 @@ export default function LogsPage() {
             className="w-36 shrink-0"
           />
           {/* Device — native <select> so it visually reads as a dropdown.
-              The free-form 'paste a device_id' case (rare) is preserved
-              via the ?device= URL param + the deviceInput state that
-              survives across URL/edges resolution. */}
+              Data source is the device table (not edges) so a host
+              without an installed probe still shows up here. Soft-deleted
+              rows render with "(已删除)" suffix in zinc-500. Free-form
+              'paste a device_id' (rare) is preserved via the deviceInput
+              state for the "?device=" URL param path. */}
           <label className="block w-48 shrink-0">
             <span className="mb-1 block text-[11px] text-zinc-500">{tr("设备", "Device")}</span>
             <select
@@ -635,36 +699,89 @@ export default function LogsPage() {
               onChange={(e) => {
                 const v = e.target.value;
                 setDeviceFilter(v);
+                // 换设备时同步清空 monitor 下拉与选项，避免 UI 与
+                // LogQL 不一致（monitor 列表由新 device 重新拉）。
+                setMonitorFilter('');
                 if (!v) {
                   setDeviceInput('');
                   return;
                 }
-                const match = edges.find((d) => String(d.device_id) === v);
-                if (!match) {
-                  setDeviceInput(v);
-                  return;
-                }
-                // deviceMap 命中走 device 事实，未就绪回退 match.name。
-                const dev = deviceMap.get(Number(match.device_id));
-                const display = dev?.name || dev?.hostname || dev?.ip_address || match.name;
-                setDeviceInput(`${display} (#${match.device_id})`);
+                const dev = deviceMap.get(Number(v));
+                const display = dev?.name || dev?.hostname || dev?.ip_address || v;
+                setDeviceInput(`${display} (#${v})`);
               }}
               className={INPUT_BASE}
             >
               <option value="">{tr('全部设备', 'All devices')}</option>
-              {edges
-                .filter((d) => d.device_id != null)
-                .map((d) => {
-                  // deviceMap 命中走 device 事实，未就绪回退 d.name。
-                  const dev = deviceMap.get(Number(d.device_id));
-                  const name = dev?.name || dev?.hostname || dev?.ip_address || d.name;
+              {devices.map((d) => {
+                const name = d.name || d.hostname || d.ip_address || `#${d.id}`;
+                const isDeleted = !!d.deleted_at;
+                return (
+                  <option
+                    key={d.id}
+                    value={String(d.id)}
+                    className={isDeleted ? 'text-zinc-500' : undefined}
+                  >
+                    {name} (#{d.id}){isDeleted ? ` (${tr('已删除', 'Deleted')})` : ''}
+                  </option>
+                );
+              })}
+            </select>
+            <label className="mt-1 flex cursor-pointer items-center gap-1.5 text-[11px] text-zinc-500">
+              <input
+                type="checkbox"
+                checked={showDeleted}
+                onChange={(e) => setShowDeleted(e.target.checked)}
+                className="h-3 w-3 cursor-pointer rounded border-zinc-700 bg-zinc-950 accent-indigo-500"
+              />
+              {tr('显示已删除', 'Show deleted')}
+            </label>
+          </label>
+          {/* Monitor — new dropdown, lists the device's bound panels.
+              Disabled until a device is picked. Same look as the device
+              dropdown so the row stays visually consistent. */}
+          <label className="block w-48 shrink-0">
+            <span className="mb-1 block text-[11px] text-zinc-500">{tr('监控', 'Monitor')}</span>
+            <select
+              value={monitorFilter}
+              onChange={(e) => setMonitorFilter(e.target.value)}
+              disabled={!deviceFilter || monitorLoading}
+              className={cn(
+                INPUT_BASE,
+                (!deviceFilter || monitorLoading) && 'cursor-not-allowed opacity-50',
+              )}
+              title={
+                !deviceFilter
+                  ? tr('先选设备', 'Pick a device first')
+                  : monitorLoading
+                    ? tr('加载中...', 'Loading...')
+                    : undefined
+              }
+            >
+              <option value="">{monitorLoading ? tr('加载中...', 'Loading...') : tr('全部监控', 'All monitors')}</option>
+              {!monitorLoading &&
+                monitorOptions.map((p) => {
+                  const isDeleted = !!p.deleted_at;
                   return (
-                    <option key={d.id} value={String(d.device_id)}>
-                      {name} (#{d.device_id})
+                    <option
+                      key={p.id}
+                      value={String(p.id)}
+                      className={isDeleted ? 'text-zinc-500' : undefined}
+                    >
+                      {p.title} (#{p.id}){isDeleted ? ` (${tr('已删除', 'Deleted')})` : ''}
                     </option>
                   );
                 })}
             </select>
+            <label className="mt-1 flex cursor-pointer items-center gap-1.5 text-[11px] text-zinc-500">
+              <input
+                type="checkbox"
+                checked={showDeleted}
+                onChange={(e) => setShowDeleted(e.target.checked)}
+                className="h-3 w-3 cursor-pointer rounded border-zinc-700 bg-zinc-950 accent-indigo-500"
+              />
+              {tr('显示已删除', 'Show deleted')}
+            </label>
           </label>
           {/* File / unit — native <select> for visual consistency with
               the other dropdowns in the row. Options come from the
@@ -946,7 +1063,7 @@ export default function LogsPage() {
                       {tr('清空 LogQL', 'Clear LogQL')}
                     </button>
                   )}
-                  {(deviceFilter || roleFilter || filenameFilter) && (
+                  {(deviceFilter || roleFilter || filenameFilter || monitorFilter) && (
                     <button
                       type="button"
                       onClick={() => {
@@ -954,10 +1071,11 @@ export default function LogsPage() {
                         setDeviceInput('');
                         setRoleFilter('');
                         setFilenameFilter('');
+                        setMonitorFilter('');
                       }}
                       className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800"
                     >
-                      {tr('清除筛选（设备 / 角色 / 文件）', 'Clear filters (device / role / file)')}
+                      {tr('清除筛选（设备 / 角色 / 文件 / 监控）', 'Clear filters (device / role / file / monitor')}
                     </button>
                   )}
                   {(include || exclude) && (

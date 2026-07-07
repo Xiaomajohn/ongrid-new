@@ -423,14 +423,33 @@ type SSHCredentialsWire struct {
 	LastError   string     `json:"last_error,omitempty"`
 }
 
-// Delete soft-deletes a device. Junction rows are NOT auto-removed —
-// caller is responsible (the v1 UI doesn't expose device deletion yet
-// so this is a future hook).
-func (u *Usecase) Delete(ctx context.Context, id uint64) error {
+// Delete removes a device. Junction rows are NOT auto-removed —
+// caller is responsible.
+//
+// hard=false (default) → soft delete: GORM stamps deleted_at + bumps
+// delete_marker, and the row is hidden from default-scope List calls.
+// The row can be revived via Restore.
+//
+// hard=true → physical delete via Repo.HardDelete (Unscoped). This is
+// the un-recoverable path used when an operator explicitly wants the
+// row gone (e.g. audit remediation, GDPR-style "really scrub this").
+func (u *Usecase) Delete(ctx context.Context, id uint64, hard bool) error {
 	if u.repo == nil {
 		return errs.ErrNotWiredYet
 	}
+	if hard {
+		return u.repo.HardDelete(ctx, id)
+	}
 	return u.repo.Delete(ctx, id)
+}
+
+// Restore un-soft-deletes a previously soft-deleted device. Idempotent
+// on already-live rows; missing id → ErrNotFound.
+func (u *Usecase) Restore(ctx context.Context, id uint64) error {
+	if u.repo == nil {
+		return errs.ErrNotWiredYet
+	}
+	return u.repo.Restore(ctx, id)
 }
 
 // LookupHostDevice resolves edge → host device_id. Returns 0,

@@ -1,33 +1,23 @@
-// HostDetail.tsx — 实体设备详情页（5 Tabs: basic / metrics / probes / topology / meta）。
-// 指标 + 拓扑 tabs 复用 DeviceMetricsPanels / DeviceTopology —— 见
-// components/DeviceMetricsPanels.tsx / components/DeviceTopology.tsx。
-// EdgeDetail.tsx 在 T-EdgeMetricsTab-1 / T-EdgeTopologyTab-3 也复用
-// 这两个组件；这里我们不再私有复制 4 个 MultiLinePanel。
-import { useCallback, useEffect, useState } from 'react';
+// HostDetail.tsx — 实体设备详情页（3 Tabs: basic / topology / meta）。
+// 拓扑 tab 复用 DeviceTopology —— 见 components/DeviceTopology.tsx。
+//
+// 「指标」与「探针」两个 tab 已迁移到独立监控设备详情页
+// /hosts/:hostId/monitor（@/pages/MonitorDeviceDetail），那是 host 视角
+// 下不存在、专门承载「监控维度」内容的独立路由。HostDetail 页头部加
+// 「监控设备」按钮把用户切到该路由。
+//
+// EdgeDetail.tsx 同样复用 DeviceTopology（见其 T-EdgeTopologyTab-3），
+// 与主机详情保持展示口径一致。
+import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { ChevronLeft, ExternalLink, TerminalSquare, Plus, Trash2, RotateCw, Loader2 } from 'lucide-react';
+import { ChevronLeft, ExternalLink, TerminalSquare, Activity } from 'lucide-react';
 import { StatusPill } from '@/components/StatusPill';
 import { cn } from '@/lib/cn';
 import { relativeTime } from '@/lib/format';
-import { usePoll } from '@/lib/usePoll';
-import {
-  getDevice,
-  type Device,
-} from '@/api/devices';
-import {
-  listEdges,
-  deleteEdge,
-  rotateSecret,
-  upgradeEdgePackage,
-  EDGE_ROLE_LABELS,
-  EDGE_ROLE_LABELS_EN,
-  type Edge,
-  type RotateSecretResponse,
-} from '@/api/edges';
-import { DeviceMetricsPanels } from '@/components/DeviceMetricsPanels';
+import { getDevice, type Device } from '@/api/devices';
+import { EDGE_ROLE_LABELS, EDGE_ROLE_LABELS_EN } from '@/api/edges';
 import { DeviceTopology } from '@/components/DeviceTopology';
 import { useI18n } from '@/i18n/locale';
-import { request } from '@/api/client';
 import { usePermissions } from '@/store/me';
 
 // HostDevice — Devices API 当前最小集 + 该页面用到的所有字段（hostname /
@@ -49,17 +39,7 @@ type HostDevice = Device & {
   updated_by?: string;
 };
 
-type Tab = 'basic' | 'metrics' | 'probes' | 'topology' | 'meta';
-
-// ----- local wrappers for non-existent API functions -----
-
-async function listDeviceEdgesLocal(deviceId: string | number): Promise<Edge[]> {
-  const r = await request<{ items?: Edge[]; total?: number }>(
-    'GET',
-    `/devices/${encodeURIComponent(String(deviceId))}/edges`,
-  );
-  return r.items ?? [];
-}
+type Tab = 'basic' | 'topology' | 'meta';
 
 export default function HostDetailPage() {
   const { tr } = useI18n();
@@ -82,17 +62,31 @@ export default function HostDetailPage() {
       })
       .catch((err) => {
         if (!cancelled)
-          setLoadErr((err as Error).message || tr('加载失败', 'Load failed'));
+          setLoadErr(
+            (err as Error).message || tr('加载失败', 'Load failed'),
+          );
       });
     return () => {
       cancelled = true;
     };
   }, [hostId]);
 
+  // 设备页终端是「设备直连」语义：走 manager → 设备 IP 的 SSH，
+  // 不经过 edge-tunnel。所以路径拼接为 `/shell-direct`，后端
+  // devicessh.ShellHandler.handleDirect 会迫使 Router.Pick 走
+  // direct 分支。判断能否进入只看账号是非 viewer（直连 SSH 不依赖
+  // Prom 上报的 device.online——你连的是设备本身）。
   const terminalHref = device?.id
-    ? `/hosts/${encodeURIComponent(String(device.id))}/shell`
+    ? `/hosts/${encodeURIComponent(String(device.id))}/shell-direct`
     : '#';
-  const terminalEnabled = !!device?.online && canMutate;
+  // 只读账号不允许进入终端，与 Hosts.tsx 列表页 ShellButton 规则一致。
+  const terminalEnabled = !!device?.id && canMutate;
+
+  // 监控设备详情路由：同 hostId 下挂在 /monitor 子路径上，承载 host 上
+  // 已装探针列表 + 设备指标。该路由由 MonitorDeviceDetail 渲染。
+  const monitorHref = device?.id
+    ? `/hosts/${encodeURIComponent(String(device.id))}/monitor`
+    : '#';
 
   return (
     <main className="anim-fade flex flex-1 flex-col overflow-hidden">
@@ -111,7 +105,15 @@ export default function HostDetailPage() {
               <h1 className="truncate text-base font-semibold text-zinc-100">
                 {device?.name || hostId}
               </h1>
-              {device && <StatusPill status={device.online ? 'online' : 'offline'} />}
+              {device && (
+                <StatusPill
+                  status={device.reachable ? 'online' : 'offline'}
+                />
+              )}
+              {/* 状态按 reachable 渲染：ping 服务 5min 周期写入的网络层
+                  可达性，即 operator 视角"机器在线"。edge agent 推送
+                  的 online 仍在 device 对象里，仅供内部诊断；UI 统一
+                  走 reachable，与 Hosts.tsx 列表页一致。 */}
               {device && (device.roles ?? []).length > 0 && (
                 <span className="inline-flex flex-wrap items-center gap-1">
                   {(device.roles ?? []).map((r) => (
@@ -120,8 +122,12 @@ export default function HostDetailPage() {
                       className="rounded border border-zinc-700 bg-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-300"
                     >
                       {tr(
-                        EDGE_ROLE_LABELS[r as keyof typeof EDGE_ROLE_LABELS] ?? String(r),
-                        EDGE_ROLE_LABELS_EN[r as keyof typeof EDGE_ROLE_LABELS_EN] ?? String(r),
+                        EDGE_ROLE_LABELS[
+                          r as keyof typeof EDGE_ROLE_LABELS
+                        ] ?? String(r),
+                        EDGE_ROLE_LABELS_EN[
+                          r as keyof typeof EDGE_ROLE_LABELS_EN
+                        ] ?? String(r),
                       )}
                     </span>
                   ))}
@@ -130,12 +136,38 @@ export default function HostDetailPage() {
             </div>
             <div className="mt-0.5 truncate text-[11px] text-zinc-500">
               {device?.last_seen_at
-                ? tr(`最后心跳 ${relativeTime(device.last_seen_at)}`, `Last seen ${relativeTime(device.last_seen_at)}`)
+                ? tr(
+                    `最后心跳 ${relativeTime(device.last_seen_at)}`,
+                    `Last seen ${relativeTime(device.last_seen_at)}`,
+                  )
                 : tr('设备 ID: ', 'Device ID: ') + hostId}
             </div>
           </div>
         </div>
         <div className="flex items-center gap-2">
+          {/* 「监控设备」按钮把用户从主机视角切到监控设备视角：
+              指标 / 已装探针 / 元数据 这块内容在 /hosts/:hostId/monitor。
+              复用 indigo 主色使其与 HostDetail 头部灰底按钮（终端）
+              形成视觉层级。 */}
+          {device?.id ? (
+            <Link
+              to={monitorHref}
+              title={tr(
+                '查看该主机的设备指标与已装探针',
+                'View this host\'s metrics and installed probes',
+              )}
+              className="inline-flex items-center gap-1.5 rounded-md bg-indigo-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-indigo-500"
+            >
+              <Activity size={12} /> {tr('监控设备', 'Monitor')}
+            </Link>
+          ) : (
+            <span
+              title={tr('加载中…', 'Loading…')}
+              className="inline-flex cursor-not-allowed items-center gap-1.5 rounded-md bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-600"
+            >
+              <Activity size={12} /> {tr('监控设备', 'Monitor')}
+            </span>
+          )}
           {terminalEnabled ? (
             <a
               href={terminalHref}
@@ -158,11 +190,21 @@ export default function HostDetailPage() {
       </header>
 
       <div className="flex items-center gap-1 border-b border-zinc-800 px-6">
-        <TabBtn active={tab === 'basic'} onClick={() => setTab('basic')} label={tr('基本信息', 'Basic')} />
-        <TabBtn active={tab === 'metrics'} onClick={() => setTab('metrics')} label={tr('指标', 'Metrics')} />
-        <TabBtn active={tab === 'probes'} onClick={() => setTab('probes')} label={tr('探针', 'Probes')} />
-        <TabBtn active={tab === 'topology'} onClick={() => setTab('topology')} label={tr('拓扑', 'Topology')} />
-        <TabBtn active={tab === 'meta'} onClick={() => setTab('meta')} label={tr('元数据', 'Metadata')} />
+        <TabBtn
+          active={tab === 'basic'}
+          onClick={() => setTab('basic')}
+          label={tr('基本信息', 'Basic')}
+        />
+        <TabBtn
+          active={tab === 'topology'}
+          onClick={() => setTab('topology')}
+          label={tr('拓扑', 'Topology')}
+        />
+        <TabBtn
+          active={tab === 'meta'}
+          onClick={() => setTab('meta')}
+          label={tr('元数据', 'Metadata')}
+        />
       </div>
 
       <div className="flex-1 overflow-y-auto px-6 py-5">
@@ -175,17 +217,7 @@ export default function HostDetailPage() {
           </div>
         )}
 
-        {tab === 'basic' && (
-          <BasicTab device={device} />
-        )}
-
-        {tab === 'metrics' && device && (
-          <DeviceMetricsPanels deviceId={String(device.id)} />
-        )}
-
-        {tab === 'probes' && device && (
-          <ProbesTab device={device} onAfterChange={() => void getDevice(hostId).then((d) => setDevice(d as HostDevice))} canMutate={canMutate} />
-        )}
+        {tab === 'basic' && <BasicTab device={device} />}
 
         {tab === 'topology' && device && (
           <DeviceTopology deviceId={device.id} />
@@ -226,21 +258,25 @@ function BasicTab({ device }: { device: HostDevice | null }) {
     [tr('IP 地址', 'IP address'), device.ip_address || '—'],
     [
       tr('CPU 核数', 'CPU cores'),
-      typeof device.cpu_count === 'number' ? String(device.cpu_count) : '—',
+      typeof device.cpu_count === 'number'
+        ? String(device.cpu_count)
+        : '—',
     ],
     [
       tr('内存', 'Memory'),
-      typeof device.mem_total_bytes === 'number' ? formatBytes(device.mem_total_bytes) : '—',
+      typeof device.mem_total_bytes === 'number'
+        ? formatBytes(device.mem_total_bytes)
+        : '—',
     ],
     [
       tr('磁盘', 'Disk'),
-      typeof device.disk_total_bytes === 'number' ? formatBytes(device.disk_total_bytes) : '—',
+      typeof device.disk_total_bytes === 'number'
+        ? formatBytes(device.disk_total_bytes)
+        : '—',
     ],
     [
       tr('Fingerprint', 'Fingerprint'),
-      device.fingerprint
-        ? `${device.fingerprint.slice(0, 8)}…`
-        : '—',
+      device.fingerprint ? `${device.fingerprint.slice(0, 8)}…` : '—',
     ],
     [
       tr('创建时间', 'Created at'),
@@ -261,7 +297,9 @@ function BasicTab({ device }: { device: HostDevice | null }) {
           <div className="text-[11px] uppercase tracking-wider text-zinc-500">
             {label}
           </div>
-          <div className="mt-1 break-all font-mono text-xs text-zinc-100">{value}</div>
+          <div className="mt-1 break-all font-mono text-xs text-zinc-100">
+            {value}
+          </div>
         </div>
       ))}
       {device.node_id != null && (
@@ -282,225 +320,6 @@ function BasicTab({ device }: { device: HostDevice | null }) {
     </div>
   );
 }
-
-// ----- ProbesTab -----
-// 列出该 device 下所有 edges（调 listEdges({device_id})），表格复用
-// Edge.tsx 的列顺序：ID / 名称 / 状态 / 最后心跳 / Access Key / Agent / 操作。
-function ProbesTab({
-  device,
-  onAfterChange,
-  canMutate,
-}: {
-  device: HostDevice;
-  onAfterChange(): void;
-  canMutate: boolean;
-}) {
-  const { tr } = useI18n();
-  const navigate = useNavigate();
-  const [edges, setEdges] = useState<Edge[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState<string | null>(null);
-
-  const refresh = useCallback(async () => {
-    if (!device?.id) return;
-    setLoading(true);
-    setErr(null);
-    try {
-      // 优先走专用端点；不命中时退化到 listEdges() 客户端过滤。
-      try {
-        const items = await listDeviceEdgesLocal(device.id);
-        setEdges(items);
-      } catch {
-        const r = await listEdges();
-        const filtered = (r.items ?? []).filter(
-          (e) => String(e.device_id ?? '') === String(device.id),
-        );
-        setEdges(filtered);
-      }
-    } catch (e) {
-      setErr((e as Error).message || tr('加载失败', 'Load failed'));
-    } finally {
-      setLoading(false);
-    }
-  }, [device?.id]);
-
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
-  usePoll(refresh, 10_000);
-
-  async function onRotate(e: Edge) {
-    if (!confirm(tr(`轮换 ${e.name} 密钥？旧密钥将立即失效。`, `Rotate ${e.name}'s secret? Old key stops immediately.`))) return;
-    try {
-      const r: RotateSecretResponse = await rotateSecret(e.id);
-      alert(tr(`新 secret_key（仅显示一次）：\n${r.secret_key}`, `New secret_key (shown once):\n${r.secret_key}`));
-      void refresh();
-    } catch (err) {
-      alert((err as Error).message || tr('轮换失败', 'Rotate failed'));
-    }
-  }
-
-  async function onDelete(e: Edge) {
-    if (!confirm(tr(`删除 ${e.name}？不可恢复。`, `Delete ${e.name}? Cannot be undone.`))) return;
-    try {
-      await deleteEdge(e.id);
-      void refresh();
-      onAfterChange();
-    } catch (err) {
-      alert((err as Error).message || tr('删除失败', 'Delete failed'));
-    }
-  }
-
-  async function onPackageUpgrade(e: Edge) {
-    if (!confirm(tr(`整包升级 ${e.name}？agent 短暂重启；失败自动回滚。`, `Upgrade ${e.name} package? Agent restarts briefly; auto-rollback on failure.`))) return;
-    try {
-      const resp = await upgradeEdgePackage(e.id);
-      alert(resp.applied
-        ? tr(`${e.name} → ${resp.version} 已 stage ${resp.manifest_files} 个文件`, `${e.name} → ${resp.version} staged ${resp.manifest_files} files`)
-        : tr(`${e.name} stage OK 但 apply 失败：${resp.apply_error ?? '未知'}`, `${e.name} staged but apply failed: ${resp.apply_error ?? 'unknown'}`));
-      void refresh();
-    } catch (err) {
-      alert((err as Error).message || tr('升级失败', 'Upgrade failed'));
-    }
-  }
-
-  return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <div className="text-sm text-zinc-300">
-          {tr(
-            `${edges.length} 个探针`,
-            `${edges.length} probe${edges.length === 1 ? '' : 's'}`,
-          )}
-        </div>
-        {canMutate && (
-          <Link
-            to="/devices"
-            className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800"
-            title={tr(
-              '去设备页签发新探针，安装到本主机后会自动绑定到此 device',
-              'Issue a new probe from the devices page; once installed on this host it will bind here',
-            )}
-          >
-            <Plus size={12} /> {tr('添加探针', 'Add probe')}
-          </Link>
-        )}
-      </div>
-
-      {err && (
-        <div className="rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">
-          {err}
-        </div>
-      )}
-
-      <div className="overflow-hidden rounded-xl border border-zinc-800/60 bg-zinc-900/40">
-        <table className="w-full text-sm">
-          <thead className="border-b border-zinc-800/60 bg-zinc-950/40 text-[11px] uppercase tracking-wider text-zinc-500">
-            <tr>
-              <th className="px-4 py-2.5 text-left">ID</th>
-              <th className="px-4 py-2.5 text-left">{tr('名称', 'Name')}</th>
-              <th className="px-4 py-2.5 text-left">{tr('状态', 'Status')}</th>
-              <th className="px-4 py-2.5 text-left">{tr('最后心跳', 'Last heartbeat')}</th>
-              <th className="px-4 py-2.5 text-left">Access Key</th>
-              <th className="px-4 py-2.5 text-left">Agent</th>
-              <th className="px-4 py-2.5 text-right">{tr('操作', 'Actions')}</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-zinc-800/40">
-            {loading && edges.length === 0 ? (
-              <tr>
-                <td colSpan={7} className="px-4 py-10 text-center text-zinc-500">
-                  <Loader2 size={14} className="mr-2 inline animate-spin" />
-                  {tr('加载中…', 'Loading…')}
-                </td>
-              </tr>
-            ) : edges.length === 0 ? (
-              <tr>
-                <td colSpan={7} className="px-4 py-10 text-center text-zinc-500">
-                  {tr(
-                    '尚未安装探针',
-                    'No probes installed yet',
-                  )}
-                </td>
-              </tr>
-            ) : (
-              edges.map((e) => (
-                <tr key={e.id} className="hover:bg-zinc-900/40">
-                  <td className="whitespace-nowrap px-4 py-2.5 font-mono text-xs text-zinc-400">
-                    {e.id}
-                  </td>
-                  <td className="whitespace-nowrap px-4 py-2.5 text-zinc-100">
-                    {e.name || (
-                      <span className="italic text-zinc-500">
-                        {tr('（待主机上线）', '(waiting for host)')}
-                      </span>
-                    )}
-                  </td>
-                  <td className="whitespace-nowrap px-4 py-2.5">
-                    <StatusPill status={e.status} />
-                  </td>
-                  <td className="whitespace-nowrap px-4 py-2.5 text-zinc-400">
-                    {e.last_seen_at ? relativeTime(e.last_seen_at) : '—'}
-                  </td>
-                  <td className="whitespace-nowrap px-4 py-2.5 font-mono text-xs text-zinc-400">
-                    <span className="rounded bg-zinc-800/60 px-1.5 py-0.5">
-                      {e.access_key_id.slice(0, 8)}…
-                    </span>
-                  </td>
-                  <td className="whitespace-nowrap px-4 py-2.5 font-mono text-xs text-zinc-400">
-                    {e.agent_version || <span className="text-zinc-600">—</span>}
-                  </td>
-                  <td className="whitespace-nowrap px-4 py-2.5 text-right">
-                    <button
-                      type="button"
-                      onClick={() => navigate(`/devices/${encodeURIComponent(String(e.id))}`)}
-                      title={tr('打开探针详情', 'Open probe detail')}
-                      className="mr-1 inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
-                    >
-                      <ExternalLink size={14} />
-                      <span>{tr('详情', 'Detail')}</span>
-                    </button>
-                    {canMutate && (
-                      <>
-                        <button
-                          type="button"
-                          onClick={() => void onRotate(e)}
-                          title={tr('轮换密钥', 'Rotate secret')}
-                          className="mr-1 inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
-                        >
-                          <RotateCw size={14} />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void onPackageUpgrade(e)}
-                          title={tr('整包升级', 'Upgrade package')}
-                          className="mr-1 inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
-                        >
-                          {tr('整包', 'Pkg')}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void onDelete(e)}
-                          title={tr('删除', 'Delete')}
-                          aria-label={tr(`删除 ${e.name}`, `Delete ${e.name}`)}
-                          className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-red-300 hover:bg-red-500/10"
-                        >
-                          <Trash2 size={14} />
-                        </button>
-                      </>
-                    )}
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-
 
 function TabBtn({
   active,
@@ -579,8 +398,6 @@ function buildMeta(d: HostDevice): Record<string, unknown> {
     node_id: d.node_id,
   };
 }
-
-
 
 function formatBytes(b: number): string {
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];

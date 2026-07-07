@@ -48,11 +48,12 @@ func (h *Handler) SetEdgeLookup(e EdgeLookup) { h.edges = e }
 // Routes:
 //
 //	POST /v1/devices (admin) — register a new logical host + SSH creds
-//	GET /v1/devices (any authed)
+//	GET /v1/devices (any authed) — supports ?include_deleted=true
 //	GET /v1/devices/{id} (any authed)
 //	PATCH /v1/devices/{id} (admin) — name / description
 //	PATCH /v1/devices/{id}/roles (admin)
-//	DELETE /v1/devices/{id} (admin)
+//	DELETE /v1/devices/{id}?hard=true (admin) — soft by default
+//	POST /v1/devices/{id}/restore (admin) — revive soft-deleted row
 //	GET /v1/devices/{id}/edges (any authed) — junction edges
 //	PUT /v1/devices/{id}/ssh-credentials (admin)
 //	GET /v1/devices/{id}/ssh-info (any authed)
@@ -64,6 +65,7 @@ func (h *Handler) Register(r chi.Router) {
 	r.With(h.requireAdmin).Patch("/v1/devices/{id}", h.update)
 	r.With(h.requireAdmin).Patch("/v1/devices/{id}/roles", h.updateRoles)
 	r.With(h.requireAdmin).Delete("/v1/devices/{id}", h.delete)
+	r.With(h.requireAdmin).Post("/v1/devices/{id}/restore", h.restore)
 	r.Get("/v1/devices/{id}/edges", h.listEdges)
 	// SSH credential endpoints — implementations live in
 	// credentials.go to keep this file focused on host facts.
@@ -113,7 +115,11 @@ type deviceItem struct {
 	// 推送的 Online 解耦。SPA 的 Hosts 页面按 Reachable 渲染状态列。
 	Reachable       bool       `json:"reachable"`
 	LastReachableAt *time.Time `json:"last_reachable_at,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
+	// DeletedAt: 非 nil 表示当前行已被软删除。`include_deleted=true` 时
+	// 后端才会把这些行返给前端，让 Logs / Hosts 的"显示已删除"开关能
+	// 渲染灰标 + "已删除"后缀。Pointer 让未删行直接省字段。
+	DeletedAt *time.Time `json:"deleted_at,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
 	// SSH fields echoed in clear (internal ops system — plaintext is
 	// the documented contract; see model/device/model.go + the 行为变化
 	// entry in CHANGELOG.md v0.9.1). Host / port / user / auth_kind are
@@ -260,6 +266,9 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 		if n, err := strconv.Atoi(s); err == nil {
 			f.Offset = n
 		}
+	}
+	if v := strings.ToLower(strings.TrimSpace(q.Get("include_deleted"))); v == "true" || v == "1" || v == "yes" {
+		f.IncludeDeleted = true
 	}
 
 	rows, err := h.uc.List(r.Context(), f)
@@ -470,11 +479,37 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	if err := h.uc.Delete(r.Context(), id); err != nil {
+	// hard=true → physical delete via Repo.HardDelete (Unscoped);
+	// default → soft delete (recoverable via POST /v1/devices/{id}/restore).
+	hard := parseBoolQuery(r.URL.Query().Get("hard"))
+	if err := h.uc.Delete(r.Context(), id, hard); err != nil {
 		writeErr(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// restore revives a soft-deleted device row. Admin only — same
+// justification as the monitor panel restore: re-introducing a row the
+// operator had explicitly retired is not something any-authed callers
+// should be able to trigger.
+func (h *Handler) restore(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := h.uc.Restore(r.Context(), id); err != nil {
+		writeErr(w, err)
+		return
+	}
+	// Re-read so the SPA sees the post-restore row (deleted_at cleared).
+	updated, err := h.uc.Get(r.Context(), id)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, devToItem(updated))
 }
 
 func (h *Handler) listEdges(w http.ResponseWriter, r *http.Request) {
@@ -533,6 +568,7 @@ func devToItem(d *devicemodel.Device) deviceItem {
 		LastSeenAt:      d.LastSeenAt,
 		Reachable:       d.Reachable,
 		LastReachableAt: d.LastReachableAt,
+		DeletedAt:       d.DeletedAt,
 		CreatedAt:       d.CreatedAt,
 		SSHHost:         d.SSHHost,
 		SSHPort:         d.SSHPort,
@@ -562,6 +598,18 @@ func parseID(r *http.Request) (uint64, error) {
 		return 0, errors.Join(errs.ErrInvalid, err)
 	}
 	return id, nil
+}
+
+// parseBoolQuery accepts the same wire-truthy spellings the rest of
+// the handler set uses (true/1/yes vs false/0/no). Empty / unknown
+// defaults to false so query-string omission stays the historical
+// "off" path.
+func parseBoolQuery(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "true", "1", "yes":
+		return true
+	}
+	return false
 }
 
 func writeJSON(w http.ResponseWriter, code int, body any) {

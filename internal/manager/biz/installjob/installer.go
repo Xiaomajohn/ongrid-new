@@ -68,7 +68,7 @@ func NewSSHInstaller(
 //
 //  1. Build a transient *device.Device snapshot from the Job row (no DB
 //     read — host:port:user:credential live on the Job as a snapshot).
-//  2. router.MustConnect(ctx, dev, PurposeInstallEdge) → *ssh.Client.
+//  2. router.MustConnect(ctx, dev, PurposeInstallEdge, RouteKindAuto) → *ssh.Client.
 //     The InstallEdge purpose forces the direct path; tunnel is rejected
 //     by the router because no edge can be online yet (that's what we're
 //     installing).
@@ -286,7 +286,7 @@ func (i *SSHInstaller) dial(ctx context.Context, dev *devicemodel.Device) (*ssh.
 	dialCtx, cancel := context.WithTimeout(ctx, i.connectTimeout)
 	defer cancel()
 
-	client, err := i.router.MustConnect(dialCtx, dev, devicessh.PurposeInstallEdge)
+	client, err := i.router.MustConnect(dialCtx, dev, devicessh.PurposeInstallEdge, devicessh.RouteKindAuto)
 	if err != nil {
 		return nil, fmt.Errorf("installjob: connect %s:%d: %w", dev.SSHHost, dev.SSHPort, err)
 	}

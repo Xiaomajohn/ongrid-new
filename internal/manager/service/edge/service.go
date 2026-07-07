@@ -48,8 +48,11 @@ func (s *Service) SetEdgeCaller(c EdgeCaller) { s.caller = c }
 // Create delegates to biz.Usecase.Create. The plaintext SecretKey in the
 // returned CreateResult must be echoed back to the caller ONCE; it is not
 // stored anywhere the API can retrieve it later.
-func (s *Service) Create(ctx context.Context, name string, createdBy *uint64) (*biz.CreateResult, error) {
-	return s.uc.Create(ctx, name, createdBy)
+//
+// opts is forwarded as-is so the HTTP layer can request a host-device
+// link and/or task_name without going through another code path.
+func (s *Service) Create(ctx context.Context, name string, createdBy *uint64, opts ...biz.CreateOption) (*biz.CreateResult, error) {
+	return s.uc.Create(ctx, name, createdBy, opts...)
 }
 
 // List returns edges matching filter.

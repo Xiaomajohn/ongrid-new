@@ -18,11 +18,12 @@ After=ongrid-edge-upgrade.service
 [Service]
 Type=simple
 # Paths below are placeholders, rendered by install.sh / install-edge.sh at
-# install time from the operator-chosen --prefix (default /mnt/data/toos-temp):
-#   __ENV_FILE__    PREFIX/etc/ongrid-edge/ongrid-edge.env
-#   __BIN_DEST__    PREFIX/bin/ongrid-edge
-#   __STATE_DIR__   PREFIX/var/lib/ongrid-edge
-#   __LOG_DIR__     PREFIX/var/log/ongrid-edge
+# install time from the operator-chosen --prefix (default /mnt/data/tools-temp)
+# + the on-grid-edge namespace layer (EDGE_ROOT=${PREFIX}/ongrid-edge):
+#   __ENV_FILE__    EDGE_ROOT/etc/ongrid-edge/ongrid-edge.env
+#   __BIN_DEST__    EDGE_ROOT/bin/ongrid-edge
+#   __STATE_DIR__   EDGE_ROOT/var/lib/ongrid-edge
+#   __LOG_DIR__     EDGE_ROOT/var/log/ongrid-edge
 # StateDirectory= is NOT used: it always maps to ${LOCALSTATEDIR}/lib/<name>
 # (= /var/lib/ongrid-edge on default systemd builds) and can't follow an
 # arbitrary operator prefix. We rely on ReadWritePaths= + the installer

@@ -37,14 +37,19 @@ import (
 // Repo is the narrow persistence contract this service depends on. The
 // concrete implementation lives in internal/manager/data/monitor/store;
 // the interface lets tests substitute an in-memory fake.
+//
+// ListFilter / Delete(hard) / Restore were added alongside the
+// device_id binding + soft-delete parity work (2026-07). See
+// model.Panel.DeviceID doc for context.
 type Repo interface {
-	List(ctx context.Context) ([]*model.Panel, error)
+	List(ctx context.Context, f ListFilter) ([]*model.Panel, error)
 	Get(ctx context.Context, id uint64) (*model.Panel, error)
 	MaxOrdinal(ctx context.Context) (int, error)
 	Create(ctx context.Context, p *model.Panel) (*model.Panel, error)
 	Update(ctx context.Context, id uint64, fields map[string]any) (*model.Panel, error)
 	SetSyncResult(ctx context.Context, id uint64, errMsg string) error
-	Delete(ctx context.Context, id uint64) error
+	Delete(ctx context.Context, id uint64, hard bool) error
+	Restore(ctx context.Context, id uint64) error
 }
 
 // GrafanaSyncer is the narrow surface the service uses to mirror
@@ -81,34 +86,63 @@ func New(repo Repo, syncer GrafanaSyncer, log *slog.Logger) *Service {
 	}
 }
 
+// ListFilter narrows Service.List results. The same field set is
+// exposed on the store.Repo for plumbing, but we keep a separate type
+// here so the biz layer doesn't have to import the data layer.
+//
+// DeviceID, when non-nil, restricts the result to "panels that apply
+// to this device": rows with device_id = f.DeviceID plus global rows
+// (device_id IS NULL). The Logs page's per-device route passes the
+// operator's selected device here, so the dropdown surfaces both the
+// device's own panels and any shared/global ones the operator may
+// want to attach to the log context. Callers that need the strictly
+// device-bound slice should filter client-side (panel.device_id ==
+// f.DeviceID).
+//
+// IncludeDeleted, when true, surfaces soft-deleted rows so the operator
+// can revive them via POST /:id/restore. Default false keeps the
+// default-scope behaviour (no soft-deleted rows visible).
+type ListFilter struct {
+	DeviceID       *uint64
+	IncludeDeleted bool
+}
+
 // CreateInput is the wire-shape for POST /v1/monitor/panels. Ordinal is
 // optional; empty falls back to max(ordinal)+1 so new panels land at
-// the end.
+// the end. DeviceID is optional: nil = global panel; non-nil = bound
+// to a specific device (Logs page's 监控 dropdown will surface it
+// only when the operator picks that device).
 type CreateInput struct {
-	Title   string `json:"title"`
-	Type    string `json:"type"`
-	PromQL  string `json:"promql"`
-	Legend  string `json:"legend"`
-	Unit    string `json:"unit"`
-	Ordinal *int   `json:"ordinal,omitempty"`
+	Title    string `json:"title"`
+	Type     string `json:"type"`
+	PromQL   string `json:"promql"`
+	Legend   string `json:"legend"`
+	Unit     string `json:"unit"`
+	Ordinal  *int   `json:"ordinal,omitempty"`
+	DeviceID *uint64 `json:"device_id,omitempty"`
 }
 
 // UpdateInput is the wire-shape for PATCH /v1/monitor/panels/{id}. Every
 // field is optional; nil means "leave column alone". The pointer-field
 // shape lets the wire distinguish "set to empty string" from "don't
-// touch", which a plain string can't do.
+// touch", which a plain string can't do. DeviceID is nil = "leave
+// binding alone"; a non-nil pointer sets the column to that value
+// (operators wanting to unbind a panel should DELETE + re-create it
+// rather than rely on PATCH).
 type UpdateInput struct {
-	Title   *string `json:"title,omitempty"`
-	Type    *string `json:"type,omitempty"`
-	PromQL  *string `json:"promql,omitempty"`
-	Legend  *string `json:"legend,omitempty"`
-	Unit    *string `json:"unit,omitempty"`
-	Ordinal *int    `json:"ordinal,omitempty"`
+	Title    *string `json:"title,omitempty"`
+	Type     *string `json:"type,omitempty"`
+	PromQL   *string `json:"promql,omitempty"`
+	Legend   *string `json:"legend,omitempty"`
+	Unit     *string `json:"unit,omitempty"`
+	Ordinal  *int    `json:"ordinal,omitempty"`
+	DeviceID *uint64 `json:"device_id,omitempty"`
 }
 
-// List returns all panels ordered by ordinal asc.
-func (s *Service) List(ctx context.Context) ([]*model.Panel, error) {
-	return s.repo.List(ctx)
+// List returns panels matching f. Pass zero-value ListFilter to keep
+// the legacy "all live panels" behaviour.
+func (s *Service) List(ctx context.Context, f ListFilter) ([]*model.Panel, error) {
+	return s.repo.List(ctx, f)
 }
 
 // Get returns one panel.
@@ -149,12 +183,13 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*model.Panel, err
 	}
 
 	row := &model.Panel{
-		Title:   in.Title,
-		Type:    in.Type,
-		PromQL:  in.PromQL,
-		Legend:  in.Legend,
-		Unit:    in.Unit,
-		Ordinal: ord,
+		Title:    in.Title,
+		Type:     in.Type,
+		PromQL:   in.PromQL,
+		Legend:   in.Legend,
+		Unit:     in.Unit,
+		Ordinal:  ord,
+		DeviceID: in.DeviceID,
 	}
 	saved, err := s.repo.Create(ctx, row)
 	if err != nil {
@@ -202,6 +237,10 @@ func (s *Service) Update(ctx context.Context, id uint64, in UpdateInput) (*model
 	if in.Ordinal != nil {
 		fields["ordinal"] = *in.Ordinal
 	}
+	if in.DeviceID != nil {
+		// PATCH /v1/monitor/panels/{id} 不接受清空（见 UpdateInput 注释）。
+		fields["device_id"] = *in.DeviceID
+	}
 	updated, err := s.repo.Update(ctx, id, fields)
 	if err != nil {
 		return nil, err
@@ -213,11 +252,30 @@ func (s *Service) Update(ctx context.Context, id uint64, in UpdateInput) (*model
 // Delete removes the panel and kicks off an async Grafana mirror so the
 // dashboard catches up. We sync from the post-delete list, which is why
 // we re-read after the delete inside the goroutine.
-func (s *Service) Delete(ctx context.Context, id uint64) error {
-	if err := s.repo.Delete(ctx, id); err != nil {
+//
+// hard=false (default) → soft delete; the row stays in the table and
+// can be revived via Restore. hard=true → physical delete (Unscoped).
+// Soft delete is the operator-friendly default; hard is the
+// un-recoverable path used when an operator explicitly wants the row
+// gone (e.g. audit remediation).
+func (s *Service) Delete(ctx context.Context, id uint64, hard bool) error {
+	if err := s.repo.Delete(ctx, id, hard); err != nil {
 		return err
 	}
 	s.kickSync("delete", id)
+	return nil
+}
+
+// Restore un-soft-deletes a previously soft-deleted panel. Idempotent:
+// calling Restore on a live row is a no-op (Restore's repo impl
+// reports ErrNotFound when the id is gone, never on already-live).
+// Sync is kicked after a successful restore so the Grafana mirror
+// picks the row up again.
+func (s *Service) Restore(ctx context.Context, id uint64) error {
+	if err := s.repo.Restore(ctx, id); err != nil {
+		return err
+	}
+	s.kickSync("restore", id)
 	return nil
 }
 
@@ -232,7 +290,7 @@ func (s *Service) SyncNow(ctx context.Context) error {
 	if s.syncer == nil {
 		return nil
 	}
-	panels, err := s.repo.List(ctx)
+	panels, err := s.repo.List(ctx, ListFilter{})
 	if err != nil {
 		return err
 	}
@@ -257,7 +315,7 @@ func (s *Service) kickSync(op string, panelID uint64) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), s.syncTO)
 		defer cancel()
-		panels, err := s.repo.List(ctx)
+		panels, err := s.repo.List(ctx, ListFilter{})
 		if err != nil {
 			s.log.Warn("monitor sync: list panels failed",
 				slog.String("op", op),

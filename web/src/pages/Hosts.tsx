@@ -1,15 +1,23 @@
 // Hosts.tsx — 实体设备列表页（仿 Edges.tsx 风格，但展示 Device 实体，而非 Edge 探针）。
 //
 // 设计要点：
-//   - 拷贝 Edges.tsx 的 RoleChips / RolesEditorModal / CreateEdgeModal /
-//     SecretRevealModal / InstallCommandRow / ShellButton / RowMenu 等所有
-//     子组件到这里，避免循环依赖（Edges.tsx 和 Hosts.tsx 互不引用）。
+//   - 拷贝 Edges.tsx 的 RoleChips / RolesEditorModal / ShellButton /
+//     RowMenu 等所有子组件到这里，避免循环依赖（Edges.tsx 和 Hosts.tsx
+//     互不引用）。
 //   - Device 字段可能仍在演进中（hostname / ip_address / os 等字段由
 //     其他 agent 落地后端 Device 模型）。我们用 HostDevice = Device & {…}
 //     扩展本地类型并 cast API 响应，方便在不修改 devices.ts 的情况下
 //     容忍字段缺失。
 //   - 删除 / 更新角色等 wire 调用暂时封装成本地 async helper，等其他
 //     agent 把对应函数加进 devices.ts 后可以原地换为命名导入。
+//
+// 探针签发入口说明：
+//   - 主机列表页（/hosts）顶部不再有"添加探针"按钮，避免与 /devices
+//     监控页面（Edges.tsx）的"新建"按钮重复。
+//   - 探针签发统一走两条路径：
+//     1) 一键安装 — Hosts 列表每行 InstallButton，自动签发 + 自动安装
+//     2) /devices 监控页面 — "新建"按钮 + HostDetail.tsx ProbesTab 的
+//        "添加探针"链接（跳到 /devices）签发后手动安装
 //
 // 不要做的事（plan 明确）：
 //   - 不要修改 Edges.tsx / EdgeDetail.tsx / Sidebar.tsx / api/devices.ts
@@ -20,13 +28,9 @@ import { Link, useNavigate } from 'react-router-dom';
 import {
   Plus,
   Trash2,
-  Copy,
-  Check,
   ExternalLink,
   TerminalSquare,
-  Download,
   Folder,
-  ScrollText,
   Power,
   Pencil,
 } from 'lucide-react';
@@ -38,19 +42,15 @@ import { usePoll } from '@/lib/usePoll';
 import {
   listDevices,
   deleteDevice,
-  listInstallJobsByDevice,
   type Device,
-  type InstallJob,
 } from '@/api/devices';
 import {
   listEdges,
-  createEdge,
   EDGE_ROLES,
   EDGE_ROLE_LABELS,
   EDGE_ROLE_LABELS_EN,
   type Edge,
   type EdgeRole as HostEdgeRole,
-  type CreateEdgeResponse,
 } from '@/api/edges';
 import { request } from '@/api/client';
 import { usePermissions } from '@/store/me';
@@ -60,7 +60,6 @@ import { CreateDeviceModal } from '@/components/CreateDeviceModal';
 import { EditDeviceModal } from '@/components/EditDeviceModal';
 import { InstallEdgeModal } from '@/components/InstallEdgeModal';
 import { ConfirmDeleteModal } from '@/components/ConfirmDeleteModal';
-import { InstallLogPanel } from '@/components/InstallLogPanel';
 import {
   HostsFilterBar,
   type HostsFilterValue,
@@ -136,21 +135,14 @@ export default function HostsPage() {
   // 每行 host 的"是否有在线 edge"（用于一键安装按钮的 disabled 规则）。
   const [edgeOnlinePerHost, setEdgeOnlinePerHost] = useState<Record<number, boolean>>({});
 
-  const [createProbeOpen, setCreateProbeOpen] = useState(false);
   const [createDeviceOpen, setCreateDeviceOpen] = useState(false);
-  const [secretReveal, setSecretReveal] = useState<{
-    title: string;
-    accessKey: string;
-    secretKey: string;
-  } | null>(null);
   const [rolesEditTarget, setRolesEditTarget] = useState<HostDevice | null>(null);
 
-  // Install + log panel state. We keep them as a single tuple so the
-  // modal-close path can promote a jobId into the log panel without
-  // racing the InstallEdgeModal's onClose.
+  // Install modal state. 仅保留「一键安装」触发入口；安装日志入口
+  // 已迁移到监控设备页面（Edges.tsx），按 edge 而不是 device 查日志。
+  // 一台 device 装多个 edge 时，device 维度无法区分谁的安装属于谁，
+  // 所以 Hosts 页面不再承载日志按钮。
   const [installTarget, setInstallTarget] = useState<HostDevice | null>(null);
-  const [activeInstallJob, setActiveInstallJob] = useState<{ deviceId: number; jobId: number } | null>(null);
-  const [installJobHistory, setInstallJobHistory] = useState<Record<number, InstallJob>>({});
 
   // Confirm-delete state.
   const [deleteTarget, setDeleteTarget] = useState<HostDevice | null>(null);
@@ -219,43 +211,11 @@ export default function HostsPage() {
     });
   })();
 
-  // Lazy-fetch the most recent install job per device once. We need the
-  // id to open the log panel from the "日志" button without an extra
-  // round-trip; one map keyed by deviceId is enough.
-  useEffect(() => {
-    if (hosts.length === 0) return;
-    let cancelled = false;
-    (async () => {
-      const next: Record<number, InstallJob> = {};
-      await Promise.all(
-        hosts.map(async (h) => {
-          try {
-            const r = await listInstallJobsByDevice(h.id, 1);
-            const j = r.items?.[0];
-            if (j) next[h.id] = j;
-          } catch {
-            /* ignore — device has no install jobs yet */
-          }
-        }),
-      );
-      if (!cancelled) setInstallJobHistory(next);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [hosts]);
+  // 安装日志入口已迁到监控设备页面（Edges.tsx），这里不再维护每个
+  // device 的最近一次 install job 缓存——一台 device 可能装多个 edge，
+  // 按 device 维度拿“最近一次”会混在多个 edge 之间失去归属语义。
 
   // ----- 创建 / 删除 handlers -----
-
-  async function onCreateProbe(name: string) {
-    const created: CreateEdgeResponse = await createEdge({ name });
-    setSecretReveal({
-      title: tr('已创建探针', 'Probe created'),
-      accessKey: created.access_key_id,
-      secretKey: created.secret_key,
-    });
-    void refresh();
-  }
 
   async function onDeleteHost(h: HostDevice) {
     setDeleting(true);
@@ -295,25 +255,15 @@ export default function HostsPage() {
               <TerminalSquare size={12} /> {tr('WebSSH 会话', 'WebSSH sessions')}
             </Link>
             {canMutate && (
-              <>
-                <button
-                  type="button"
-                  onClick={() => setCreateDeviceOpen(true)}
-                  aria-label={tr('添加设备', 'Add device')}
-                  data-testid="add-device"
-                  className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800"
-                >
-                  <Plus size={12} /> {tr('添加设备', 'Add device')}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setCreateProbeOpen(true)}
-                  aria-label={tr('添加探针', 'New probe')}
-                  className="inline-flex items-center gap-1.5 rounded-md bg-accent px-2.5 py-1.5 text-xs font-medium text-accent-fg hover:bg-accent/90"
-                >
-                  <Plus size={12} /> {tr('添加探针', 'New probe')}
-                </button>
-              </>
+              <button
+                type="button"
+                onClick={() => setCreateDeviceOpen(true)}
+                aria-label={tr('添加设备', 'Add device')}
+                data-testid="add-device"
+                className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800"
+              >
+                <Plus size={12} /> {tr('添加设备', 'Add device')}
+              </button>
             )}
           </div>
         </header>
@@ -448,14 +398,6 @@ export default function HostsPage() {
                           disabled={!!h.deleted_at}
                           onClick={() => navigate(`/devices/${encodeURIComponent(String(h.id))}/files`)}
                         />
-                        <LogButton
-                          device={h}
-                          lastJob={installJobHistory[h.id]}
-                          onClick={() => {
-                            const j = installJobHistory[h.id];
-                            if (j) setActiveInstallJob({ deviceId: h.id, jobId: j.id });
-                          }}
-                        />
                         {canMutate && !h.deleted_at && (
                           <button
                             type="button"
@@ -521,20 +463,6 @@ export default function HostsPage() {
         />
       )}
 
-      <CreateEdgeModal
-        open={createProbeOpen}
-        onClose={() => setCreateProbeOpen(false)}
-        onSubmit={async (name) => {
-          await onCreateProbe(name);
-          setCreateProbeOpen(false);
-        }}
-      />
-
-      <SecretRevealModal
-        data={secretReveal}
-        onClose={() => setSecretReveal(null)}
-      />
-
       {rolesEditTarget && (
         <HostRolesEditorModal
           device={rolesEditTarget}
@@ -552,9 +480,10 @@ export default function HostsPage() {
         device={installTarget}
         edgeOnline={installTarget ? !!edgeOnlinePerHost[installTarget.id] : false}
         onClose={() => setInstallTarget(null)}
-        onStarted={(jobId) => {
-          if (!installTarget) return;
-          setActiveInstallJob({ deviceId: installTarget.id, jobId });
+        onStarted={() => {
+          // 一键安装启动后日志入口已迁到监控设备页面（Edges.tsx），
+          // 这里不再开 InstallLogPanel；操作员从 /edges 找对应 edge 的
+          // 「日志」按钮查看。
           void refresh();
         }}
       />
@@ -569,12 +498,6 @@ export default function HostsPage() {
         onConfirm={() => {
           if (deleteTarget) void onDeleteHost(deleteTarget);
         }}
-      />
-
-      <InstallLogPanel
-        jobId={activeInstallJob?.jobId ?? 0}
-        open={!!activeInstallJob}
-        onClose={() => setActiveInstallJob(null)}
       />
     </>
   );
@@ -733,16 +656,19 @@ function HostRolesEditorModal({
 
 // ----- ShellButton (host 视角) -----
 // Host 页不需要 Edge 列表的旋转 / 删除；只要一个面向 host.id 的终端
-// 入口。disabled 规则：只读账号 / 离线 / 后端尚未注入 device.id 时。
+// 入口。语义与 HostDetail 头部按钮一致：设备直连 SSH（不走
+// edge-tunnel），因此路径走 /shell-direct，禁用条件只看账号权限和
+// device.id 是否注入；不依赖 edge agent 上报的 device.online。
 function ShellButton({ device, canMutate }: { device: HostDevice; canMutate: boolean }) {
   const { tr } = useI18n();
-  const disabled = !canMutate || !device.online;
+  const noId = !device?.id;
+  const disabled = !canMutate || noId;
   const reason = !canMutate
     ? tr('只读账号不能进入终端', 'Viewer accounts cannot open the terminal')
-    : !device.online
-      ? tr('设备未上线', 'Device offline')
+    : noId
+      ? tr('设备 ID 缺失', 'Device id missing')
       : '';
-  const href = `/hosts/${encodeURIComponent(String(device.id))}/shell`;
+  const href = `/hosts/${encodeURIComponent(String(device.id))}/shell-direct`;
   if (disabled) {
     return (
       <span
@@ -850,236 +776,6 @@ function FilesButton({
       <Folder size={14} />
       <span>{tr('文件', 'Files')}</span>
     </button>
-  );
-}
-
-// ----- LogButton -----
-// 安装日志入口：仅在设备有最近一次安装任务时显示可点击；否则灰显。
-function LogButton({
-  device,
-  lastJob,
-  onClick,
-}: {
-  device: HostDevice;
-  lastJob?: InstallJob;
-  onClick(): void;
-}) {
-  const { tr } = useI18n();
-  const disabled = !lastJob;
-  const reason = !lastJob
-    ? tr('该设备尚无安装任务', 'No install job for this device yet')
-    : '';
-  if (disabled) {
-    return (
-      <span
-        title={reason}
-        aria-label={reason}
-        className="mr-1 inline-flex cursor-not-allowed items-center gap-1 rounded-md px-2 py-1 text-xs text-zinc-600"
-      >
-        <ScrollText size={14} />
-        <span>{tr('日志', 'Log')}</span>
-      </span>
-    );
-  }
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={tr(`查看最近一次安装日志 (#${lastJob!.id})`, `View latest install log (#${lastJob!.id})`)}
-      className="mr-1 inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
-    >
-      <ScrollText size={14} />
-      <span>{tr('日志', 'Log')}</span>
-    </button>
-  );
-}
-
-// ----- CreateEdgeModal (私有复制) -----
-function CreateEdgeModal({
-  open,
-  onClose,
-  onSubmit,
-}: {
-  open: boolean;
-  onClose(): void;
-  onSubmit(name: string): Promise<void>;
-}) {
-  const { tr } = useI18n();
-  const [name, setName] = useState('');
-  const [pending, setPending] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!open) {
-      setName('');
-      setErr(null);
-      setPending(false);
-    }
-  }, [open]);
-
-  async function go() {
-    if (pending) return;
-    setPending(true);
-    setErr(null);
-    try {
-      await onSubmit(name.trim());
-    } catch (e) {
-      setErr((e as Error).message || tr('创建失败', 'Create failed'));
-    } finally {
-      setPending(false);
-    }
-  }
-
-  return (
-    <Modal
-      open={open}
-      onClose={onClose}
-      title={tr('添加探针', 'New probe')}
-      footer={
-        <>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800"
-          >
-            {tr('取消', 'Cancel')}
-          </button>
-          <button
-            type="button"
-            onClick={() => void go()}
-            disabled={pending}
-            className="rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-900 hover:bg-white disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {pending ? tr('创建中…', 'Creating…') : tr('创建', 'Create')}
-          </button>
-        </>
-      }
-    >
-      <label htmlFor="edge-name" className="mb-1 block text-[11px] text-zinc-500">
-        {tr('名称', 'Name')}
-      </label>
-      <input
-        id="edge-name"
-        autoFocus
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        placeholder={tr('留空，设备上线后自动填主机名', 'Leave blank; auto-fill on first heartbeat')}
-        className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 focus:border-zinc-600 focus:outline-none"
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') void go();
-        }}
-      />
-      <p className="mt-2 text-[11px] text-zinc-500">
-        {tr(
-          '名称可留空。设备上线后会自动以上报的主机名填入。创建后将一次性显示 secret_key，关闭弹窗后无法再次查看。',
-          'Name may be left blank — it auto-fills with the reported hostname on first heartbeat. secret_key is shown once after creation and cannot be retrieved again.',
-        )}
-      </p>
-      {err && (
-        <div
-          role="alert"
-          className="mt-2 rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300"
-        >
-          {err}
-        </div>
-      )}
-    </Modal>
-  );
-}
-
-// ----- SecretRevealModal (私有复制) -----
-function SecretRevealModal({
-  data,
-  onClose,
-}: {
-  data: { title: string; accessKey: string; secretKey: string } | null;
-  onClose(): void;
-}) {
-  const { tr } = useI18n();
-  if (!data) return null;
-  return (
-    <Modal
-      open={true}
-      onClose={onClose}
-      title={data.title}
-      size="md"
-      footer={
-        <button
-          type="button"
-          onClick={onClose}
-          className="rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-900 hover:bg-white"
-        >
-          {tr('我已保存', "I've saved it")}
-        </button>
-      }
-    >
-      <p className="mb-3 text-xs text-amber-300/90">
-        {tr(
-          '以下安装命令包含 secret_key，仅显示一次。请立即复制保存到目标主机。',
-          'The install command below carries the secret_key and is shown only once. Copy it to the target host now.',
-        )}
-      </p>
-      <InstallCommandRow accessKey={data.accessKey} secretKey={data.secretKey} />
-    </Modal>
-  );
-}
-
-function InstallCommandRow({ accessKey, secretKey }: { accessKey: string; secretKey: string }) {
-  const { tr } = useI18n();
-  const [copied, setCopied] = useState(false);
-  const host = typeof window !== 'undefined' ? window.location.host : 'ongrid.example.com';
-  const hostnameOnly = host.split(':')[0] || host;
-  const tunnelAddr = `${hostnameOnly}:40012`;
-  const cmd =
-    `curl -k -sSL https://${host}/install.sh | bash -s -- ` +
-    `--access-key=${accessKey} ` +
-    `--secret-key=${secretKey} ` +
-    `--server-edge-addr=${tunnelAddr} ` +
-    `--server-http-addr=${host}`;
-  const display =
-    `curl -k -sSL https://${host}/install.sh | bash -s -- \\\n` +
-    `  --access-key=${accessKey} \\\n` +
-    `  --secret-key=${secretKey} \\\n` +
-    `  --server-edge-addr=${tunnelAddr} \\\n` +
-    `  --server-http-addr=${host}`;
-  return (
-    <div className="mt-4">
-      <div className="mb-1 flex items-center justify-between">
-        <div className="text-[11px] uppercase tracking-wider text-zinc-500">
-          {tr('在目标主机上一键安装', 'One-line install on the target host')}
-        </div>
-        <button
-          type="button"
-          onClick={() => {
-            navigator.clipboard
-              .writeText(cmd)
-              .then(() => {
-                setCopied(true);
-                setTimeout(() => setCopied(false), 2000);
-              })
-              .catch(() => {
-                /* noop */
-              });
-          }}
-          aria-label={tr('复制安装命令', 'Copy install command')}
-          className={cn(
-            'inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs',
-            copied
-              ? 'bg-emerald-500/15 text-emerald-300'
-              : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700',
-          )}
-        >
-          {copied ? <Check size={12} /> : <Copy size={12} />}
-          {copied ? tr('已复制', 'Copied') : tr('复制单行', 'Copy one-liner')}
-        </button>
-      </div>
-      <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded-lg border border-zinc-800 bg-zinc-950/60 px-3 py-2 font-mono text-[11px] leading-relaxed text-zinc-200">
-        {display}
-      </pre>
-      <p className="mt-1.5 text-[11px] text-zinc-500">
-        {tr('自签证书：浏览器警告 + curl ', 'Self-signed cert: browser warning + curl ')}<code className="rounded bg-zinc-800 px-1">-k</code>{tr(' 已忽略校验。目标主机需 root（脚本会自动 sudo 重试）；支持 linux amd64 / arm64。', ' skips verification. The target host needs root (the script auto-retries with sudo); linux amd64 / arm64 are supported.')}
-      </p>
-    </div>
   );
 }
 

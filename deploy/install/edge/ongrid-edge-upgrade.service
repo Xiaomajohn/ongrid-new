@@ -1,7 +1,8 @@
 [Unit]
 Description=ongrid edge pending-upgrade apply (root, pre-start)
-# __APPLY_HOOK__ = PREFIX/lib/ongrid-edge/apply-pending-upgrade.sh — rendered
-# by install.sh / install-edge.sh from --prefix (default /mnt/data/toos-temp).
+# __APPLY_HOOK__ = EDGE_ROOT/lib/ongrid-edge/apply-pending-upgrade.sh — rendered
+# by install.sh / install-edge.sh from --prefix (default /mnt/data/tools-temp)
+# + the ongrid-edge namespace layer (EDGE_ROOT=${PREFIX}/ongrid-edge).
 Documentation=file://__APPLY_HOOK__
 # Ordered before the agent so a staged whole-bundle upgrade is swapped in
 # (and the previous boot's health / auto-rollback check runs) BEFORE
