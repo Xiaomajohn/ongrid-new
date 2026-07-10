@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: edge_agent/plugins/output_render_plugins
+title: 边缘信号采集插件（审计/日志/链路）
+scope:
+    - internal/edgeagent/plugins/audit/
+    - internal/edgeagent/plugins/logs/
+    - internal/edgeagent/plugins/traces/
+source_files: []
+depends_on: []
+related_to:
+    - path: edge_agent/plugins/core_framework

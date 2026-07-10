@@ -1,0 +1,12 @@
+schema_version: 1
+module_path: manager_service/aiops/chat_runtime
+title: AIOps 聊天运行时（Graph 内核与多 Agent 编排）
+scope:
+    - internal/manager/biz/aiops/chatruntime/
+source_files: []
+depends_on: []
+related_to:
+    - path: manager_service/aiops/data_store
+    - path: manager_service/aiops/graph_engine
+    - path: manager_service/aiops/tools_and_basetool
+    - path: manager_service/alert

@@ -1,0 +1,10 @@
+schema_version: 1
+module_path: edge_agent/agent_core
+title: Edge Agent 业务循环与远程升级
+scope:
+    - internal/edgeagent/biz/
+source_files: []
+depends_on: []
+related_to:
+    - path: api_protos
+    - path: deploy_artifacts

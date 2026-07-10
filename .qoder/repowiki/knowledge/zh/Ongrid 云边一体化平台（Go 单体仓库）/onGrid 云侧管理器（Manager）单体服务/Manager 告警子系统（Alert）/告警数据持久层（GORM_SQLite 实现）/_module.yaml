@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: manager_service/alert/data_store
+title: 告警数据持久层（GORM/SQLite 实现）
+scope:
+    - internal/manager/data/alert/store/
+source_files: []
+depends_on: []
+related_to: []

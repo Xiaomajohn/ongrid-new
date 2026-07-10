@@ -1,0 +1,9 @@
+schema_version: 1
+module_path: edge_agent/cmd_policy_sandbox
+title: 边缘 Agent 命令策略与沙箱执行器
+scope:
+    - internal/edgeagent/cmdpolicy/
+source_files: []
+depends_on: []
+related_to:
+    - path: edge_agent/agent_api

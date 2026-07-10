@@ -1,0 +1,13 @@
+schema_version: 1
+module_path: manager_service/device_management
+title: 设备管理（主机与 SSH 凭据）
+scope:
+    - internal/manager/biz/device/
+    - internal/manager/server/device/
+    - internal/manager/data/device/
+source_files: []
+depends_on: []
+related_to:
+    - path: frontend/shared_api_client
+    - path: manager_service/devicessh_webshell
+    - path: manager_service/main_entrypoint

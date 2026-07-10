@@ -1,0 +1,12 @@
+schema_version: 1
+module_path: manager_service/installjob
+title: 边缘设备一键安装任务队列（InstallJob）
+scope:
+    - internal/manager/biz/installjob/
+    - internal/manager/server/installjob/
+    - internal/manager/data/installjob/
+source_files: []
+depends_on: []
+related_to:
+    - path: manager_service/edge_management
+    - path: manager_service/main_entrypoint

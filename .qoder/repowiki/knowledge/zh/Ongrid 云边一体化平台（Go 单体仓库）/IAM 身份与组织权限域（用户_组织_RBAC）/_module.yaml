@@ -1,0 +1,10 @@
+schema_version: 1
+module_path: iam_service
+title: IAM 身份与组织权限域（用户/组织/RBAC）
+scope:
+    - internal/iam/
+source_files: []
+depends_on: []
+related_to:
+    - path: frontend/settings_admin/org_and_users
+    - path: manager_service/main_entrypoint

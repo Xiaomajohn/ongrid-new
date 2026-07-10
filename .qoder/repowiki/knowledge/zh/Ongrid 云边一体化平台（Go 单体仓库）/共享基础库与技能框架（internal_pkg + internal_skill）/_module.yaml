@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: shared_libs
+title: 共享基础库与技能框架（internal/pkg + internal/skill）
+scope:
+    - internal/pkg/
+    - internal/skill/
+source_files: []
+depends_on: []
+related_to:
+    - path: edge_agent
+    - path: manager_service

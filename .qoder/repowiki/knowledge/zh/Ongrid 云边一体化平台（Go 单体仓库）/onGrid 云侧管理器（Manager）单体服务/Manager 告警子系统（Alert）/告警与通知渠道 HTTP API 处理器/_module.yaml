@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: manager_service/alert/http_server
+title: 告警与通知渠道 HTTP API 处理器
+scope:
+    - internal/manager/server/alert/
+source_files: []
+depends_on: []
+related_to:
+    - path: frontend/alerts_incidents
+    - path: manager_service/alert/investigation
+    - path: manager_service/main_entrypoint

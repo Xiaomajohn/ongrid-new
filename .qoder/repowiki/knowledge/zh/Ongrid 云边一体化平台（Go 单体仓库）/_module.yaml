@@ -1,0 +1,36 @@
+schema_version: 1
+module_path: ""
+title: Ongrid 云边一体化平台（Go 单体仓库）
+scope:
+    - README.md
+    - CONTRIBUTING.md
+    - .gitignore
+    - go.mod
+    - go.sum
+    - Makefile
+    - ROADMAP.md
+    - SECURITY.md
+    - .dockerignore
+    - .env.example
+    - .go-arch-lint.yml
+    - .golangci.yml
+    - .tool-versions
+    - AGENTS.md
+    - CHANGELOG.md
+    - CODEOWNERS
+    - CODE_OF_CONDUCT.md
+    - LICENSE
+    - README_DE.md
+    - README_ES.md
+    - README_FR.md
+    - README_JA.md
+    - README_KO.md
+    - README_PT.md
+    - README_RU.md
+    - README_ZH.md
+    - ROADMAP.zh-CN.md
+    - VERSION
+    - package-lock.json
+source_files: []
+depends_on: []
+related_to: []

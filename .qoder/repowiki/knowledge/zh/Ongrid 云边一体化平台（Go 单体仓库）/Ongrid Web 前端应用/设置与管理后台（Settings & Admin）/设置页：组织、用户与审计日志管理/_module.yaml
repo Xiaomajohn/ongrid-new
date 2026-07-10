@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: frontend/settings_admin/org_and_users
+title: 设置页：组织、用户与审计日志管理
+scope:
+    - web/src/pages/settings/Orgs.tsx
+    - web/src/pages/settings/Users.tsx
+    - web/src/pages/settings/AuditLog.tsx
+source_files: []
+depends_on: []
+related_to:
+    - path: iam_service

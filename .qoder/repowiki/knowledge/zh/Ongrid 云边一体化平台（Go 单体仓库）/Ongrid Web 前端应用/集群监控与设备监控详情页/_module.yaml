@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: frontend/monitoring
+title: 集群监控与设备监控详情页
+scope:
+    - web/src/pages/Monitor.tsx
+    - web/src/pages/MonitorDeviceDetail.tsx
+    - web/src/components/monitor/
+source_files: []
+depends_on: []
+related_to:
+    - path: manager_service/metric_pipeline

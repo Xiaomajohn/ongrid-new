@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: manager_service/alert/investigation
+title: 告警调查与规则预览（AI RCA + 试算）
+scope:
+    - internal/manager/biz/alert/investigator/
+    - internal/manager/biz/alert/usecase.go
+    - internal/manager/biz/alert/preview.go
+source_files: []
+depends_on: []
+related_to:
+    - path: manager_service/alert/http_server

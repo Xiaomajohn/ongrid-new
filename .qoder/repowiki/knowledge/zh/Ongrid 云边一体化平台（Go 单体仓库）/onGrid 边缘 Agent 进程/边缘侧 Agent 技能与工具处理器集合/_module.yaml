@@ -1,0 +1,15 @@
+schema_version: 1
+module_path: edge_agent/agent_api
+title: 边缘侧 Agent 技能与工具处理器集合
+scope:
+    - internal/edgeagent/bash/
+    - internal/edgeagent/host_files/
+    - internal/edgeagent/restart_service/
+    - internal/edgeagent/webshell/
+    - internal/edgeagent/skill/
+    - internal/edgeagent/service/
+source_files: []
+depends_on: []
+related_to:
+    - path: edge_agent/cmd_policy_sandbox
+    - path: edge_agent/collectors

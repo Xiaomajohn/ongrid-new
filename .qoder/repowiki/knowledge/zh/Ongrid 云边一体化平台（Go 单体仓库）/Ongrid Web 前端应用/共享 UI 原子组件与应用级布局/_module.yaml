@@ -1,0 +1,10 @@
+schema_version: 1
+module_path: frontend/shared_components_ui
+title: 共享 UI 原子组件与应用级布局
+scope:
+    - web/src/components/ui/
+    - web/src/components/Layout.tsx
+    - web/src/components/Sidebar.tsx
+source_files: []
+depends_on: []
+related_to: []

@@ -1,0 +1,16 @@
+schema_version: 1
+module_path: manager_service/shared_infra
+title: Manager 共享基础设施（Grafana/审批/审计/集成/中间件/边缘认证/边界服务）
+scope:
+    - internal/manager/biz/grafana/
+    - internal/manager/biz/approval/
+    - internal/manager/biz/audit/
+    - internal/manager/server/integration/
+    - internal/manager/server/middleware/
+    - internal/manager/server/edgeauth/
+    - internal/manager/service/frontierbound/
+    - internal/manager/service/aiopsconfig/
+source_files: []
+depends_on: []
+related_to:
+    - path: manager_service/main_entrypoint

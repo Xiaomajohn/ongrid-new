@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: frontend/home_dashboard
+title: 首页与仪表盘页面
+scope:
+    - web/src/pages/Home.tsx
+    - web/src/pages/Dashboard.tsx
+    - web/src/pages/PageView.tsx
+source_files: []
+depends_on: []
+related_to:
+    - path: manager_service/aiops/http_server

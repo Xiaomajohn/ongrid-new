@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: manager_service/skill_catalog
+title: 技能目录与执行编排（Skill Catalog & Orchestration）
+scope:
+    - internal/manager/biz/skill/
+    - internal/manager/server/skill/
+source_files: []
+depends_on: []
+related_to:
+    - path: manager_service/main_entrypoint
+    - path: manager_service/marketplace

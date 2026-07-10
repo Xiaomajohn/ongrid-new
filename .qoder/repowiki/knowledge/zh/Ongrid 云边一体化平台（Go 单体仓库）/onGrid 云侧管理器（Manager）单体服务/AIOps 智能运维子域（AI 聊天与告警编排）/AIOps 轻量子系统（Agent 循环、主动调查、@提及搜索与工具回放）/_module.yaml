@@ -1,0 +1,12 @@
+schema_version: 1
+module_path: manager_service/aiops/lightweight_subsystems
+title: AIOps 轻量子系统（Agent 循环、主动调查、@提及搜索与工具回放）
+scope:
+    - internal/manager/biz/aiops/agent/
+    - internal/manager/biz/aiops/investigator/
+    - internal/manager/biz/aiops/mentions/
+    - internal/manager/biz/aiops/toolreplay/
+source_files: []
+depends_on: []
+related_to:
+    - path: manager_service/aiops/data_store

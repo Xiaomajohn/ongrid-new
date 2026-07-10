@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: frontend/settings_admin/integrations_secrets
+title: 设置页：集成、凭据与通知渠道
+scope:
+    - web/src/pages/settings/Secrets.tsx
+    - web/src/pages/settings/Integrations.tsx
+    - web/src/pages/settings/Notifications.tsx
+source_files: []
+depends_on: []
+related_to:
+    - path: manager_service/secret_vault

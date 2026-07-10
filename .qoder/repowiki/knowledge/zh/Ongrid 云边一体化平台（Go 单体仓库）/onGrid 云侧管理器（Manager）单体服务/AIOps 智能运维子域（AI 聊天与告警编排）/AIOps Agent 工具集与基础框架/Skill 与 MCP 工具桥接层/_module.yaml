@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: manager_service/aiops/tools_and_basetool/skill_mcp_bridges
+title: Skill 与 MCP 工具桥接层
+scope:
+    - internal/manager/biz/aiops/tools/skill_bridge.go
+    - internal/manager/biz/aiops/tools/mcp_basetool.go
+    - internal/manager/biz/aiops/tools/inventory_bridge.go
+source_files: []
+depends_on: []
+related_to:
+    - path: manager_service/aiops/tools_and_basetool/basetool_core

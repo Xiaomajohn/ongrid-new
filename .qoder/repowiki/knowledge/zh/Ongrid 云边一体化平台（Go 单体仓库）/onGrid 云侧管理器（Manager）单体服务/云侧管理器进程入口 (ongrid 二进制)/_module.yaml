@@ -1,0 +1,29 @@
+schema_version: 1
+module_path: manager_service/main_entrypoint
+title: 云侧管理器进程入口 (ongrid 二进制)
+scope:
+    - cmd/ongrid/
+source_files: []
+depends_on: []
+related_to:
+    - path: api_protos
+    - path: deploy_artifacts
+    - path: iam_service
+    - path: manager_service/aiops/http_server
+    - path: manager_service/alert/http_server
+    - path: manager_service/device_management
+    - path: manager_service/devicessh_webshell
+    - path: manager_service/flow_engine
+    - path: manager_service/imbridge
+    - path: manager_service/installjob
+    - path: manager_service/knowledge_base
+    - path: manager_service/marketplace
+    - path: manager_service/mcp_integration
+    - path: manager_service/metric_pipeline
+    - path: manager_service/monitoring
+    - path: manager_service/reporting
+    - path: manager_service/secret_vault
+    - path: manager_service/settings
+    - path: manager_service/shared_infra
+    - path: manager_service/skill_catalog
+    - path: manager_service/topology

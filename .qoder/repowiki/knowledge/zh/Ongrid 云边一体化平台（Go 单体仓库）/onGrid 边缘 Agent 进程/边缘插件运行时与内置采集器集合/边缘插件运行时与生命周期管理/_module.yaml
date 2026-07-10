@@ -1,0 +1,14 @@
+schema_version: 1
+module_path: edge_agent/plugins/core_framework
+title: 边缘插件运行时与生命周期管理
+scope:
+    - internal/edgeagent/plugins/plugin.go
+    - internal/edgeagent/plugins/supervisor.go
+    - internal/edgeagent/plugins/subprocess.go
+    - internal/edgeagent/plugins/config_env.go
+    - internal/edgeagent/plugins/config_tunnel.go
+source_files: []
+depends_on: []
+related_to:
+    - path: edge_agent/plugins/built_in_metrics_scrapers
+    - path: edge_agent/plugins/output_render_plugins

@@ -1,0 +1,10 @@
+schema_version: 1
+module_path: frontend/shared_lib_i18n_styles
+title: 前端共享库：国际化、格式化与样式主题
+scope:
+    - web/src/lib/
+    - web/src/i18n/
+    - web/src/styles/
+source_files: []
+depends_on: []
+related_to: []

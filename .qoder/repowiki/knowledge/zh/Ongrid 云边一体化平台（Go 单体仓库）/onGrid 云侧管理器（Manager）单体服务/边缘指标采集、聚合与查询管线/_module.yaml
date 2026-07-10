@@ -1,0 +1,13 @@
+schema_version: 1
+module_path: manager_service/metric_pipeline
+title: 边缘指标采集、聚合与查询管线
+scope:
+    - internal/manager/biz/metric/
+    - internal/manager/server/metric/
+    - internal/manager/data/metric/
+    - internal/manager/biz/promwrite/
+source_files: []
+depends_on: []
+related_to:
+    - path: frontend/monitoring
+    - path: manager_service/main_entrypoint

@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: frontend/settings_admin/system_settings
+title: 设置页：关于 / 健康检查 / 版本升级
+scope:
+    - web/src/pages/settings/About.tsx
+    - web/src/pages/settings/Health.tsx
+    - web/src/pages/settings/Upgrade.tsx
+source_files: []
+depends_on: []
+related_to:
+    - path: manager_service/monitoring

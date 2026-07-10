@@ -1,0 +1,10 @@
+schema_version: 1
+module_path: api_protos
+title: API 契约与 Proto 定义（buf 构建）
+scope:
+    - api/
+source_files: []
+depends_on: []
+related_to:
+    - path: edge_agent/agent_core
+    - path: manager_service/main_entrypoint

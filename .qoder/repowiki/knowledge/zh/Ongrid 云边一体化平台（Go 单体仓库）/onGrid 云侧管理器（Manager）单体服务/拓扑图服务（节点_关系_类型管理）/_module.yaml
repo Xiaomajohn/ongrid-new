@@ -1,0 +1,14 @@
+schema_version: 1
+module_path: manager_service/topology
+title: 拓扑图服务（节点/关系/类型管理）
+scope:
+    - internal/manager/biz/topology/
+    - internal/manager/server/topology/
+    - internal/manager/data/topology/
+source_files: []
+depends_on: []
+related_to:
+    - path: frontend/shared_api_client
+    - path: frontend/topology
+    - path: manager_service/aiops/tools_and_basetool/topology_incident_tools
+    - path: manager_service/main_entrypoint

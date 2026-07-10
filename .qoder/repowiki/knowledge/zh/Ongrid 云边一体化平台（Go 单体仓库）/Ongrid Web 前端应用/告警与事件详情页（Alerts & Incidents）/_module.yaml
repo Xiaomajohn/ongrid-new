@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: frontend/alerts_incidents
+title: 告警与事件详情页（Alerts & Incidents）
+scope:
+    - web/src/pages/Alerts.tsx
+    - web/src/pages/AlertRules.tsx
+    - web/src/pages/IncidentDetail.tsx
+source_files: []
+depends_on: []
+related_to:
+    - path: manager_service/alert/http_server

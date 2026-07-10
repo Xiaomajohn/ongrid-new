@@ -1,0 +1,14 @@
+schema_version: 1
+module_path: manager_service/marketplace
+title: 技能/Agent 市场包安装与签名校验
+scope:
+    - internal/manager/biz/marketplace/
+    - internal/manager/server/marketplace/
+    - internal/manager/data/marketplace/
+source_files: []
+depends_on: []
+related_to:
+    - path: frontend/marketplace
+    - path: frontend/shared_api_client
+    - path: manager_service/main_entrypoint
+    - path: manager_service/skill_catalog

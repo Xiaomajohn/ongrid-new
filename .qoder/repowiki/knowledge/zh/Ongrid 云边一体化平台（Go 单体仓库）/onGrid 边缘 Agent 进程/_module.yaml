@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: edge_agent
+title: onGrid 边缘 Agent 进程
+scope:
+    - cmd/ongrid-edge/
+    - internal/edgeagent/
+source_files: []
+depends_on: []
+related_to:
+    - path: shared_libs
+    - path: tests

@@ -1,0 +1,12 @@
+schema_version: 1
+module_path: manager_service/edge_management
+title: 边缘节点（Edge）管理与认证子系统
+scope:
+    - internal/manager/biz/edge/
+    - internal/manager/server/edge/
+    - internal/manager/server/edgeauth/
+    - internal/manager/data/edge/
+source_files: []
+depends_on: []
+related_to:
+    - path: manager_service/installjob

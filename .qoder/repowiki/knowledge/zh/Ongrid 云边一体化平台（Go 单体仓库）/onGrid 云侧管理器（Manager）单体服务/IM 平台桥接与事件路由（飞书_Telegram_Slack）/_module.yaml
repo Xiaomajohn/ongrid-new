@@ -1,0 +1,12 @@
+schema_version: 1
+module_path: manager_service/imbridge
+title: IM 平台桥接与事件路由（飞书/Telegram/Slack）
+scope:
+    - internal/manager/biz/imbridge/
+    - internal/manager/server/imbridge/
+source_files: []
+depends_on: []
+related_to:
+    - path: frontend/settings_admin/integrations_channels
+    - path: manager_service/aiops/http_server
+    - path: manager_service/main_entrypoint

@@ -1,0 +1,12 @@
+schema_version: 1
+module_path: manager_service/alert
+title: Manager 告警子系统（Alert）
+scope:
+    - internal/manager/biz/alert/
+    - internal/manager/server/alert/
+    - internal/manager/data/alert/
+source_files: []
+depends_on: []
+related_to:
+    - path: manager_service/aiops/chat_runtime
+    - path: manager_service/aiops/tools_and_basetool/query_resources

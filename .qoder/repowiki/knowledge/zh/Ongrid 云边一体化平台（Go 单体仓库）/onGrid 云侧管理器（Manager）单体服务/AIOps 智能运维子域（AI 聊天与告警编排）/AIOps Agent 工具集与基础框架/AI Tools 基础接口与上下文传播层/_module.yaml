@@ -1,0 +1,13 @@
+schema_version: 1
+module_path: manager_service/aiops/tools_and_basetool/basetool_core
+title: AI Tools 基础接口与上下文传播层
+scope:
+    - internal/manager/biz/aiops/tools/basetool/
+source_files: []
+depends_on: []
+related_to:
+    - path: manager_service/aiops/tools_and_basetool/host_system_tools
+    - path: manager_service/aiops/tools_and_basetool/query_resources
+    - path: manager_service/aiops/tools_and_basetool/query_tools
+    - path: manager_service/aiops/tools_and_basetool/skill_mcp_bridges
+    - path: manager_service/aiops/tools_and_basetool/topology_incident_tools

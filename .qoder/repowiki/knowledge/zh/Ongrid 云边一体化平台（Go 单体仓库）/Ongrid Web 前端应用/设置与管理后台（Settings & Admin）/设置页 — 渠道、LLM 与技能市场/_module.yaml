@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: frontend/settings_admin/integrations_channels
+title: 设置页 — 渠道、LLM 与技能市场
+scope:
+    - web/src/pages/settings/Channels.tsx
+    - web/src/pages/settings/LLM.tsx
+    - web/src/pages/settings/Marketplace.tsx
+source_files: []
+depends_on: []
+related_to:
+    - path: manager_service/imbridge

@@ -1,0 +1,19 @@
+schema_version: 1
+module_path: frontend/shared_api_client
+title: 前端 API 客户端与全局状态存储
+scope:
+    - web/src/api/client.ts
+    - web/src/api/
+    - web/src/store/
+source_files: []
+depends_on: []
+related_to:
+    - path: manager_service/device_management
+    - path: manager_service/devicessh_webshell
+    - path: manager_service/knowledge_base
+    - path: manager_service/marketplace
+    - path: manager_service/mcp_integration
+    - path: manager_service/monitoring
+    - path: manager_service/reporting
+    - path: manager_service/settings
+    - path: manager_service/topology

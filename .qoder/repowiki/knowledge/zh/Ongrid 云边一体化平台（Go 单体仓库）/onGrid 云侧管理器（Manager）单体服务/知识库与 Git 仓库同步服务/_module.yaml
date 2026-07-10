@@ -1,0 +1,12 @@
+schema_version: 1
+module_path: manager_service/knowledge_base
+title: 知识库与 Git 仓库同步服务
+scope:
+    - internal/manager/biz/knowledge/
+    - internal/manager/server/knowledge/
+    - internal/manager/data/knowledge/
+source_files: []
+depends_on: []
+related_to:
+    - path: frontend/shared_api_client
+    - path: manager_service/main_entrypoint

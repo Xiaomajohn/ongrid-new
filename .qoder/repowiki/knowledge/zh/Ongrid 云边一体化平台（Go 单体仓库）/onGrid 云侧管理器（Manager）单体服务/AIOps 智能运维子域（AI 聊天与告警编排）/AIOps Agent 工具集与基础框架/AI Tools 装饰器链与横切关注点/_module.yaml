@@ -1,0 +1,9 @@
+schema_version: 1
+module_path: manager_service/aiops/tools_and_basetool/decorators
+title: AI Tools 装饰器链与横切关注点
+scope:
+    - internal/manager/biz/aiops/tools/decorators/
+source_files: []
+depends_on: []
+related_to:
+    - path: manager_service/aiops/tools_and_basetool/registry_and_toolbag

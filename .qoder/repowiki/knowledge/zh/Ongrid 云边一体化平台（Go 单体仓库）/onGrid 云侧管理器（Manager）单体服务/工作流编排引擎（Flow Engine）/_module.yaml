@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: manager_service/flow_engine
+title: 工作流编排引擎（Flow Engine）
+scope:
+    - internal/manager/biz/flow/
+    - internal/manager/server/flow/
+    - internal/manager/data/flow/
+source_files: []
+depends_on: []
+related_to:
+    - path: manager_service/main_entrypoint

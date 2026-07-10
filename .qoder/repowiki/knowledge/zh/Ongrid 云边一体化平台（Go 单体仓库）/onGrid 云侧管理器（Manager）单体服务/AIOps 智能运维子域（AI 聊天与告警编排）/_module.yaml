@@ -1,0 +1,10 @@
+schema_version: 1
+module_path: manager_service/aiops
+title: AIOps 智能运维子域（AI 聊天与告警编排）
+scope:
+    - internal/manager/biz/aiops/
+    - internal/manager/server/aiops/
+    - internal/manager/data/aiops/
+source_files: []
+depends_on: []
+related_to: []

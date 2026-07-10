@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: edge_agent/collectors
+title: 边缘主机与多目标指标采集器
+scope:
+    - internal/edgeagent/collector/
+    - internal/edgeagent/biz/collector/
+source_files: []
+depends_on: []
+related_to:
+    - path: edge_agent/agent_api
+    - path: edge_agent/plugins/built_in_metrics_scrapers

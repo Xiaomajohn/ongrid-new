@@ -1,0 +1,13 @@
+schema_version: 1
+module_path: manager_service/reporting
+title: 运营报告调度与生成服务
+scope:
+    - internal/manager/biz/report/
+    - internal/manager/server/report/
+    - internal/manager/data/report/
+source_files: []
+depends_on: []
+related_to:
+    - path: frontend/reports
+    - path: frontend/shared_api_client
+    - path: manager_service/main_entrypoint

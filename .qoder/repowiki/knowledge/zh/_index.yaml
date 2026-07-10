@@ -1,0 +1,1084 @@
+# 知识卡导出索引文件
+schema_version: 1
+locale: zh-CN
+branch: main-local-new
+nodes_managed: true
+exported_at: "2026-07-09T03:59:58Z"
+modules:
+    "":
+        dir_name: Ongrid 云边一体化平台（Go 单体仓库）
+        title: Ongrid 云边一体化平台（Go 单体仓库）
+        scope:
+            - README.md
+            - CONTRIBUTING.md
+            - .gitignore
+            - go.mod
+            - go.sum
+            - Makefile
+            - ROADMAP.md
+            - SECURITY.md
+            - .dockerignore
+            - .env.example
+            - .go-arch-lint.yml
+            - .golangci.yml
+            - .tool-versions
+            - AGENTS.md
+            - CHANGELOG.md
+            - CODEOWNERS
+            - CODE_OF_CONDUCT.md
+            - LICENSE
+            - README_DE.md
+            - README_ES.md
+            - README_FR.md
+            - README_JA.md
+            - README_KO.md
+            - README_PT.md
+            - README_RU.md
+            - README_ZH.md
+            - ROADMAP.zh-CN.md
+            - VERSION
+            - package-lock.json
+        source_files: []
+        children:
+            - api_protos
+            - deploy_artifacts
+            - docs_and_wiki
+            - edge_agent
+            - frontend
+            - iam_service
+            - manager_service
+            - shared_libs
+            - tests
+        depends_on: []
+        related_to: []
+    api_protos:
+        dir_name: API 契约与 Proto 定义（buf 构建）
+        title: API 契约与 Proto 定义（buf 构建）
+        scope:
+            - api/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: edge_agent/agent_core
+            - path: manager_service/main_entrypoint
+    deploy_artifacts:
+        dir_name: 部署产物与安装脚本集
+        title: 部署产物与安装脚本集
+        scope:
+            - deploy/
+            - resource/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: edge_agent/agent_core
+            - path: manager_service/main_entrypoint
+    docs_and_wiki:
+        dir_name: 仓库文档与 Repo Wiki 生成系统
+        title: 仓库文档与 Repo Wiki 生成系统
+        scope:
+            - docs/
+            - repowiki/
+            - .agents/skills/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    edge_agent:
+        dir_name: onGrid 边缘 Agent 进程
+        title: onGrid 边缘 Agent 进程
+        scope:
+            - cmd/ongrid-edge/
+            - internal/edgeagent/
+        source_files: []
+        children:
+            - edge_agent/agent_api
+            - edge_agent/agent_core
+            - edge_agent/cmd_policy_sandbox
+            - edge_agent/collectors
+            - edge_agent/plugins
+        depends_on: []
+        related_to:
+            - path: shared_libs
+            - path: tests
+    edge_agent/agent_api:
+        dir_name: 边缘侧 Agent 技能与工具处理器集合
+        title: 边缘侧 Agent 技能与工具处理器集合
+        scope:
+            - internal/edgeagent/bash/
+            - internal/edgeagent/host_files/
+            - internal/edgeagent/restart_service/
+            - internal/edgeagent/webshell/
+            - internal/edgeagent/skill/
+            - internal/edgeagent/service/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: edge_agent/cmd_policy_sandbox
+            - path: edge_agent/collectors
+    edge_agent/agent_core:
+        dir_name: Edge Agent 业务循环与远程升级
+        title: Edge Agent 业务循环与远程升级
+        scope:
+            - internal/edgeagent/biz/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: api_protos
+            - path: deploy_artifacts
+    edge_agent/cmd_policy_sandbox:
+        dir_name: 边缘 Agent 命令策略与沙箱执行器
+        title: 边缘 Agent 命令策略与沙箱执行器
+        scope:
+            - internal/edgeagent/cmdpolicy/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: edge_agent/agent_api
+    edge_agent/collectors:
+        dir_name: 边缘主机与多目标指标采集器
+        title: 边缘主机与多目标指标采集器
+        scope:
+            - internal/edgeagent/collector/
+            - internal/edgeagent/biz/collector/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: edge_agent/agent_api
+            - path: edge_agent/plugins/built_in_metrics_scrapers
+    edge_agent/plugins:
+        dir_name: 边缘插件运行时与内置采集器集合
+        title: 边缘插件运行时与内置采集器集合
+        scope:
+            - internal/edgeagent/plugins/
+        source_files: []
+        children:
+            - edge_agent/plugins/built_in_metrics_scrapers
+            - edge_agent/plugins/core_framework
+            - edge_agent/plugins/output_render_plugins
+        depends_on: []
+        related_to: []
+    edge_agent/plugins/built_in_metrics_scrapers:
+        dir_name: 内置指标采集插件（数据库_主机_进程）
+        title: 内置指标采集插件（数据库/主机/进程）
+        scope:
+            - internal/edgeagent/plugins/databasemetrics/
+            - internal/edgeagent/plugins/hostmetrics/
+            - internal/edgeagent/plugins/procmetrics/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: edge_agent/collectors
+            - path: edge_agent/plugins/core_framework
+    edge_agent/plugins/core_framework:
+        dir_name: 边缘插件运行时与生命周期管理
+        title: 边缘插件运行时与生命周期管理
+        scope:
+            - internal/edgeagent/plugins/plugin.go
+            - internal/edgeagent/plugins/supervisor.go
+            - internal/edgeagent/plugins/subprocess.go
+            - internal/edgeagent/plugins/config_env.go
+            - internal/edgeagent/plugins/config_tunnel.go
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: edge_agent/plugins/built_in_metrics_scrapers
+            - path: edge_agent/plugins/output_render_plugins
+    edge_agent/plugins/output_render_plugins:
+        dir_name: 边缘信号采集插件（审计_日志_链路）
+        title: 边缘信号采集插件（审计/日志/链路）
+        scope:
+            - internal/edgeagent/plugins/audit/
+            - internal/edgeagent/plugins/logs/
+            - internal/edgeagent/plugins/traces/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: edge_agent/plugins/core_framework
+    frontend:
+        dir_name: Ongrid Web 前端应用
+        title: Ongrid Web 前端应用
+        scope:
+            - web/
+        source_files: []
+        children:
+            - frontend/alerts_incidents
+            - frontend/core_app_shell
+            - frontend/devices_hosts
+            - frontend/home_dashboard
+            - frontend/marketplace
+            - frontend/monitoring
+            - frontend/reports
+            - frontend/settings_admin
+            - frontend/shared_api_client
+            - frontend/shared_components_ui
+            - frontend/shared_lib_i18n_styles
+            - frontend/test_infrastructure
+            - frontend/topology
+        depends_on: []
+        related_to: []
+    frontend/alerts_incidents:
+        dir_name: 告警与事件详情页（Alerts & Incidents）
+        title: 告警与事件详情页（Alerts & Incidents）
+        scope:
+            - web/src/pages/Alerts.tsx
+            - web/src/pages/AlertRules.tsx
+            - web/src/pages/IncidentDetail.tsx
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: manager_service/alert/http_server
+    frontend/core_app_shell:
+        dir_name: 应用启动与路由壳层
+        title: 应用启动与路由壳层
+        scope:
+            - web/src/App.tsx
+            - web/src/main.tsx
+            - web/src/lib/routes.ts
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    frontend/devices_hosts:
+        dir_name: 主机与设备管理页面（列表_详情_文件浏览器_WebSSH）
+        title: 主机与设备管理页面（列表/详情/文件浏览器/WebSSH）
+        scope:
+            - web/src/pages/Hosts.tsx
+            - web/src/pages/HostDetail.tsx
+            - web/src/pages/DeviceFiles.tsx
+            - web/src/pages/DeviceShell.tsx
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: manager_service/devicessh_webshell
+    frontend/home_dashboard:
+        dir_name: 首页与仪表盘页面
+        title: 首页与仪表盘页面
+        scope:
+            - web/src/pages/Home.tsx
+            - web/src/pages/Dashboard.tsx
+            - web/src/pages/PageView.tsx
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: manager_service/aiops/http_server
+    frontend/marketplace:
+        dir_name: 技能包市场（安装_卸载与能力声明展示）
+        title: 技能包市场（安装/卸载与能力声明展示）
+        scope:
+            - web/src/pages/settings/Marketplace.tsx
+            - web/src/components/marketplace/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: manager_service/marketplace
+    frontend/monitoring:
+        dir_name: 集群监控与设备监控详情页
+        title: 集群监控与设备监控详情页
+        scope:
+            - web/src/pages/Monitor.tsx
+            - web/src/pages/MonitorDeviceDetail.tsx
+            - web/src/components/monitor/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: manager_service/metric_pipeline
+    frontend/reports:
+        dir_name: 报告详情与产物卡片视图
+        title: 报告详情与产物卡片视图
+        scope:
+            - web/src/pages/ReportDetail.tsx
+            - web/src/components/ReportCards.tsx
+            - web/src/components/ReportContent.tsx
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: manager_service/reporting
+    frontend/settings_admin:
+        dir_name: 设置与管理后台（Settings & Admin）
+        title: 设置与管理后台（Settings & Admin）
+        scope:
+            - web/src/pages/settings/
+            - web/src/pages/AdminLayout.tsx
+            - web/src/pages/SettingsLayout.tsx
+        source_files: []
+        children:
+            - frontend/settings_admin/integrations_channels
+            - frontend/settings_admin/integrations_secrets
+            - frontend/settings_admin/misc_settings
+            - frontend/settings_admin/org_and_users
+            - frontend/settings_admin/system_settings
+        depends_on: []
+        related_to: []
+    frontend/settings_admin/integrations_channels:
+        dir_name: 设置页 — 渠道、LLM 与技能市场
+        title: 设置页 — 渠道、LLM 与技能市场
+        scope:
+            - web/src/pages/settings/Channels.tsx
+            - web/src/pages/settings/LLM.tsx
+            - web/src/pages/settings/Marketplace.tsx
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: manager_service/imbridge
+    frontend/settings_admin/integrations_secrets:
+        dir_name: 设置页：集成、凭据与通知渠道
+        title: 设置页：集成、凭据与通知渠道
+        scope:
+            - web/src/pages/settings/Secrets.tsx
+            - web/src/pages/settings/Integrations.tsx
+            - web/src/pages/settings/Notifications.tsx
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: manager_service/secret_vault
+    frontend/settings_admin/misc_settings:
+        dir_name: 设置页 — Webshell 审计、Agent 权限与用户偏好
+        title: 设置页 — Webshell 审计、Agent 权限与用户偏好
+        scope:
+            - web/src/pages/settings/Webshell.tsx
+            - web/src/pages/settings/Agent.tsx
+            - web/src/pages/settings/Preferences.tsx
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    frontend/settings_admin/org_and_users:
+        dir_name: 设置页：组织、用户与审计日志管理
+        title: 设置页：组织、用户与审计日志管理
+        scope:
+            - web/src/pages/settings/Orgs.tsx
+            - web/src/pages/settings/Users.tsx
+            - web/src/pages/settings/AuditLog.tsx
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: iam_service
+    frontend/settings_admin/system_settings:
+        dir_name: 设置页：关于 _ 健康检查 _ 版本升级
+        title: 设置页：关于 / 健康检查 / 版本升级
+        scope:
+            - web/src/pages/settings/About.tsx
+            - web/src/pages/settings/Health.tsx
+            - web/src/pages/settings/Upgrade.tsx
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: manager_service/monitoring
+    frontend/shared_api_client:
+        dir_name: 前端 API 客户端与全局状态存储
+        title: 前端 API 客户端与全局状态存储
+        scope:
+            - web/src/api/client.ts
+            - web/src/api/
+            - web/src/store/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: manager_service/device_management
+            - path: manager_service/devicessh_webshell
+            - path: manager_service/knowledge_base
+            - path: manager_service/marketplace
+            - path: manager_service/mcp_integration
+            - path: manager_service/monitoring
+            - path: manager_service/reporting
+            - path: manager_service/settings
+            - path: manager_service/topology
+    frontend/shared_components_ui:
+        dir_name: 共享 UI 原子组件与应用级布局
+        title: 共享 UI 原子组件与应用级布局
+        scope:
+            - web/src/components/ui/
+            - web/src/components/Layout.tsx
+            - web/src/components/Sidebar.tsx
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    frontend/shared_lib_i18n_styles:
+        dir_name: 前端共享库：国际化、格式化与样式主题
+        title: 前端共享库：国际化、格式化与样式主题
+        scope:
+            - web/src/lib/
+            - web/src/i18n/
+            - web/src/styles/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    frontend/test_infrastructure:
+        dir_name: 前端测试基础设施 (Vitest + MSW)
+        title: 前端测试基础设施 (Vitest + MSW)
+        scope:
+            - web/src/test/
+            - web/vitest.config.ts
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    frontend/topology:
+        dir_name: 拓扑图谱页面与可视化组件
+        title: 拓扑图谱页面与可视化组件
+        scope:
+            - web/src/pages/Topology.tsx
+            - web/src/components/topology/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: manager_service/topology
+    iam_service:
+        dir_name: IAM 身份与组织权限域（用户_组织_RBAC）
+        title: IAM 身份与组织权限域（用户/组织/RBAC）
+        scope:
+            - internal/iam/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: frontend/settings_admin/org_and_users
+            - path: manager_service/main_entrypoint
+    manager_service:
+        dir_name: onGrid 云侧管理器（Manager）单体服务
+        title: onGrid 云侧管理器（Manager）单体服务
+        scope:
+            - cmd/ongrid/
+            - internal/manager/
+        source_files: []
+        children:
+            - manager_service/aiops
+            - manager_service/alert
+            - manager_service/device_management
+            - manager_service/devicessh_webshell
+            - manager_service/edge_management
+            - manager_service/flow_engine
+            - manager_service/imbridge
+            - manager_service/installjob
+            - manager_service/knowledge_base
+            - manager_service/main_entrypoint
+            - manager_service/marketplace
+            - manager_service/mcp_integration
+            - manager_service/metric_pipeline
+            - manager_service/monitoring
+            - manager_service/reporting
+            - manager_service/secret_vault
+            - manager_service/settings
+            - manager_service/shared_infra
+            - manager_service/skill_catalog
+            - manager_service/topology
+        depends_on: []
+        related_to:
+            - path: shared_libs
+            - path: tests
+    manager_service/aiops:
+        dir_name: AIOps 智能运维子域（AI 聊天与告警编排）
+        title: AIOps 智能运维子域（AI 聊天与告警编排）
+        scope:
+            - internal/manager/biz/aiops/
+            - internal/manager/server/aiops/
+            - internal/manager/data/aiops/
+        source_files: []
+        children:
+            - manager_service/aiops/alert_pipeline
+            - manager_service/aiops/chat_runtime
+            - manager_service/aiops/data_store
+            - manager_service/aiops/graph_engine
+            - manager_service/aiops/http_server
+            - manager_service/aiops/lightweight_subsystems
+            - manager_service/aiops/tools_and_basetool
+        depends_on: []
+        related_to: []
+    manager_service/aiops/alert_pipeline:
+        dir_name: AI 告警规则草稿编译与校验管线
+        title: AI 告警规则草稿编译与校验管线
+        scope:
+            - internal/manager/biz/aiops/alertconfig/
+            - internal/manager/biz/aiops/alertdraft/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    manager_service/aiops/chat_runtime:
+        dir_name: AIOps 聊天运行时（Graph 内核与多 Agent 编排）
+        title: AIOps 聊天运行时（Graph 内核与多 Agent 编排）
+        scope:
+            - internal/manager/biz/aiops/chatruntime/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: manager_service/aiops/data_store
+            - path: manager_service/aiops/graph_engine
+            - path: manager_service/aiops/tools_and_basetool
+            - path: manager_service/alert
+    manager_service/aiops/data_store:
+        dir_name: AIOPS GORM_SQLite 数据持久层
+        title: AIOPS GORM/SQLite 数据持久层
+        scope:
+            - internal/manager/data/aiops/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: manager_service/aiops/chat_runtime
+            - path: manager_service/aiops/lightweight_subsystems
+    manager_service/aiops/graph_engine:
+        dir_name: 基于 eino 的 ReAct Agent 图执行内核与回调横切层
+        title: 基于 eino 的 ReAct Agent 图执行内核与回调横切层
+        scope:
+            - internal/manager/biz/aiops/graph/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: manager_service/aiops/chat_runtime
+    manager_service/aiops/http_server:
+        dir_name: AIOps HTTP 路由与 SSE 流式接口
+        title: AIOps HTTP 路由与 SSE 流式接口
+        scope:
+            - internal/manager/server/aiops/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: frontend/home_dashboard
+            - path: manager_service/imbridge
+            - path: manager_service/main_entrypoint
+    manager_service/aiops/lightweight_subsystems:
+        dir_name: AIOps 轻量子系统（Agent 循环、主动调查、@提及搜索与工具回放）
+        title: AIOps 轻量子系统（Agent 循环、主动调查、@提及搜索与工具回放）
+        scope:
+            - internal/manager/biz/aiops/agent/
+            - internal/manager/biz/aiops/investigator/
+            - internal/manager/biz/aiops/mentions/
+            - internal/manager/biz/aiops/toolreplay/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: manager_service/aiops/data_store
+    manager_service/aiops/tools_and_basetool:
+        dir_name: AIOps Agent 工具集与基础框架
+        title: AIOps Agent 工具集与基础框架
+        scope:
+            - internal/manager/biz/aiops/tools/
+        source_files: []
+        children:
+            - manager_service/aiops/tools_and_basetool/basetool_core
+            - manager_service/aiops/tools_and_basetool/decorators
+            - manager_service/aiops/tools_and_basetool/host_system_tools
+            - manager_service/aiops/tools_and_basetool/query_resources
+            - manager_service/aiops/tools_and_basetool/query_tools
+            - manager_service/aiops/tools_and_basetool/registry_and_toolbag
+            - manager_service/aiops/tools_and_basetool/skill_mcp_bridges
+            - manager_service/aiops/tools_and_basetool/topology_incident_tools
+        depends_on: []
+        related_to:
+            - path: manager_service/aiops/chat_runtime
+    manager_service/aiops/tools_and_basetool/basetool_core:
+        dir_name: AI Tools 基础接口与上下文传播层
+        title: AI Tools 基础接口与上下文传播层
+        scope:
+            - internal/manager/biz/aiops/tools/basetool/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: manager_service/aiops/tools_and_basetool/host_system_tools
+            - path: manager_service/aiops/tools_and_basetool/query_resources
+            - path: manager_service/aiops/tools_and_basetool/query_tools
+            - path: manager_service/aiops/tools_and_basetool/skill_mcp_bridges
+            - path: manager_service/aiops/tools_and_basetool/topology_incident_tools
+    manager_service/aiops/tools_and_basetool/decorators:
+        dir_name: AI Tools 装饰器链与横切关注点
+        title: AI Tools 装饰器链与横切关注点
+        scope:
+            - internal/manager/biz/aiops/tools/decorators/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: manager_service/aiops/tools_and_basetool/registry_and_toolbag
+    manager_service/aiops/tools_and_basetool/host_system_tools:
+        dir_name: 主机侧 BaseTool 实现（Bash_文件_进程）
+        title: 主机侧 BaseTool 实现（Bash/文件/进程）
+        scope:
+            - internal/manager/biz/aiops/tools/bash_basetool.go
+            - internal/manager/biz/aiops/tools/host_files_basetool.go
+            - internal/manager/biz/aiops/tools/host_processes.go
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: manager_service/aiops/tools_and_basetool/basetool_core
+            - path: manager_service/aiops/tools_and_basetool/registry_and_toolbag
+    manager_service/aiops/tools_and_basetool/query_resources:
+        dir_name: AIOPS 查询类工具（告警规则、事件、设备）
+        title: AIOPS 查询类工具（告警规则、事件、设备）
+        scope:
+            - internal/manager/biz/aiops/tools/query_incidents.go
+            - internal/manager/biz/aiops/tools/query_alert_rules.go
+            - internal/manager/biz/aiops/tools/query_edges.go
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: manager_service/aiops/tools_and_basetool/basetool_core
+            - path: manager_service/aiops/tools_and_basetool/registry_and_toolbag
+            - path: manager_service/alert
+    manager_service/aiops/tools_and_basetool/query_tools:
+        dir_name: AI 可观测性查询工具（PromQL _ LogQL _ TraceQL）
+        title: AI 可观测性查询工具（PromQL / LogQL / TraceQL）
+        scope:
+            - internal/manager/biz/aiops/tools/query_promql.go
+            - internal/manager/biz/aiops/tools/query_logql.go
+            - internal/manager/biz/aiops/tools/query_traceql.go
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: manager_service/aiops/tools_and_basetool/basetool_core
+            - path: manager_service/monitoring
+    manager_service/aiops/tools_and_basetool/registry_and_toolbag:
+        dir_name: AIOps 工具注册表与延迟加载包
+        title: AIOps 工具注册表与延迟加载包
+        scope:
+            - internal/manager/biz/aiops/tools/registry.go
+            - internal/manager/biz/aiops/tools/toolbag.go
+            - internal/manager/biz/aiops/tools/config_tools.go
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: manager_service/aiops/tools_and_basetool/decorators
+            - path: manager_service/aiops/tools_and_basetool/host_system_tools
+            - path: manager_service/aiops/tools_and_basetool/query_resources
+            - path: manager_service/aiops/tools_and_basetool/topology_incident_tools
+    manager_service/aiops/tools_and_basetool/skill_mcp_bridges:
+        dir_name: Skill 与 MCP 工具桥接层
+        title: Skill 与 MCP 工具桥接层
+        scope:
+            - internal/manager/biz/aiops/tools/skill_bridge.go
+            - internal/manager/biz/aiops/tools/mcp_basetool.go
+            - internal/manager/biz/aiops/tools/inventory_bridge.go
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: manager_service/aiops/tools_and_basetool/basetool_core
+    manager_service/aiops/tools_and_basetool/topology_incident_tools:
+        dir_name: AIOPS 拓扑与故障关联工具集
+        title: AIOPS 拓扑与故障关联工具集
+        scope:
+            - internal/manager/biz/aiops/tools/correlate_incident.go
+            - internal/manager/biz/aiops/tools/get_topology.go
+            - internal/manager/biz/aiops/tools/rank_edges.go
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: manager_service/aiops/tools_and_basetool/basetool_core
+            - path: manager_service/aiops/tools_and_basetool/registry_and_toolbag
+            - path: manager_service/topology
+    manager_service/alert:
+        dir_name: Manager 告警子系统（Alert）
+        title: Manager 告警子系统（Alert）
+        scope:
+            - internal/manager/biz/alert/
+            - internal/manager/server/alert/
+            - internal/manager/data/alert/
+        source_files: []
+        children:
+            - manager_service/alert/data_store
+            - manager_service/alert/http_server
+            - manager_service/alert/investigation
+            - manager_service/alert/pipeline_evaluators
+            - manager_service/alert/router_channel
+            - manager_service/alert/rule_source
+        depends_on: []
+        related_to:
+            - path: manager_service/aiops/chat_runtime
+            - path: manager_service/aiops/tools_and_basetool/query_resources
+    manager_service/alert/data_store:
+        dir_name: 告警数据持久层（GORM_SQLite 实现）
+        title: 告警数据持久层（GORM/SQLite 实现）
+        scope:
+            - internal/manager/data/alert/store/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    manager_service/alert/http_server:
+        dir_name: 告警与通知渠道 HTTP API 处理器
+        title: 告警与通知渠道 HTTP API 处理器
+        scope:
+            - internal/manager/server/alert/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: frontend/alerts_incidents
+            - path: manager_service/alert/investigation
+            - path: manager_service/main_entrypoint
+    manager_service/alert/investigation:
+        dir_name: 告警调查与规则预览（AI RCA + 试算）
+        title: 告警调查与规则预览（AI RCA + 试算）
+        scope:
+            - internal/manager/biz/alert/investigator/
+            - internal/manager/biz/alert/usecase.go
+            - internal/manager/biz/alert/preview.go
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: manager_service/alert/http_server
+    manager_service/alert/pipeline_evaluators:
+        dir_name: Pipeline 类告警规则评估器（Phase A_B）
+        title: Pipeline 类告警规则评估器（Phase A/B）
+        scope:
+            - internal/manager/biz/alert/pipeline.go
+            - internal/manager/biz/alert/evaluators_phaseA.go
+            - internal/manager/biz/alert/evaluators_phaseB.go
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: manager_service/alert/router_channel
+            - path: manager_service/alert/rule_source
+    manager_service/alert/router_channel:
+        dir_name: 告警路由与抑制策略
+        title: 告警路由与抑制策略
+        scope:
+            - internal/manager/biz/alert/router.go
+            - internal/manager/biz/alert/channel_sender_test.go
+            - internal/manager/biz/alert/inhibit.go
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: manager_service/alert/pipeline_evaluators
+    manager_service/alert/rule_source:
+        dir_name: 告警规则源与缓存提供器
+        title: 告警规则源与缓存提供器
+        scope:
+            - internal/manager/biz/alert/rules.go
+            - internal/manager/biz/alert/rule_source_test.go
+            - internal/manager/biz/alert/repo.go
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: manager_service/alert/pipeline_evaluators
+    manager_service/device_management:
+        dir_name: 设备管理（主机与 SSH 凭据）
+        title: 设备管理（主机与 SSH 凭据）
+        scope:
+            - internal/manager/biz/device/
+            - internal/manager/server/device/
+            - internal/manager/data/device/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: frontend/shared_api_client
+            - path: manager_service/devicessh_webshell
+            - path: manager_service/main_entrypoint
+    manager_service/devicessh_webshell:
+        dir_name: 设备 SSH WebShell 与 SFTP 管理面
+        title: 设备 SSH WebShell 与 SFTP 管理面
+        scope:
+            - internal/manager/biz/devicessh/
+            - internal/manager/server/devicessh/
+            - internal/manager/biz/webshell/
+            - internal/manager/server/webshell/
+            - internal/manager/data/webshell/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: frontend/devices_hosts
+            - path: frontend/shared_api_client
+            - path: manager_service/device_management
+            - path: manager_service/main_entrypoint
+    manager_service/edge_management:
+        dir_name: 边缘节点（Edge）管理与认证子系统
+        title: 边缘节点（Edge）管理与认证子系统
+        scope:
+            - internal/manager/biz/edge/
+            - internal/manager/server/edge/
+            - internal/manager/server/edgeauth/
+            - internal/manager/data/edge/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: manager_service/installjob
+    manager_service/flow_engine:
+        dir_name: 工作流编排引擎（Flow Engine）
+        title: 工作流编排引擎（Flow Engine）
+        scope:
+            - internal/manager/biz/flow/
+            - internal/manager/server/flow/
+            - internal/manager/data/flow/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: manager_service/main_entrypoint
+    manager_service/imbridge:
+        dir_name: IM 平台桥接与事件路由（飞书_Telegram_Slack）
+        title: IM 平台桥接与事件路由（飞书/Telegram/Slack）
+        scope:
+            - internal/manager/biz/imbridge/
+            - internal/manager/server/imbridge/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: frontend/settings_admin/integrations_channels
+            - path: manager_service/aiops/http_server
+            - path: manager_service/main_entrypoint
+    manager_service/installjob:
+        dir_name: 边缘设备一键安装任务队列（InstallJob）
+        title: 边缘设备一键安装任务队列（InstallJob）
+        scope:
+            - internal/manager/biz/installjob/
+            - internal/manager/server/installjob/
+            - internal/manager/data/installjob/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: manager_service/edge_management
+            - path: manager_service/main_entrypoint
+    manager_service/knowledge_base:
+        dir_name: 知识库与 Git 仓库同步服务
+        title: 知识库与 Git 仓库同步服务
+        scope:
+            - internal/manager/biz/knowledge/
+            - internal/manager/server/knowledge/
+            - internal/manager/data/knowledge/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: frontend/shared_api_client
+            - path: manager_service/main_entrypoint
+    manager_service/main_entrypoint:
+        dir_name: 云侧管理器进程入口 (ongrid 二进制)
+        title: 云侧管理器进程入口 (ongrid 二进制)
+        scope:
+            - cmd/ongrid/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: api_protos
+            - path: deploy_artifacts
+            - path: iam_service
+            - path: manager_service/aiops/http_server
+            - path: manager_service/alert/http_server
+            - path: manager_service/device_management
+            - path: manager_service/devicessh_webshell
+            - path: manager_service/flow_engine
+            - path: manager_service/imbridge
+            - path: manager_service/installjob
+            - path: manager_service/knowledge_base
+            - path: manager_service/marketplace
+            - path: manager_service/mcp_integration
+            - path: manager_service/metric_pipeline
+            - path: manager_service/monitoring
+            - path: manager_service/reporting
+            - path: manager_service/secret_vault
+            - path: manager_service/settings
+            - path: manager_service/shared_infra
+            - path: manager_service/skill_catalog
+            - path: manager_service/topology
+    manager_service/marketplace:
+        dir_name: 技能_Agent 市场包安装与签名校验
+        title: 技能/Agent 市场包安装与签名校验
+        scope:
+            - internal/manager/biz/marketplace/
+            - internal/manager/server/marketplace/
+            - internal/manager/data/marketplace/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: frontend/marketplace
+            - path: frontend/shared_api_client
+            - path: manager_service/main_entrypoint
+            - path: manager_service/skill_catalog
+    manager_service/mcp_integration:
+        dir_name: 外部 MCP 服务器注册与调用（Manager 侧）
+        title: 外部 MCP 服务器注册与调用（Manager 侧）
+        scope:
+            - internal/manager/biz/mcp/
+            - internal/manager/server/mcp/
+            - internal/manager/data/mcp/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: frontend/shared_api_client
+            - path: manager_service/main_entrypoint
+    manager_service/metric_pipeline:
+        dir_name: 边缘指标采集、聚合与查询管线
+        title: 边缘指标采集、聚合与查询管线
+        scope:
+            - internal/manager/biz/metric/
+            - internal/manager/server/metric/
+            - internal/manager/data/metric/
+            - internal/manager/biz/promwrite/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: frontend/monitoring
+            - path: manager_service/main_entrypoint
+    manager_service/monitoring:
+        dir_name: 监控与系统可观测性 HTTP 服务层
+        title: 监控与系统可观测性 HTTP 服务层
+        scope:
+            - internal/manager/biz/monitor/
+            - internal/manager/server/monitor/
+            - internal/manager/server/systemhealth/
+            - internal/manager/server/systemupgrade/
+            - internal/manager/server/prometheus/
+            - internal/manager/server/traces/
+            - internal/manager/server/logs/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: frontend/settings_admin/system_settings
+            - path: frontend/shared_api_client
+            - path: manager_service/aiops/tools_and_basetool/query_tools
+            - path: manager_service/main_entrypoint
+    manager_service/reporting:
+        dir_name: 运营报告调度与生成服务
+        title: 运营报告调度与生成服务
+        scope:
+            - internal/manager/biz/report/
+            - internal/manager/server/report/
+            - internal/manager/data/report/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: frontend/reports
+            - path: frontend/shared_api_client
+            - path: manager_service/main_entrypoint
+    manager_service/secret_vault:
+        dir_name: 凭据保险库（Secret Vault）
+        title: 凭据保险库（Secret Vault）
+        scope:
+            - internal/manager/biz/secret/
+            - internal/manager/server/secret/
+            - internal/manager/data/secret/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: frontend/settings_admin/integrations_secrets
+            - path: manager_service/main_entrypoint
+    manager_service/settings:
+        dir_name: 系统设置与 LLM 配置管理
+        title: 系统设置与 LLM 配置管理
+        scope:
+            - internal/manager/biz/setting/
+            - internal/manager/server/setting/
+            - internal/manager/data/setting/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: frontend/shared_api_client
+            - path: manager_service/main_entrypoint
+    manager_service/shared_infra:
+        dir_name: Manager 共享基础设施（Grafana_审批_审计_集成_中间件_边缘认证_边界服务）
+        title: Manager 共享基础设施（Grafana/审批/审计/集成/中间件/边缘认证/边界服务）
+        scope:
+            - internal/manager/biz/grafana/
+            - internal/manager/biz/approval/
+            - internal/manager/biz/audit/
+            - internal/manager/server/integration/
+            - internal/manager/server/middleware/
+            - internal/manager/server/edgeauth/
+            - internal/manager/service/frontierbound/
+            - internal/manager/service/aiopsconfig/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: manager_service/main_entrypoint
+    manager_service/skill_catalog:
+        dir_name: 技能目录与执行编排（Skill Catalog & Orchestration）
+        title: 技能目录与执行编排（Skill Catalog & Orchestration）
+        scope:
+            - internal/manager/biz/skill/
+            - internal/manager/server/skill/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: manager_service/main_entrypoint
+            - path: manager_service/marketplace
+    manager_service/topology:
+        dir_name: 拓扑图服务（节点_关系_类型管理）
+        title: 拓扑图服务（节点/关系/类型管理）
+        scope:
+            - internal/manager/biz/topology/
+            - internal/manager/server/topology/
+            - internal/manager/data/topology/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: frontend/shared_api_client
+            - path: frontend/topology
+            - path: manager_service/aiops/tools_and_basetool/topology_incident_tools
+            - path: manager_service/main_entrypoint
+    shared_libs:
+        dir_name: 共享基础库与技能框架（internal_pkg + internal_skill）
+        title: 共享基础库与技能框架（internal/pkg + internal/skill）
+        scope:
+            - internal/pkg/
+            - internal/skill/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: edge_agent
+            - path: manager_service
+    tests:
+        dir_name: 端到端与集成测试套件及 Agent Skills 定义
+        title: 端到端与集成测试套件及 Agent Skills 定义
+        scope:
+            - tests/
+            - skills/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: edge_agent
+            - path: manager_service

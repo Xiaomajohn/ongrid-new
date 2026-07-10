@@ -1,0 +1,12 @@
+schema_version: 1
+module_path: manager_service/settings
+title: 系统设置与 LLM 配置管理
+scope:
+    - internal/manager/biz/setting/
+    - internal/manager/server/setting/
+    - internal/manager/data/setting/
+source_files: []
+depends_on: []
+related_to:
+    - path: frontend/shared_api_client
+    - path: manager_service/main_entrypoint

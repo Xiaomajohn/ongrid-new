@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: manager_service
+title: onGrid 云侧管理器（Manager）单体服务
+scope:
+    - cmd/ongrid/
+    - internal/manager/
+source_files: []
+depends_on: []
+related_to:
+    - path: shared_libs
+    - path: tests

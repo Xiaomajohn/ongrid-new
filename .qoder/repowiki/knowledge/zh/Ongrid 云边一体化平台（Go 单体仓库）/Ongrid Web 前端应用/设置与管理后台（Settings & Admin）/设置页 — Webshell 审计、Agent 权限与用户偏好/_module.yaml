@@ -1,0 +1,10 @@
+schema_version: 1
+module_path: frontend/settings_admin/misc_settings
+title: 设置页 — Webshell 审计、Agent 权限与用户偏好
+scope:
+    - web/src/pages/settings/Webshell.tsx
+    - web/src/pages/settings/Agent.tsx
+    - web/src/pages/settings/Preferences.tsx
+source_files: []
+depends_on: []
+related_to: []

@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: manager_service/alert/rule_source
+title: 告警规则源与缓存提供器
+scope:
+    - internal/manager/biz/alert/rules.go
+    - internal/manager/biz/alert/rule_source_test.go
+    - internal/manager/biz/alert/repo.go
+source_files: []
+depends_on: []
+related_to:
+    - path: manager_service/alert/pipeline_evaluators

@@ -1,0 +1,10 @@
+schema_version: 1
+module_path: frontend/marketplace
+title: 技能包市场（安装/卸载与能力声明展示）
+scope:
+    - web/src/pages/settings/Marketplace.tsx
+    - web/src/components/marketplace/
+source_files: []
+depends_on: []
+related_to:
+    - path: manager_service/marketplace

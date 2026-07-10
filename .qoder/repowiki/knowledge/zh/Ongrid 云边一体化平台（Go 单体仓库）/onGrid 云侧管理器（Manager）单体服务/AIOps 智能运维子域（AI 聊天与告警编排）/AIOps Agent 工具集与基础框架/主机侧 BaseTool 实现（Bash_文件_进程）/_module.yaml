@@ -1,0 +1,12 @@
+schema_version: 1
+module_path: manager_service/aiops/tools_and_basetool/host_system_tools
+title: 主机侧 BaseTool 实现（Bash/文件/进程）
+scope:
+    - internal/manager/biz/aiops/tools/bash_basetool.go
+    - internal/manager/biz/aiops/tools/host_files_basetool.go
+    - internal/manager/biz/aiops/tools/host_processes.go
+source_files: []
+depends_on: []
+related_to:
+    - path: manager_service/aiops/tools_and_basetool/basetool_core
+    - path: manager_service/aiops/tools_and_basetool/registry_and_toolbag

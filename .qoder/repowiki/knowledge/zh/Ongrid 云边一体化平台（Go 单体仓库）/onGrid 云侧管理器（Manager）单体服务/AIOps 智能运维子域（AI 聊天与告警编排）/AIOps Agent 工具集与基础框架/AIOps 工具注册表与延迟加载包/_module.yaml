@@ -1,0 +1,14 @@
+schema_version: 1
+module_path: manager_service/aiops/tools_and_basetool/registry_and_toolbag
+title: AIOps 工具注册表与延迟加载包
+scope:
+    - internal/manager/biz/aiops/tools/registry.go
+    - internal/manager/biz/aiops/tools/toolbag.go
+    - internal/manager/biz/aiops/tools/config_tools.go
+source_files: []
+depends_on: []
+related_to:
+    - path: manager_service/aiops/tools_and_basetool/decorators
+    - path: manager_service/aiops/tools_and_basetool/host_system_tools
+    - path: manager_service/aiops/tools_and_basetool/query_resources
+    - path: manager_service/aiops/tools_and_basetool/topology_incident_tools

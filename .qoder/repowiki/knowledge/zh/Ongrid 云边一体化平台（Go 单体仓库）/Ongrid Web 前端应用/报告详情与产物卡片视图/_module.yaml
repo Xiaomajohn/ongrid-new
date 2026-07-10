@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: frontend/reports
+title: 报告详情与产物卡片视图
+scope:
+    - web/src/pages/ReportDetail.tsx
+    - web/src/components/ReportCards.tsx
+    - web/src/components/ReportContent.tsx
+source_files: []
+depends_on: []
+related_to:
+    - path: manager_service/reporting

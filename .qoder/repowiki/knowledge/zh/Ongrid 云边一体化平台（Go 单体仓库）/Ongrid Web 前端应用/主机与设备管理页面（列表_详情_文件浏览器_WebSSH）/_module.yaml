@@ -1,0 +1,12 @@
+schema_version: 1
+module_path: frontend/devices_hosts
+title: 主机与设备管理页面（列表/详情/文件浏览器/WebSSH）
+scope:
+    - web/src/pages/Hosts.tsx
+    - web/src/pages/HostDetail.tsx
+    - web/src/pages/DeviceFiles.tsx
+    - web/src/pages/DeviceShell.tsx
+source_files: []
+depends_on: []
+related_to:
+    - path: manager_service/devicessh_webshell

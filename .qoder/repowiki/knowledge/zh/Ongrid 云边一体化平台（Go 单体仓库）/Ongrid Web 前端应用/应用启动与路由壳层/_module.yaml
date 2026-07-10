@@ -1,0 +1,10 @@
+schema_version: 1
+module_path: frontend/core_app_shell
+title: 应用启动与路由壳层
+scope:
+    - web/src/App.tsx
+    - web/src/main.tsx
+    - web/src/lib/routes.ts
+source_files: []
+depends_on: []
+related_to: []

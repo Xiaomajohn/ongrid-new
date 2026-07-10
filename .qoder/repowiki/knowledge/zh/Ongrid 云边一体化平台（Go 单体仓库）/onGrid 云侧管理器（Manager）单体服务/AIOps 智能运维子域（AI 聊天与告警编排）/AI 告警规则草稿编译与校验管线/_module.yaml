@@ -1,0 +1,9 @@
+schema_version: 1
+module_path: manager_service/aiops/alert_pipeline
+title: AI 告警规则草稿编译与校验管线
+scope:
+    - internal/manager/biz/aiops/alertconfig/
+    - internal/manager/biz/aiops/alertdraft/
+source_files: []
+depends_on: []
+related_to: []

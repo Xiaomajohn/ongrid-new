@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: edge_agent/plugins
+title: 边缘插件运行时与内置采集器集合
+scope:
+    - internal/edgeagent/plugins/
+source_files: []
+depends_on: []
+related_to: []

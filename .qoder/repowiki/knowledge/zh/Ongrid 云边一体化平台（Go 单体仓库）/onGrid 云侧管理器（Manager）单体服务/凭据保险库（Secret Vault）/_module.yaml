@@ -1,0 +1,12 @@
+schema_version: 1
+module_path: manager_service/secret_vault
+title: 凭据保险库（Secret Vault）
+scope:
+    - internal/manager/biz/secret/
+    - internal/manager/server/secret/
+    - internal/manager/data/secret/
+source_files: []
+depends_on: []
+related_to:
+    - path: frontend/settings_admin/integrations_secrets
+    - path: manager_service/main_entrypoint

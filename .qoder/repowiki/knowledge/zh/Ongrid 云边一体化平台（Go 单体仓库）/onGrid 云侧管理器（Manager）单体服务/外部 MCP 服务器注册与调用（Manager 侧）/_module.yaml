@@ -1,0 +1,12 @@
+schema_version: 1
+module_path: manager_service/mcp_integration
+title: 外部 MCP 服务器注册与调用（Manager 侧）
+scope:
+    - internal/manager/biz/mcp/
+    - internal/manager/server/mcp/
+    - internal/manager/data/mcp/
+source_files: []
+depends_on: []
+related_to:
+    - path: frontend/shared_api_client
+    - path: manager_service/main_entrypoint

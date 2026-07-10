@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: deploy_artifacts
+title: 部署产物与安装脚本集
+scope:
+    - deploy/
+    - resource/
+source_files: []
+depends_on: []
+related_to:
+    - path: edge_agent/agent_core
+    - path: manager_service/main_entrypoint

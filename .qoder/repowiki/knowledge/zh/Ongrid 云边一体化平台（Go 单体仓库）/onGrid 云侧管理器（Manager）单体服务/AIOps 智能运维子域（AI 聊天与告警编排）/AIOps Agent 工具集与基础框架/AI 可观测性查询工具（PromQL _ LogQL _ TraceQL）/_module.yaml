@@ -1,0 +1,12 @@
+schema_version: 1
+module_path: manager_service/aiops/tools_and_basetool/query_tools
+title: AI 可观测性查询工具（PromQL / LogQL / TraceQL）
+scope:
+    - internal/manager/biz/aiops/tools/query_promql.go
+    - internal/manager/biz/aiops/tools/query_logql.go
+    - internal/manager/biz/aiops/tools/query_traceql.go
+source_files: []
+depends_on: []
+related_to:
+    - path: manager_service/aiops/tools_and_basetool/basetool_core
+    - path: manager_service/monitoring

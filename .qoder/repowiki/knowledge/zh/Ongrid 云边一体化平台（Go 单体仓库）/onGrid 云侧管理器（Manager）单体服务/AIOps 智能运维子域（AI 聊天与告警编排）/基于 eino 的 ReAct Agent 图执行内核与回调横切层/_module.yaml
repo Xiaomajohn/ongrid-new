@@ -1,0 +1,9 @@
+schema_version: 1
+module_path: manager_service/aiops/graph_engine
+title: 基于 eino 的 ReAct Agent 图执行内核与回调横切层
+scope:
+    - internal/manager/biz/aiops/graph/
+source_files: []
+depends_on: []
+related_to:
+    - path: manager_service/aiops/chat_runtime

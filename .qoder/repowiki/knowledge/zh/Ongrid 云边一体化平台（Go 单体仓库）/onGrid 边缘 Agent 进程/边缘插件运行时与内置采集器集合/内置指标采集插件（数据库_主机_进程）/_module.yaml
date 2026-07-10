@@ -1,0 +1,12 @@
+schema_version: 1
+module_path: edge_agent/plugins/built_in_metrics_scrapers
+title: 内置指标采集插件（数据库/主机/进程）
+scope:
+    - internal/edgeagent/plugins/databasemetrics/
+    - internal/edgeagent/plugins/hostmetrics/
+    - internal/edgeagent/plugins/procmetrics/
+source_files: []
+depends_on: []
+related_to:
+    - path: edge_agent/collectors
+    - path: edge_agent/plugins/core_framework

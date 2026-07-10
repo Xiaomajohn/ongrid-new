@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: manager_service/alert/router_channel
+title: 告警路由与抑制策略
+scope:
+    - internal/manager/biz/alert/router.go
+    - internal/manager/biz/alert/channel_sender_test.go
+    - internal/manager/biz/alert/inhibit.go
+source_files: []
+depends_on: []
+related_to:
+    - path: manager_service/alert/pipeline_evaluators

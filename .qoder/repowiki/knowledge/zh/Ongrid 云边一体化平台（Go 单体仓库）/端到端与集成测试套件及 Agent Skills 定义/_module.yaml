@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: tests
+title: 端到端与集成测试套件及 Agent Skills 定义
+scope:
+    - tests/
+    - skills/
+source_files: []
+depends_on: []
+related_to:
+    - path: edge_agent
+    - path: manager_service

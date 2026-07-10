@@ -1,0 +1,13 @@
+schema_version: 1
+module_path: manager_service/aiops/tools_and_basetool/query_resources
+title: AIOPS 查询类工具（告警规则、事件、设备）
+scope:
+    - internal/manager/biz/aiops/tools/query_incidents.go
+    - internal/manager/biz/aiops/tools/query_alert_rules.go
+    - internal/manager/biz/aiops/tools/query_edges.go
+source_files: []
+depends_on: []
+related_to:
+    - path: manager_service/aiops/tools_and_basetool/basetool_core
+    - path: manager_service/aiops/tools_and_basetool/registry_and_toolbag
+    - path: manager_service/alert

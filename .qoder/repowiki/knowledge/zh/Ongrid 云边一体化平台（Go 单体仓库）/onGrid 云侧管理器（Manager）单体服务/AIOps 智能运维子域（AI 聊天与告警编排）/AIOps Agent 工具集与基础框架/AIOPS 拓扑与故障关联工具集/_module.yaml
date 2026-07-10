@@ -1,0 +1,13 @@
+schema_version: 1
+module_path: manager_service/aiops/tools_and_basetool/topology_incident_tools
+title: AIOPS 拓扑与故障关联工具集
+scope:
+    - internal/manager/biz/aiops/tools/correlate_incident.go
+    - internal/manager/biz/aiops/tools/get_topology.go
+    - internal/manager/biz/aiops/tools/rank_edges.go
+source_files: []
+depends_on: []
+related_to:
+    - path: manager_service/aiops/tools_and_basetool/basetool_core
+    - path: manager_service/aiops/tools_and_basetool/registry_and_toolbag
+    - path: manager_service/topology

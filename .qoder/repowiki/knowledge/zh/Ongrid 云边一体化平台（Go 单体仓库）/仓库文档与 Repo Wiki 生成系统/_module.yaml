@@ -1,0 +1,10 @@
+schema_version: 1
+module_path: docs_and_wiki
+title: 仓库文档与 Repo Wiki 生成系统
+scope:
+    - docs/
+    - repowiki/
+    - .agents/skills/
+source_files: []
+depends_on: []
+related_to: []

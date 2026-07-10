@@ -1,0 +1,18 @@
+schema_version: 1
+module_path: manager_service/monitoring
+title: 监控与系统可观测性 HTTP 服务层
+scope:
+    - internal/manager/biz/monitor/
+    - internal/manager/server/monitor/
+    - internal/manager/server/systemhealth/
+    - internal/manager/server/systemupgrade/
+    - internal/manager/server/prometheus/
+    - internal/manager/server/traces/
+    - internal/manager/server/logs/
+source_files: []
+depends_on: []
+related_to:
+    - path: frontend/settings_admin/system_settings
+    - path: frontend/shared_api_client
+    - path: manager_service/aiops/tools_and_basetool/query_tools
+    - path: manager_service/main_entrypoint

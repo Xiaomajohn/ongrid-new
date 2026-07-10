@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: manager_service/aiops/http_server
+title: AIOps HTTP 路由与 SSE 流式接口
+scope:
+    - internal/manager/server/aiops/
+source_files: []
+depends_on: []
+related_to:
+    - path: frontend/home_dashboard
+    - path: manager_service/imbridge
+    - path: manager_service/main_entrypoint

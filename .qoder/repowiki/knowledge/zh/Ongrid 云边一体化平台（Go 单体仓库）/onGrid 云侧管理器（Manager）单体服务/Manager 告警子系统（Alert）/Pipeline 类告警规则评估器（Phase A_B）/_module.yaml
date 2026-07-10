@@ -1,0 +1,12 @@
+schema_version: 1
+module_path: manager_service/alert/pipeline_evaluators
+title: Pipeline 类告警规则评估器（Phase A/B）
+scope:
+    - internal/manager/biz/alert/pipeline.go
+    - internal/manager/biz/alert/evaluators_phaseA.go
+    - internal/manager/biz/alert/evaluators_phaseB.go
+source_files: []
+depends_on: []
+related_to:
+    - path: manager_service/alert/router_channel
+    - path: manager_service/alert/rule_source
