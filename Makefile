@@ -376,18 +376,16 @@ stage-auditbeat: ## [release] 从 resource/auditbeat/ 复制 auditbeat 到 bin/<
 	@for target in $(EDGE_PLUGIN_ARCHES); do \
 		src=$(RESOURCE_DIR)/$$target/auditbeat; \
 		if [ ! -f $$src ]; then \
-			arch_dir=$$target; \
+			tgz_dir=resource; \
 			tgz_x86=resource/auditbeat-$(AUDITBEAT_VERSION)-linux-x86_64.tar.gz; \
-			tgz_arm=resource/auditbeat-$(AUDITBEAT_VERSION)-linux-aarch64.tar.gz; \
-			if [ "$$arch_dir" = "linux-amd64" ] && [ -f "$$tgz_x86" ]; then \
-				echo "[auditbeat] extracting $$tgz_x86 -> $$src"; \
-				tar -xzf $$tgz_x86 -C $(RESOURCE_DIR)/$$arch_dir --strip-components=1 --one-top-level=$$arch_dir auditbeat-$(AUDITBEAT_VERSION)-linux-x86_64/auditbeat 2>/dev/null || \
-				(cp auditbeat-$(AUDITBEAT_VERSION)-linux-x86_64/auditbeat $(RESOURCE_DIR)/$$arch_dir/auditbeat && rm -rf auditbeat-$(AUDITBEAT_VERSION)-linux-x86_64); \
+			tgz_arm=resource/auditbeat-$(AUDITBEAT_VERSION)-linux-arm64.tar.gz; \
+			if [ "$$target" = "linux-amd64" ] && [ -f "$$tgz_x86" ]; then \
+				echo "[auditbeat] extracting $$tgz_x86"; \
+				cd $(RESOURCE_DIR) && mkdir -p $$target && tar -xzf ../../$$tgz_x86 && mv auditbeat-$(AUDITBEAT_VERSION)-linux-x86_64/auditbeat $$target/auditbeat && rm -rf auditbeat-$(AUDITBEAT_VERSION)-linux-x86_64 && cd - >/dev/null; \
 				chmod +x $$src; \
-			elif [ "$$arch_dir" = "linux-arm64" ] && [ -f "$$tgz_arm" ]; then \
-				echo "[auditbeat] extracting $$tgz_arm -> $$src"; \
-				tar -xzf $$tgz_arm -C $(RESOURCE_DIR)/$$arch_dir --strip-components=1 --one-top-level=$$arch_dir auditbeat-$(AUDITBEAT_VERSION)-linux-aarch64/auditbeat 2>/dev/null || \
-				(cp auditbeat-$(AUDITBEAT_VERSION)-linux-aarch64/auditbeat $(RESOURCE_DIR)/$$arch_dir/auditbeat && rm -rf auditbeat-$(AUDITBEAT_VERSION)-linux-aarch64); \
+			elif [ "$$target" = "linux-arm64" ] && [ -f "$$tgz_arm" ]; then \
+				echo "[auditbeat] extracting $$tgz_arm"; \
+				cd $(RESOURCE_DIR) && mkdir -p $$target && tar -xzf ../../$$tgz_arm && mv auditbeat-$(AUDITBEAT_VERSION)-linux-arm64/auditbeat $$target/auditbeat && rm -rf auditbeat-$(AUDITBEAT_VERSION)-linux-arm64 && cd - >/dev/null; \
 				chmod +x $$src; \
 			fi; \
 		fi; \

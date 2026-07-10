@@ -66,3 +66,4 @@ deploy/install/certs/
 
 # build cache: stack-dep upstream binaries fetched by dist/package.sh
 .cache/
+resource/auditbeat
