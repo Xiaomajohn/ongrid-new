@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0",
+  "created_at": "2026-07-06T00:00:00Z",
+  "events": [
+    {
+      "timestamp": "2026-07-06T00:00:00Z",
+      "type": "initialize",
+      "actor": "repo-wiki-agent",
+      "baseline_commit": "47bad98d46a1d70231d237285784a8192d7756c7",
+      "page_count": 20,
+      "note": "initial scaffold of repowiki/ (docs + mkdocs.yml + state)"
+    }
+  ]
+}

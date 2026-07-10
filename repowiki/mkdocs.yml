@@ -1,0 +1,93 @@
+site_name: ongrid-new
+site_description: 仓库 Wiki — 由 repo-wiki 自动生成，包含可追溯到源码的引用
+site_url: https://github.com/Xiaomajohn/ongrid-new
+repo_url: https://github.com/Xiaomajohn/ongrid-new
+repo_name: Xiaomajohn/ongrid-new
+edit_uri: edit/main/
+
+docs_dir: docs
+site_dir: site
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - navigation.tracking
+    - toc.follow
+    - content.code.copy
+    - search.suggest
+    - search.highlight
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: 切换到深色模式
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: 切换到浅色模式
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+plugins:
+  - search
+
+nav:
+  - 首页: index.md
+  - 快速开始:
+      - 本地开发: getting-started/local-dev.md
+      - 配置说明: getting-started/configuration.md
+      - 构建与运行: getting-started/build-and-run.md
+  - 架构总览:
+      - 整体架构: architecture/overview.md
+      - 数据流: architecture/data-flow.md
+      - 模块依赖图: architecture/dependency-map.md
+      - 部署拓扑: architecture/deployment-topology.md
+  - 核心组件:
+      - 后端服务 (Go): components/backend.md
+      - Edge Agent: components/edge-agent.md
+      - 前端 (React + TS): components/frontend.md
+      - 共享包 (pkg): components/pkg.md
+      - IAM 服务: components/iam.md
+      - Manager 服务: components/manager.md
+  - API 参考:
+      - gRPC 服务清单: api/grpc-services.md
+      - HTTP 端点: api/http-endpoints.md
+  - 运维:
+      - 构建与测试: operations/build-and-test.md
+      - 部署指南: operations/deploy.md
+      - 监控告警: operations/monitoring.md
+  - 架构决策记录 (ADR):
+      - 决策索引: adr/index.md
+
+extra:
+  generator: false

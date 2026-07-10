@@ -1,0 +1,73 @@
+# Components Detection
+# generated: 2026-07-06T14:35:52+08:00
+# commit: 47bad98d46a1d70231d237285784a8192d7756c7
+
+## Top-Level Directories
+  cmd/  (6 files)
+  internal/  (867 files)
+  api/  (10 files)
+  web/  (181 files)
+  deploy/  (57 files)
+  docs/  (18 files)
+  tests/  (27 files)
+  agents/  (8 files)
+  skills/  (3 files)
+  scripts/  (2 files)
+  .github/  (2 files)
+
+## cmd/ — Entrypoints
+  /root/builder/ongrid-new/cmd/ongrid-edge/main.go
+  /root/builder/ongrid-new/cmd/ongrid/main.go
+
+## internal/ — Business Domains
+  edgeagent/  (76 files)
+  iam/  (22 files)
+  manager/  (664 files)
+  pkg/  (80 files)
+  skill/  (25 files)
+
+## api/ — Protocol Buffer Definitions
+/root/builder/ongrid-new/api/iam/v1/iam.proto
+/root/builder/ongrid-new/api/manager/aiops/v1/aiops.proto
+/root/builder/ongrid-new/api/manager/alert/v1/alert.proto
+/root/builder/ongrid-new/api/manager/edge/v1/edge.proto
+/root/builder/ongrid-new/api/manager/metric/v1/metric.proto
+/root/builder/ongrid-new/api/manager/notification/v1/notification.proto
+/root/builder/ongrid-new/api/tunnel/v1/tunnel.proto
+
+## web/ — Frontend
+  src/  (167 files)
+    api/  (36 files)
+    components/  (47 files)
+    i18n/  (1 files)
+    lib/  (16 files)
+    pages/  (51 files)
+    store/  (9 files)
+    styles/  (1 files)
+    test/  (3 files)
+
+## deploy/ — Deployment
+/root/builder/ongrid-new/deploy/docker-compose.yml
+/root/builder/ongrid-new/deploy/Dockerfile.frontier
+/root/builder/ongrid-new/deploy/Dockerfile.ongrid
+/root/builder/ongrid-new/deploy/Dockerfile.ongrid-edge
+/root/builder/ongrid-new/deploy/Dockerfile.web
+/root/builder/ongrid-new/deploy/edge/bash-policy.example.yaml
+/root/builder/ongrid-new/deploy/.env.example
+/root/builder/ongrid-new/deploy/install/apply-pending-upgrade.sh
+/root/builder/ongrid-new/deploy/install/docker-compose.yml
+/root/builder/ongrid-new/deploy/install/.env.example
+/root/builder/ongrid-new/deploy/install/frontier.yaml
+/root/builder/ongrid-new/deploy/install/install.sh
+/root/builder/ongrid-new/deploy/install/loki-config.yaml
+/root/builder/ongrid-new/deploy/install/nginx.conf
+/root/builder/ongrid-new/deploy/install/prometheus-rules.yml
+/root/builder/ongrid-new/deploy/install/prometheus.yml
+/root/builder/ongrid-new/deploy/install/README.md
+/root/builder/ongrid-new/deploy/install/tempo-config.yaml
+/root/builder/ongrid-new/deploy/install/uninstall.sh
+/root/builder/ongrid-new/deploy/install/upgrade.sh
+/root/builder/ongrid-new/deploy/nginx/nginx.conf
+/root/builder/ongrid-new/deploy/prometheus/prometheus.yml
+/root/builder/ongrid-new/deploy/README.md
+/root/builder/ongrid-new/deploy/searxng/settings.yml

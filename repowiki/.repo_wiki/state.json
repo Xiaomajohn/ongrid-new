@@ -1,0 +1,123 @@
+{
+  "schema_version": "1.0",
+  "last_run_commit": "47bad98d46a1d70231d237285784a8192d7756c7",
+  "baseline_commit": "47bad98d46a1d70231d237285784a8192d7756c7",
+  "repo_remote_url": "https://github.com/Xiaomajohn/ongrid-new.git",
+  "repo_name": "ongrid-new",
+  "created_at": "2026-07-06T00:00:00Z",
+  "last_updated_at": "2026-07-06T00:00:00Z",
+  "ignore_patterns": [
+    ".git/**",
+    "node_modules/**",
+    "dist/**",
+    "build/**",
+    "site/**",
+    "bin/**",
+    "resource/**",
+    ".cache/**",
+    "repowiki/.repo_wiki/**",
+    "repowiki/site/**"
+  ],
+  "pages": {
+    "docs/index.md": {
+      "title": "首页",
+      "managed_sections": ["## Overview", "## Quick Links", "## Components"],
+      "last_generated_commit": "47bad98d46a1d70231d237285784a8192d7756c7"
+    },
+    "docs/getting-started/local-dev.md": {
+      "title": "本地开发",
+      "managed_sections": ["## Prerequisites", "## First Run"],
+      "last_generated_commit": "47bad98d46a1d70231d237285784a8192d7756c7"
+    },
+    "docs/getting-started/configuration.md": {
+      "title": "配置说明",
+      "managed_sections": ["## Configuration Sources"],
+      "last_generated_commit": "47bad98d46a1d70231d237285784a8192d7756c7"
+    },
+    "docs/getting-started/build-and-run.md": {
+      "title": "构建与运行",
+      "managed_sections": ["## Makefile Targets"],
+      "last_generated_commit": "47bad98d46a1d70231d237285784a8192d7756c7"
+    },
+    "docs/architecture/overview.md": {
+      "title": "整体架构",
+      "managed_sections": ["## System Overview", "## Technology Stack", "## Key Components", "## Entrypoints"],
+      "last_generated_commit": "47bad98d46a1d70231d237285784a8192d7756c7"
+    },
+    "docs/architecture/data-flow.md": {
+      "title": "数据流",
+      "managed_sections": ["## Frontend → Backend", "## Edge Agent → Manager"],
+      "last_generated_commit": "47bad98d46a1d70231d237285784a8192d7756c7"
+    },
+    "docs/architecture/dependency-map.md": {
+      "title": "模块依赖图",
+      "managed_sections": ["## Go Module Layout", "## Layering"],
+      "last_generated_commit": "47bad98d46a1d70231d237285784a8192d7756c7"
+    },
+    "docs/architecture/deployment-topology.md": {
+      "title": "部署拓扑",
+      "managed_sections": ["## Topology"],
+      "last_generated_commit": "47bad98d46a1d70231d237285784a8192d7756c7"
+    },
+    "docs/components/backend.md": {
+      "title": "后端服务 (Go)",
+      "managed_sections": ["## Overview", "## Entrypoints", "## Key Interfaces"],
+      "last_generated_commit": "47bad98d46a1d70231d237285784a8192d7756c7"
+    },
+    "docs/components/edge-agent.md": {
+      "title": "Edge Agent",
+      "managed_sections": ["## Overview", "## Plugins", "## Collector"],
+      "last_generated_commit": "47bad98d46a1d70231d237285784a8192d7756c7"
+    },
+    "docs/components/frontend.md": {
+      "title": "前端 (React + TS)",
+      "managed_sections": ["## Overview", "## Key Modules", "## API Layer"],
+      "last_generated_commit": "47bad98d46a1d70231d237285784a8192d7756c7"
+    },
+    "docs/components/pkg.md": {
+      "title": "共享包 (pkg)",
+      "managed_sections": ["## Overview", "## Packages"],
+      "last_generated_commit": "47bad98d46a1d70231d237285784a8192d7756c7"
+    },
+    "docs/components/iam.md": {
+      "title": "IAM 服务",
+      "managed_sections": ["## Overview"],
+      "last_generated_commit": "47bad98d46a1d70231d237285784a8192d7756c7"
+    },
+    "docs/components/manager.md": {
+      "title": "Manager 服务",
+      "managed_sections": ["## Overview", "## Sub-Domains"],
+      "last_generated_commit": "47bad98d46a1d70231d237285784a8192d7756c7"
+    },
+    "docs/api/grpc-services.md": {
+      "title": "gRPC 服务清单",
+      "managed_sections": ["## Services"],
+      "last_generated_commit": "47bad98d46a1d70231d237285784a8192d7756c7"
+    },
+    "docs/api/http-endpoints.md": {
+      "title": "HTTP 端点",
+      "managed_sections": ["## Endpoints"],
+      "last_generated_commit": "47bad98d46a1d70231d237285784a8192d7756c7"
+    },
+    "docs/operations/build-and-test.md": {
+      "title": "构建与测试",
+      "managed_sections": ["## Build", "## Test"],
+      "last_generated_commit": "47bad98d46a1d70231d237285784a8192d7756c7"
+    },
+    "docs/operations/deploy.md": {
+      "title": "部署指南",
+      "managed_sections": ["## One-Click Install", "## Edge Install", "## Upgrade"],
+      "last_generated_commit": "47bad98d46a1d70231d237285784a8192d7756c7"
+    },
+    "docs/operations/monitoring.md": {
+      "title": "监控告警",
+      "managed_sections": ["## Stack", "## Metrics"],
+      "last_generated_commit": "47bad98d46a1d70231d237285784a8192d7756c7"
+    },
+    "docs/adr/index.md": {
+      "title": "架构决策记录 (ADR)",
+      "managed_sections": ["## Active Decisions"],
+      "last_generated_commit": "47bad98d46a1d70231d237285784a8192d7756c7"
+    }
+  }
+}

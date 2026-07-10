@@ -1,0 +1,47 @@
+# Technology Stack Detection
+# generated: 2026-07-06T14:35:39+08:00
+# commit: 47bad98d46a1d70231d237285784a8192d7756c7
+
+## Language Markers
+  PRESENT: go.mod
+
+## File Counts by Extension
+    760 go
+    206 md
+     99 tsx
+     70 ts
+     21 yml
+     18 json
+     12 sh
+      9 svg
+      8 yaml
+      8 service
+      7 proto
+      5 py
+      4 template
+      4 gitignore
+      4 example
+      4 conf
+      3 png
+      2 sql
+      1 web
+      1 /VERSION
+
+## Counts by Language Family
+Go: 760
+TS/TSX: 169
+JS/JSX: 2
+Proto: 7
+YAML: 29
+Shell: 12
+Python: 5
+Markdown: 206
+Dockerfile: 4
+
+## Build / Tooling Files
+  PRESENT: Makefile
+  PRESENT: .tool-versions
+  PRESENT: .golangci.yml
+  PRESENT: .go-arch-lint.yml
+  PRESENT: go.sum
+  PRESENT: package-lock.json
