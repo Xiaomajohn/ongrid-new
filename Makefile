@@ -370,24 +370,38 @@ OTELCOL_VERSION ?= 0.118.0
 # fail rather than ship a half-built tarball whose audit plugin will
 # silently never start on the edge. Operators populate resource/ per
 # resource/auditbeat/README.md before running `make stage-auditbeat`.
+# Auto-extracts tar.gz from resource/ if binary is missing.
 .PHONY: stage-auditbeat
 stage-auditbeat: ## [release] 从 resource/auditbeat/ 复制 auditbeat 到 bin/<os>-<arch>/ (linux-only，离线；缺失则失败)
-	@fail=0; \
-	for target in $(EDGE_PLUGIN_ARCHES); do \
-		dest=$(BIN_DIR)/$$target/auditbeat; \
+	@for target in $(EDGE_PLUGIN_ARCHES); do \
 		src=$(RESOURCE_DIR)/$$target/auditbeat; \
+		if [ ! -f $$src ]; then \
+			arch_dir=$$target; \
+			tgz_x86=resource/auditbeat-$(AUDITBEAT_VERSION)-linux-x86_64.tar.gz; \
+			tgz_arm=resource/auditbeat-$(AUDITBEAT_VERSION)-linux-aarch64.tar.gz; \
+			if [ "$$arch_dir" = "linux-amd64" ] && [ -f "$$tgz_x86" ]; then \
+				echo "[auditbeat] extracting $$tgz_x86 -> $$src"; \
+				tar -xzf $$tgz_x86 -C $(RESOURCE_DIR)/$$arch_dir --strip-components=1 --one-top-level=$$arch_dir auditbeat-$(AUDITBEAT_VERSION)-linux-x86_64/auditbeat 2>/dev/null || \
+				(cp auditbeat-$(AUDITBEAT_VERSION)-linux-x86_64/auditbeat $(RESOURCE_DIR)/$$arch_dir/auditbeat && rm -rf auditbeat-$(AUDITBEAT_VERSION)-linux-x86_64); \
+				chmod +x $$src; \
+			elif [ "$$arch_dir" = "linux-arm64" ] && [ -f "$$tgz_arm" ]; then \
+				echo "[auditbeat] extracting $$tgz_arm -> $$src"; \
+				tar -xzf $$tgz_arm -C $(RESOURCE_DIR)/$$arch_dir --strip-components=1 --one-top-level=$$arch_dir auditbeat-$(AUDITBEAT_VERSION)-linux-aarch64/auditbeat 2>/dev/null || \
+				(cp auditbeat-$(AUDITBEAT_VERSION)-linux-aarch64/auditbeat $(RESOURCE_DIR)/$$arch_dir/auditbeat && rm -rf auditbeat-$(AUDITBEAT_VERSION)-linux-aarch64); \
+				chmod +x $$src; \
+			fi; \
+		fi; \
+		dest=$(BIN_DIR)/$$target/auditbeat; \
 		if [ ! -f $$src ]; then \
 			echo "[auditbeat] error: $$src missing — auditbeat is offline-only and is NOT auto-fetched." >&2; \
 			echo "[auditbeat]   place the Elastic auditbeat binary at $$src per resource/auditbeat/README.md," >&2; \
 			echo "[auditbeat]   or set EDGE_PLUGIN_ARCHES to an arch you have populated, then re-run." >&2; \
-			fail=1; \
-			continue; \
+			exit 1; \
 		fi; \
 		mkdir -p $(BIN_DIR)/$$target; \
 		install -m 0755 $$src $$dest; \
 		echo "[auditbeat] staged $$dest (from $$src)"; \
 	done; \
-	if [ $$fail -ne 0 ]; then exit 1; fi; \
 	echo "[auditbeat] note: linux-only (auditd requires Linux kernel audit subsystem)"; \
 	echo "[auditbeat] done. Run 'make package' to bake into the release tarball."
 
