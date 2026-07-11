@@ -1,5 +1,0 @@
-# auditbeat 是 Elastic 闭源二进制，不入 git。
-# 在本地把对应 arch 的 auditbeat 二进制放到对应子目录后，
-# 运行 `make stage-auditbeat` 把它复制到 bin/<arch>/auditbeat。
-linux-amd64/auditbeat
-linux-arm64/auditbeat
