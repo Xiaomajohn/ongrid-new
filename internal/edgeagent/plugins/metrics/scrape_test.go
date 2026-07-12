@@ -192,7 +192,7 @@ func TestScrapeOnce_HappyPath(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	samples, source, err := scrapeOnce(ctx, spec, spec.URLs[0])
+	samples, source, err := scrapeOnce(ctx, spec, spec.URLs[0], nil)
 	if err != nil {
 		t.Fatalf("scrapeOnce: %v", err)
 	}
@@ -236,7 +236,7 @@ func TestScrapeOnce_ExtraLabels(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	samples, _, err := scrapeOnce(ctx, spec, spec.URLs[0])
+	samples, _, err := scrapeOnce(ctx, spec, spec.URLs[0], nil)
 	if err != nil {
 		t.Fatalf("scrapeOnce: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestScrapeOnce_HTTPError(t *testing.T) {
 	spec, _ := parseSpec(map[string]interface{}{"target_url": srv.URL})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, _, err := scrapeOnce(ctx, spec, spec.URLs[0]); err == nil {
+	if _, _, err := scrapeOnce(ctx, spec, spec.URLs[0], nil); err == nil {
 		t.Errorf("scrapeOnce should error on 5xx")
 	}
 }
@@ -279,7 +279,7 @@ func TestPlugin_PushesSamplesWithEdgeID(t *testing.T) {
 	pusher := newFakePusher()
 	var edgeID atomic.Uint64
 	edgeID.Store(42)
-	p := New(pusher, edgeID.Load, nil)
+	p := New(pusher, edgeID.Load, nil, nil)
 	if err := p.Configure(plugins.PluginConfig{
 		Enabled: true,
 		EdgeID:  42,
@@ -343,7 +343,7 @@ func TestPlugin_DropsWhenEdgeIDZero(t *testing.T) {
 	defer srv.Close()
 
 	pusher := newFakePusher()
-	p := New(pusher, func() uint64 { return 0 }, nil)
+	p := New(pusher, func() uint64 { return 0 }, nil, nil)
 	if err := p.Configure(plugins.PluginConfig{
 		Enabled: true,
 		Spec: map[string]interface{}{
@@ -376,7 +376,7 @@ func TestPlugin_DropsWhenEdgeIDZero(t *testing.T) {
 // runLoops.
 func TestPlugin_StartIsIdempotent(t *testing.T) {
 	pusher := newFakePusher()
-	p := New(pusher, func() uint64 { return 1 }, nil)
+	p := New(pusher, func() uint64 { return 1 }, nil, nil)
 	if err := p.Configure(plugins.PluginConfig{Enabled: true, EdgeID: 1, Spec: map[string]interface{}{
 		"target_url":      "http://127.0.0.1:1", // unreachable; just exercises the lifecycle
 		"scrape_interval": "10s",

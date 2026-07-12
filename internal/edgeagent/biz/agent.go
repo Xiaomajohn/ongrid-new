@@ -85,7 +85,16 @@ type Agent struct {
 
 	// edgeID is assigned by the cloud in the register_edge response.
 	edgeID uint64
-	mu     sync.RWMutex
+	// lastServerTimeMs 是 manager 心跳响应里带的 ongrid 服务端时间戳
+	// (heartbeatLoop 每 30s 更新一次, 单位毫秒). edge scrape 时把它
+	// 同步到 tunnel.PromSample.ServerTimeMs 字段, 让 manager 端
+	// ingester 用作 Prom 的 sample.timestamp — 这样无论 edge 端
+	// CLOCK_REALTIME 怎么漂移都不会触发 Prom 的 5min hard-reject.
+	//
+	// 这只是"取 manager 时间作为数据时间戳", 不是修改本地系统时钟,
+	// 不涉及 NTP / timesyncd 等运维操作 (符合 AGENTS.md 时钟管理硬规则).
+	lastServerTimeMs int64
+	mu               sync.RWMutex
 
 	// upgradeRequested is closed by the agent_upgrade handler after a
 	// new binary is staged. Run() watches this channel and returns nil
@@ -145,6 +154,17 @@ func (a *Agent) EdgeID() uint64 {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.edgeID
+}
+
+// ServerTimeMs 返回最近一次心跳响应里 manager 端的 Unix 毫秒时间戳.
+// 0 表示 edge 还没收到过一次带 ServerTimeMs 的心跳响应 (例如刚启动
+// 的 ~30s 内) — 调用方 (metrics plugin scrape loop) 必须把 0 当作
+// "老 edge / 未就绪, PromSample.ServerTimeMs 留空" 处理, 让 manager
+// 端 ingester 走 legacy fallback 路径.
+func (a *Agent) ServerTimeMs() int64 {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.lastServerTimeMs
 }
 
 // Run drives the agent lifecycle: register handlers, dial, register_edge,
@@ -375,9 +395,12 @@ func (a *Agent) registerEdge(ctx context.Context) error {
 	a.mu.Lock()
 	a.edgeID = resp.EdgeID
 	a.mu.Unlock()
+	// resp.ServerTime 字段保留以维持 register_edge wire 兼容 (老 edge 仍在读),
+	// 但 v3.3 起 agent 不再消费它 —— 时间戳改由 heartbeat 响应 ServerTimeMs 字段
+	// 周期更新, 避免 register 一次性快照陈旧. 不打印 edge_clock_skew 日志
+	// (那条数据时间戳策略已迁到 Prom 端 ServerTimeMs -> ingester, 不再涉及 edge).
 	a.log.Info("agent: registered with cloud",
 		slog.Uint64("edge_id", resp.EdgeID),
-		slog.Int64("server_time", resp.ServerTime),
 	)
 	return nil
 }
@@ -406,12 +429,13 @@ func (a *Agent) heartbeatLoop(ctx context.Context) error {
 				plugins = healthFn()
 			}
 			rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			var hbResp tunnel.HeartbeatResponse
 			err := a.client.Call(rctx, tunnel.MethodHeartbeat,
 				tunnel.HeartbeatRequest{
 					EdgeID:  a.EdgeID(),
 					Ts:      time.Now().Unix(),
 					Plugins: plugins,
-				}, nil)
+				}, &hbResp)
 			cancel()
 			if err != nil {
 				consecutiveFail++
@@ -426,6 +450,16 @@ func (a *Agent) heartbeatLoop(ctx context.Context) error {
 				continue
 			}
 			consecutiveFail = 0
+			// 把 manager 端心跳响应里的 ServerTimeMs 缓存进 agent,
+			// 给 PromSample.ServerTimeMs 字段做时间戳锚点 (详见
+			// ServerTimeMs 注释). 心跳 30s 一次, scrape 10s 一次,
+			// 锚点跟真实 ongrid 时间最大差 = 心跳周期 + 网络延迟,
+			// 远小于 Prom 5min future-window 的 4.5min 余量.
+			if hbResp.ServerTimeMs > 0 {
+				a.mu.Lock()
+				a.lastServerTimeMs = hbResp.ServerTimeMs
+				a.mu.Unlock()
+			}
 		}
 	}
 }

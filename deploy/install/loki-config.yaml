@@ -34,7 +34,17 @@ limits_config:
   ingestion_rate_mb: 8
   ingestion_burst_size_mb: 16
   reject_old_samples: true
-  reject_old_samples_max_age: 168h
+  reject_old_samples_max_age: 24h
+  # 放宽未来时间容忍度至30天(720h), 兼容Edge设备时钟漂移
+  # 30 天余量足以覆盖最坏 case: 边缘机器长期失联 + 离线累积日志
+  # entry.timestamp 仍来自 promtail scrape (edge CLOCK_REALTIME),
+  # 我们不在数据流上盖戳 (manager 不介入, 详见 ADR-014), 因此
+  # 兜底逻辑必须落在 Loki 服务端. 30 天是当前最坏 clock skew
+  # (192.168.25.56 观察值 22min) 的 ~2000 倍余量, 实际不会触发.
+  # Loki 3.4.0 不支持 `30d` 字面量, 必须用 `720h`.
+  # 顺便: AGENTS.md 禁止 NTP 校时 (时钟漂移靠数据时间戳策略治本),
+  # Loki grace 放宽是兜底而非治本, 不触发 NTP 校时.
+  creation_grace_period: 720h
   max_query_series: 10000
   max_query_lookback: 720h
 

@@ -90,7 +90,7 @@ func (w *fakeDatabaseSecretWriter) WriteDatabaseMetricsSecrets(_ context.Context
 func TestSetDatabaseMetricsWritesSecretAndStripsPassword(t *testing.T) {
 	repo := newFakePluginConfigRepo()
 	writer := &fakeDatabaseSecretWriter{}
-	uc := NewPluginConfigUC(repo, nil, fakeEndpointResolver{}, nil)
+	uc := NewPluginConfigUC(repo, nil, nil, fakeEndpointResolver{}, nil)
 	uc.SetDatabaseMetricsSecretWriter(writer)
 
 	row, err := uc.Set(context.Background(), 7, model.PluginNameDatabaseMetrics, SetInput{
@@ -152,7 +152,7 @@ func TestSetDatabaseMetrics_WhenUpsertFails_DoesNotWriteSecret(t *testing.T) {
 	repo := newFakePluginConfigRepo()
 	repo.upsertErr = fmt.Errorf("database unavailable")
 	writer := &fakeDatabaseSecretWriter{}
-	uc := NewPluginConfigUC(repo, nil, fakeEndpointResolver{}, nil)
+	uc := NewPluginConfigUC(repo, nil, nil, fakeEndpointResolver{}, nil)
 	uc.SetDatabaseMetricsSecretWriter(writer)
 
 	_, err := uc.Set(context.Background(), 7, model.PluginNameDatabaseMetrics, SetInput{
@@ -208,7 +208,7 @@ func TestSetDatabaseMetrics_WhenSecretWriteFails_RollsBackConfig(t *testing.T) {
 		SpecJSON:   oldSpec,
 	}
 	writer := &fakeDatabaseSecretWriter{err: fmt.Errorf("edge tunnel unavailable")}
-	uc := NewPluginConfigUC(repo, nil, fakeEndpointResolver{}, nil)
+	uc := NewPluginConfigUC(repo, nil, nil, fakeEndpointResolver{}, nil)
 	uc.SetDatabaseMetricsSecretWriter(writer)
 
 	_, err := uc.Set(context.Background(), 7, model.PluginNameDatabaseMetrics, SetInput{
@@ -278,7 +278,7 @@ func TestSetDatabaseMetricsDeletesRemovedSecret(t *testing.T) {
 		SpecJSON:   oldSpec,
 	}
 	writer := &fakeDatabaseSecretWriter{}
-	uc := NewPluginConfigUC(repo, nil, fakeEndpointResolver{}, nil)
+	uc := NewPluginConfigUC(repo, nil, nil, fakeEndpointResolver{}, nil)
 	uc.SetDatabaseMetricsSecretWriter(writer)
 
 	_, err := uc.Set(context.Background(), 7, model.PluginNameDatabaseMetrics, SetInput{
@@ -318,7 +318,7 @@ func TestSetDatabaseMetricsDeletesRemovedSecret(t *testing.T) {
 func TestSetDatabaseMetricsWritesTLSConfigAndStripsPassword(t *testing.T) {
 	repo := newFakePluginConfigRepo()
 	writer := &fakeDatabaseSecretWriter{}
-	uc := NewPluginConfigUC(repo, nil, fakeEndpointResolver{}, nil)
+	uc := NewPluginConfigUC(repo, nil, nil, fakeEndpointResolver{}, nil)
 	uc.SetDatabaseMetricsSecretWriter(writer)
 
 	row, err := uc.Set(context.Background(), 7, model.PluginNameDatabaseMetrics, SetInput{
@@ -383,7 +383,7 @@ func TestSetDatabaseMetricsWritesTLSConfigAndStripsPassword(t *testing.T) {
 func TestSetDatabaseMetricsSkipVerifyNormalizesPostgresSSLMode(t *testing.T) {
 	repo := newFakePluginConfigRepo()
 	writer := &fakeDatabaseSecretWriter{}
-	uc := NewPluginConfigUC(repo, nil, fakeEndpointResolver{}, nil)
+	uc := NewPluginConfigUC(repo, nil, nil, fakeEndpointResolver{}, nil)
 	uc.SetDatabaseMetricsSecretWriter(writer)
 
 	row, err := uc.Set(context.Background(), 7, model.PluginNameDatabaseMetrics, SetInput{
@@ -434,7 +434,7 @@ func TestSetDatabaseMetricsSkipVerifyNormalizesPostgresSSLMode(t *testing.T) {
 func TestSetDatabaseMetricsKeepsVisibleCredentialsAndPreservesPassword(t *testing.T) {
 	repo := newFakePluginConfigRepo()
 	writer := &fakeDatabaseSecretWriter{}
-	uc := NewPluginConfigUC(repo, nil, fakeEndpointResolver{}, nil)
+	uc := NewPluginConfigUC(repo, nil, nil, fakeEndpointResolver{}, nil)
 	uc.SetDatabaseMetricsSecretWriter(writer)
 
 	row, err := uc.Set(context.Background(), 7, model.PluginNameDatabaseMetrics, SetInput{
@@ -578,7 +578,7 @@ func TestBuildDatabaseMetricsSecretIncludesDBTypeTLS(t *testing.T) {
 func TestSetDatabaseMetricsRejectsMongoTLSKeyFile(t *testing.T) {
 	repo := newFakePluginConfigRepo()
 	writer := &fakeDatabaseSecretWriter{}
-	uc := NewPluginConfigUC(repo, nil, fakeEndpointResolver{}, nil)
+	uc := NewPluginConfigUC(repo, nil, nil, fakeEndpointResolver{}, nil)
 	uc.SetDatabaseMetricsSecretWriter(writer)
 
 	_, err := uc.Set(context.Background(), 7, model.PluginNameDatabaseMetrics, SetInput{
@@ -690,7 +690,7 @@ func TestBuildDatabaseMetricsTLSRejectsRelativePath(t *testing.T) {
 
 func TestSetDatabaseMetricsRejectsRelativeTLSPathWithoutCredentials(t *testing.T) {
 	repo := newFakePluginConfigRepo()
-	uc := NewPluginConfigUC(repo, nil, fakeEndpointResolver{}, nil)
+	uc := NewPluginConfigUC(repo, nil, nil, fakeEndpointResolver{}, nil)
 
 	_, err := uc.Set(context.Background(), 7, model.PluginNameDatabaseMetrics, SetInput{
 		Enabled: true,
@@ -721,7 +721,7 @@ func TestSetDatabaseMetricsRejectsRelativeTLSPathWithoutCredentials(t *testing.T
 
 func TestSetDatabaseMetricsRejectsDuplicateListenPort(t *testing.T) {
 	repo := newFakePluginConfigRepo()
-	uc := NewPluginConfigUC(repo, nil, fakeEndpointResolver{}, nil)
+	uc := NewPluginConfigUC(repo, nil, nil, fakeEndpointResolver{}, nil)
 
 	_, err := uc.Set(context.Background(), 7, model.PluginNameDatabaseMetrics, SetInput{
 		Enabled: true,
@@ -745,7 +745,7 @@ func TestSetDatabaseMetricsRejectsDuplicateListenPort(t *testing.T) {
 
 func TestSetDatabaseMetricsRejectsReservedListenPort(t *testing.T) {
 	repo := newFakePluginConfigRepo()
-	uc := NewPluginConfigUC(repo, nil, fakeEndpointResolver{}, nil)
+	uc := NewPluginConfigUC(repo, nil, nil, fakeEndpointResolver{}, nil)
 
 	_, err := uc.Set(context.Background(), 7, model.PluginNameDatabaseMetrics, SetInput{
 		Enabled: true,
@@ -765,7 +765,7 @@ func TestSetDatabaseMetricsRejectsReservedListenPort(t *testing.T) {
 
 func TestSetDatabaseMetricsKeepsMongoDBExporterCollectors(t *testing.T) {
 	repo := newFakePluginConfigRepo()
-	uc := NewPluginConfigUC(repo, nil, fakeEndpointResolver{}, nil)
+	uc := NewPluginConfigUC(repo, nil, nil, fakeEndpointResolver{}, nil)
 
 	row, err := uc.Set(context.Background(), 7, model.PluginNameDatabaseMetrics, SetInput{
 		Enabled: true,
@@ -804,7 +804,7 @@ func TestSetDatabaseMetricsKeepsMongoDBExporterCollectors(t *testing.T) {
 
 func TestSetDatabaseMetricsKeepsAdvancedExporterOptionsForFourDBs(t *testing.T) {
 	repo := newFakePluginConfigRepo()
-	uc := NewPluginConfigUC(repo, nil, fakeEndpointResolver{}, nil)
+	uc := NewPluginConfigUC(repo, nil, nil, fakeEndpointResolver{}, nil)
 
 	row, err := uc.Set(context.Background(), 7, model.PluginNameDatabaseMetrics, SetInput{
 		Enabled: true,
@@ -951,7 +951,7 @@ func TestSetDatabaseMetricsKeepsAdvancedExporterOptionsForFourDBs(t *testing.T) 
 
 func TestSetDatabaseMetricsRejectsUnsupportedMongoDBExporterCollector(t *testing.T) {
 	repo := newFakePluginConfigRepo()
-	uc := NewPluginConfigUC(repo, nil, fakeEndpointResolver{}, nil)
+	uc := NewPluginConfigUC(repo, nil, nil, fakeEndpointResolver{}, nil)
 
 	_, err := uc.Set(context.Background(), 7, model.PluginNameDatabaseMetrics, SetInput{
 		Enabled: true,
@@ -982,7 +982,7 @@ func TestSetDatabaseMetricsRejectsUnsupportedMongoDBExporterCollector(t *testing
 
 func TestSetDatabaseMetricsRejectsWrongExporterFieldForDBType(t *testing.T) {
 	repo := newFakePluginConfigRepo()
-	uc := NewPluginConfigUC(repo, nil, fakeEndpointResolver{}, nil)
+	uc := NewPluginConfigUC(repo, nil, nil, fakeEndpointResolver{}, nil)
 
 	_, err := uc.Set(context.Background(), 7, model.PluginNameDatabaseMetrics, SetInput{
 		Enabled: true,
@@ -1019,7 +1019,7 @@ func TestSetDatabaseMetricsRejectsRelativeExporterPath(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			repo := newFakePluginConfigRepo()
-			uc := NewPluginConfigUC(repo, nil, fakeEndpointResolver{}, nil)
+			uc := NewPluginConfigUC(repo, nil, nil, fakeEndpointResolver{}, nil)
 
 			_, err := uc.Set(context.Background(), 7, model.PluginNameDatabaseMetrics, SetInput{
 				Enabled: true,

@@ -43,6 +43,30 @@ const Name = "audit"
 //                         check; we run as root via systemd and 0600 is
 //                         already tight, so the strict mode only causes
 //                         spurious startup failures.
+//   --path.home <dir>  : override auditbeat's default path.home. The tar.gz
+//                         default for a Beats distribution is the directory
+//                         the binary lives in (= binDir = LIB_DIR), which on
+//                         this edge is root:root 0755; auditbeat then tries
+//                         to mkdir ${LIB_DIR}/data + ${LIB_DIR}/logs as the
+//                         ongrid-edge user and crashes with EROFS / EACCES
+//                         ("failed to create data path ... read-only file
+//                         system" / "permission denied"). Forcing path.home
+//                         to pluginDir puts data/, logs/, and the relative
+//                         output.file.path under a tree the edge agent's
+//                         supervisor already chowns to ongrid-edge
+//                         (see internal/edgeagent/plugins/subprocess.go
+//                         Configure — os.MkdirAll(workDir, 0o755) under the
+//                         effective uid ongrid-edge).
+//
+//                         Note: this MUST be `--path.home` (double dash).
+//                         Beats uses kingpin as its CLI parser and the
+//                         long form is registered as `--path.home`. With a
+//                         single dash, kingpin drops the value into a
+//                         positional-arg slot and surfaces
+//                         `Error: unknown command "<pluginDir>" for
+//                         "auditbeat"` — i.e. it tries to dispatch the
+//                         path as a subcommand name and never sets
+//                         path.home at all.
 func New(binDir, workDir string, log *slog.Logger) plugins.Plugin {
 	// filepath.Join would let the host OS dictate separators — audit
 	// only runs on Linux where the auditbeat binary writes
@@ -56,18 +80,47 @@ func New(binDir, workDir string, log *slog.Logger) plugins.Plugin {
 		Binary:       auditBin,
 		WorkDir:      pluginDir,
 		ConfigFile:   path.Join(pluginDir, "auditbeat.yml"),
-		ConfigRender: render,
+		ConfigRender: renderWith(pluginDir),
 		Args: func(_ plugins.PluginConfig, configFile string) []string {
-			return []string{"-c", configFile, "-e", "--strict.perms=false"}
+			return []string{
+				"-c", configFile,
+				"-e",
+				"--strict.perms=false",
+				// See New docstring: force auditbeat's path.home to pluginDir
+				// so data/, logs/, and relative output paths land somewhere
+				// the ongrid-edge user can actually write.
+				//
+				// MUST be `--path.home` (kingpin long form). With a single
+				// dash, kingpin treats the next token as a subcommand and
+				// we get `Error: unknown command "<pluginDir>" ...`.
+				"--path.home", pluginDir,
+			}
 		},
 		Log: log,
 	})
 }
 
-// OutputPath returns the JSONL file path the auditbeat subprocess
+// OutputPath returns the JSONL file glob the auditbeat subprocess
 // writes to under default configuration. Exposed so the logs plugin
 // (promtail) can probe and auto-tail without operator configuration —
 // see internal/edgeagent/plugins/logs/render.go for the consumer side.
+//
+// auditbeat 9.x's file output appends a daily suffix + .ndjson extension
+// to whatever filename is set in auditbeat.yml: filename "audit.jsonl"
+// produces files named `audit.jsonl-YYYYMMDD.ndjson` (and rotated
+// siblings `audit.jsonl-YYYYMMDD-1.ndjson`, `audit.jsonl-YYYYMMDD-2.ndjson`,
+// ...). The `-YYYYMMDD` portion is mandatory and not configurable —
+// Beats 8.x dropped the old "filename only" behaviour. So we return a
+// glob that matches every variant the writer will produce, and let
+// promtail's `__path__` glob support handle rotation implicitly (one
+// stable scrape job covers today + all rotated siblings).
+//
+// The glob is deliberately narrow (`-*.ndjson`, not just `*`):
+//   - it requires the .ndjson extension auditbeat always uses
+//   - it requires the leading dash + suffix that auditbeat always emits
+//   - so operator-added files (e.g. an `audit.jsonl.snapshot` artifact
+//     dropped by a custom exporter) won't accidentally get pulled into
+//     the audit Loki stream with the wrong label.
 //
 // Uses path.Join (forward-slash) rather than filepath.Join so the
 // contract between audit and logs plugins is OS-agnostic — the audit
@@ -79,5 +132,5 @@ func New(binDir, workDir string, log *slog.Logger) plugins.Plugin {
 // or moving it under a different directory is a breaking change and
 // must update both sides in lock-step.
 func OutputPath(workDir string) string {
-	return path.Join(workDir, Name, "audit.jsonl")
+	return path.Join(workDir, Name, "audit.jsonl-*.ndjson")
 }

@@ -436,7 +436,10 @@ PrivateTmp=true
 # We don't set StateDirectory= here at all: it pins the path to
 # /var/lib/ongrid-edge and can't follow --prefix. The ReadWritePaths= below
 # plus the installer pre-creating + chowning $STATE_DIR (above) is enough.
-ReadWritePaths=${STATE_DIR} ${LOG_DIR}
+# plugin binaries dir, plugin work dir, .upgrade stage dir, and log dir
+# regardless of systemd version. auditbeat also needs this to create its data/
+# subdir under the lib directory (e.g. /mnt/data/tools-temp/ongrid-edge/lib/ongrid-edge/data).
+ReadWritePaths=${STATE_DIR} ${LOG_DIR} ${LIB_DIR}
 StandardOutput=journal
 StandardError=journal
 

@@ -113,18 +113,33 @@ func (i *Ingester) Push(ctx context.Context, deviceID uint64, source string, sam
 	deviceIDStr := strconv.FormatUint(deviceID, 10)
 	out := make([]pkgpromwrite.Sample, 0, len(samples))
 	for _, s := range samples {
-		// Pre-size the label slice: input labels + 3 fixed (__name__,
-		// device_id, ongrid_source). Drop any user-provided label that
-		// collides with a reserved key — the cloud's value wins.
-		labels := make([]pkgpromwrite.Label, 0, len(s.Labels)+3)
+		// Prom 的 sample.timestamp 锚定到 manager 时钟 (ServerTimeMs):
+		// 这样 edge 端 CLOCK_REALTIME 顺向漂移也不会触发 Prom 的 5min
+		// hard-reject window (ongrid / Prom 同机同源时钟, 不存在漂移).
+		// edge 本地事件时间 (TsMs) 保留为 edge_ts_ms label, post-hoc
+		// 校准时可还原 "edge 实际看到这个值的时间点".
+		tsMs := s.ServerTimeMs
+		if tsMs <= 0 {
+			// 老 edge / 未就绪 variant: ServerTimeMs=0 走 legacy fallback,
+			// 用 edge 本地时间作 Prom 样本时间戳, 不加 edge_ts_ms label
+			// (加了会等于 Prom timestamp, 没信息量).
+			tsMs = s.TsMs
+		}
+		labels := make([]pkgpromwrite.Label, 0, len(s.Labels)+4)
 		labels = append(labels, pkgpromwrite.Label{Name: "__name__", Value: s.Name})
 		labels = append(labels, pkgpromwrite.Label{Name: "device_id", Value: deviceIDStr})
 		if source != "" {
 			labels = append(labels, pkgpromwrite.Label{Name: "ongrid_source", Value: source})
 		}
+		if s.ServerTimeMs > 0 {
+			// Edge 本地事件时间作为 label. 仅在 edge v3.3+ 提供
+			// (s.ServerTimeMs > 0). 帮 post-hoc 分析收敛 "edge 在 X 看到"
+			// vs "Prom 在 Y 存储" 两个时间点差异 (主要是查漂移机器).
+			labels = append(labels, pkgpromwrite.Label{Name: "edge_ts_ms", Value: strconv.FormatInt(s.TsMs, 10)})
+		}
 		for k, v := range s.Labels {
 			switch k {
-			case "__name__", "device_id", "ongrid_source":
+			case "__name__", "device_id", "ongrid_source", "edge_ts_ms":
 				// Reserved; cloud value wins. Skip.
 				continue
 			}
@@ -135,7 +150,7 @@ func (i *Ingester) Push(ctx context.Context, deviceID uint64, source string, sam
 		out = append(out, pkgpromwrite.Sample{
 			Labels: labels,
 			Value:  s.Value,
-			TsMs:   s.TsMs,
+			TsMs:   tsMs,
 		})
 	}
 	if err := i.w.Write(ctx, out); err != nil {

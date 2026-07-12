@@ -99,6 +99,12 @@
 - 高风险变更走金丝雀或 feature flag
 - P0 / P1 事故必须产出 blameless postmortem
 
+### 时钟管理
+- **禁止 NTP 校时**：edge 端和 ongrid 服务端的系统时钟不允许通过任何代码路径 / 配置文件 / 部署脚本 / 运维手册修改（包括但不限于 NTP sync、chrony、systemd-timesyncd、`timedatectl set-time`、`date -s`、sntp、w32tm 等）
+- **数据时间戳策略**：时钟漂移通过 "数据时间戳用受信源（ongrid 服务端时间）" 兜底，**不**通过 "修改本地系统时钟" 治本
+- **漂移机器记录**：时钟漂移的机器（如 192.168.25.56）记录在 `.record/`，仅作为运维事故信息，不在代码 / 镜像 / 配置中做任何修复
+- **审计**：任何 PR 涉及系统时钟修改命令 / NTP 守护进程配置 / 时间同步逻辑，必须在 review 时重点拒绝
+
 ### 数据存储
 - **MySQL**：生产 schema 变更走 migration 文件；大表用在线 DDL 工具；变更兼容滚动发布（expand-contract）
 - **Redis**：所有 key 必须设 TTL；禁止大 key（value > 10KB / 集合 > 5000）；分布式锁必须有 owner 校验

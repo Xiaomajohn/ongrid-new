@@ -3,7 +3,7 @@ package logs
 import (
 	"bytes"
 	"fmt"
-	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"text/template"
@@ -57,9 +57,27 @@ clients:
     batchsize: 1048576
     batchwait: 1s
     external_labels:
+      {{- /*
+        device_id precedence:
+          1. extra_labels["device_id"] (manager-pushed, reflects the
+             edge_devices junction — authoritative when present).
+          2. cfg.EdgeID (fallback for edges that haven't linked a host
+             device yet, or for manager builds without the edgeLookup
+             enrichment wired in).
+        We render through range for everything else so operator-added
+        labels flow through untouched. Anything left under the
+        device_id key is filtered out of the range pass below to keep
+        the YAML single-sourced.
+      */ -}}
+      {{- if index .ExtraLabels "device_id" }}
+      device_id: "{{ index .ExtraLabels "device_id" }}"
+      {{- else }}
       device_id: "{{ .EdgeID }}"
+      {{- end }}
       {{- range $k, $v := .ExtraLabels }}
+      {{- if ne $k "device_id" }}
       {{ $k }}: "{{ $v }}"
+      {{- end }}
       {{- end }}
 
 scrape_configs:
@@ -148,14 +166,26 @@ func render(workDir string, cfg plugins.PluginConfig) ([]byte, error) {
 		filePaths = []string{"/var/log/syslog", "/var/log/messages"}
 	}
 
-	// Auto-tail audit.jsonl when the audit plugin is enabled — single-
-	// direction dependency: logs knows about audit, audit does NOT know
-	// about logs. Probe is best-effort: file absent (audit disabled,
-	// binary missing, not yet created) is a no-op — no spurious scrape
-	// jobs surface to Loki. The probe runs after the syslog fallback so
-	// disabled-audit edges still get the operator's chosen sources.
+	// Auto-tail the audit plugin's JSONL output when the audit plugin
+	// is enabled — single-direction dependency: logs knows about audit,
+	// audit does NOT know about logs. Probe is best-effort: glob empty
+	// (audit disabled, binary missing, not yet created) is a no-op — no
+	// spurious scrape jobs surface to Loki. The probe runs after the
+	// syslog fallback so disabled-audit edges still get the operator's
+	// chosen sources.
+	//
+	// We use filepath.Glob rather than os.Stat because auditbeat 9.x's
+	// file output auto-appends `-YYYYMMDD.ndjson` to the configured
+	// filename, so the on-disk file is `audit.jsonl-20260712.ndjson`
+	// (or `-1.ndjson`, `-2.ndjson` for rotated siblings), never the bare
+	// `audit.jsonl`. audit.OutputPath() therefore returns a glob
+	// (`audit.jsonl-*.ndjson`) and we pass that glob straight into
+	// promtail's `__path__` — promtail supports globs natively and
+	// rotates between matched files transparently, so a single scrape
+	// job covers today's file + all rotated siblings without operator
+	// configuration.
 	if workDir != "" {
-		if _, err := os.Stat(audit.OutputPath(workDir)); err == nil {
+		if matches, _ := filepath.Glob(audit.OutputPath(workDir)); len(matches) > 0 {
 			filePaths = append(filePaths, audit.OutputPath(workDir))
 		}
 	}

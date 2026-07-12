@@ -187,7 +187,7 @@ func (p *Plugin) runTarget(ctx context.Context, target metricscommon.Target) {
 func (p *Plugin) scrapeAndPush(ctx context.Context, target metricscommon.Target) {
 	rctx, cancel := context.WithTimeout(ctx, target.Timeout)
 	defer cancel()
-	samples, err := metricscommon.Scrape(rctx, target)
+	samples, err := metricscommon.Scrape(rctx, target, nil)
 	if err != nil {
 		if pushErr := p.pushPromSamples(ctx, target, []tunnel.PromSample{
 			metricscommon.ScrapeUpSample(time.Now(), Name, target, false),

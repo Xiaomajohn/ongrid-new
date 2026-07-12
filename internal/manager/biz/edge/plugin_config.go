@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 
 	model "github.com/ongridio/ongrid/internal/manager/model/edge"
 	"github.com/ongridio/ongrid/internal/pkg/errs"
@@ -48,6 +49,16 @@ type EndpointResolver interface {
 	Endpoint(ctx context.Context, plugin string) string
 }
 
+// EdgeLookup is the narrow persistence contract FetchForEdge needs to
+// enrich the logs plugin spec with edge-specific labels (task_name +
+// resolved device_id). *data/edge/store.Repo satisfies it. nil is
+// allowed — when unwired the logs plugin falls back to the empty
+// extra_labels map (legacy behavior: device_id sourced only from
+// cfg.EdgeID, no task_name label).
+type EdgeLookup interface {
+	GetByID(ctx context.Context, id uint64) (*model.Edge, error)
+}
+
 // PluginConfigUC is the use-case for managing per-edge plugin configs.
 //
 // Two consumers:
@@ -60,6 +71,7 @@ type EndpointResolver interface {
 // edge's 60s safety-net poll window.
 type PluginConfigUC struct {
 	repo         PluginConfigRepo
+	edgeLookup   EdgeLookup
 	notifier     EdgeReloadNotifier
 	secretWriter DatabaseMetricsSecretWriter
 	resolver     EndpointResolver
@@ -69,12 +81,13 @@ type PluginConfigUC struct {
 // NewPluginConfigUC builds the use-case. notifier may be nil during
 // startup (before frontierbound is wired); calls become no-ops then.
 // resolver MUST be non-nil — without it FetchForEdge can't tell the edge
-// where to push.
-func NewPluginConfigUC(repo PluginConfigRepo, notifier EdgeReloadNotifier, resolver EndpointResolver, log *slog.Logger) *PluginConfigUC {
+// where to push. edgeLookup may be nil for tests / minimal boot — the
+// logs plugin just won't get the device_id / task_name enrichment.
+func NewPluginConfigUC(repo PluginConfigRepo, edgeLookup EdgeLookup, notifier EdgeReloadNotifier, resolver EndpointResolver, log *slog.Logger) *PluginConfigUC {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &PluginConfigUC{repo: repo, notifier: notifier, resolver: resolver, log: log}
+	return &PluginConfigUC{repo: repo, edgeLookup: edgeLookup, notifier: notifier, resolver: resolver, log: log}
 }
 
 // SetNotifier injects the notifier post-construction. cmd/ongrid wires
@@ -280,6 +293,12 @@ func (uc *PluginConfigUC) FetchForEdge(ctx context.Context, edgeID uint64) (*Wir
 	}
 	out := &WireSnapshot{EdgeID: edgeID, Configs: make(map[string]WireConfig, len(knownPlugins))}
 	enabledNames := make([]string, 0, len(knownPlugins))
+	// logsExtra is the labels we want stamped onto every Loki stream
+	// coming off this edge. Computed once per fetch (not per plugin
+	// loop) so we hit edgeRepo at most one time. nil when edgeLookup
+	// is unwired or the row is missing — the logs plugin then falls
+	// back to the empty-extra-labels legacy behavior.
+	logsExtra := uc.buildLogsExtraLabels(ctx, edgeID)
 	for _, name := range knownPlugins {
 		cfg := WireConfig{
 			Endpoint: uc.resolver.Endpoint(ctx, name),
@@ -291,6 +310,9 @@ func (uc *PluginConfigUC) FetchForEdge(ctx context.Context, edgeID uint64) (*Wir
 			// Enabled=false and the default does not override it.
 			cfg.Enabled = r.Enabled
 			cfg.Spec = decodeSpec(r.SpecJSON)
+		}
+		if name == model.PluginNameLogs && logsExtra != nil {
+			cfg.Spec = uc.mergeLogsExtraLabels(cfg.Spec, logsExtra)
 		}
 		if cfg.Enabled {
 			enabledNames = append(enabledNames, name)
@@ -308,6 +330,83 @@ func (uc *PluginConfigUC) FetchForEdge(ctx context.Context, edgeID uint64) (*Wir
 // CountByPlugin proxies to the repo (UI Integrations cards).
 func (uc *PluginConfigUC) CountByPlugin(ctx context.Context) (map[string]int64, error) {
 	return uc.repo.CountByPlugin(ctx)
+}
+
+// buildLogsExtraLabels computes the labels stamped onto every Loki
+// stream for this edge. The two fields we ALWAYS inject when we have
+// the row:
+//   - device_id: source of truth for the promtail external_label, so
+//     querying Logs by `device_id="<X>"` matches what the manager-side
+//     ingest pipeline stamps on metrics. Edge rows without a host
+//     device (DeviceID == nil, e.g. mid-register) fall back to the
+//     numeric edgeID so logs still arrive — operator will see and can
+//     manually re-link.
+//   - task_name: the install campaign / task identifier operators
+//     group edges by. Empty when unset, which means "no task filter"
+//     on the Loki side — preserved exactly so Loki treats it as a
+//     distinct (but empty) stream label value.
+//
+// Returns nil when edgeLookup is unwired OR GetByID fails — the caller
+// then takes the legacy path (no enrichment, just cfg.EdgeID for the
+// device_id template fallback). We deliberately do NOT return a partial
+// map: a missing edge row is a strong signal something is broken and
+// should be visible in logs, not silently masked.
+func (uc *PluginConfigUC) buildLogsExtraLabels(ctx context.Context, edgeID uint64) map[string]interface{} {
+	if uc.edgeLookup == nil {
+		return nil
+	}
+	edge, err := uc.edgeLookup.GetByID(ctx, edgeID)
+	if err != nil {
+		uc.log.Warn("plugin_config: edgeLookup.GetByID failed; logs plugin will use legacy extra_labels",
+			slog.Uint64("edge_id", edgeID), slog.Any("err", err))
+		return nil
+	}
+	deviceID := edgeID
+	if edge.DeviceID != nil {
+		deviceID = *edge.DeviceID
+	}
+	return map[string]interface{}{
+		"device_id": strconv.FormatUint(deviceID, 10),
+		"task_name": edge.TaskName,
+	}
+}
+
+// mergeLogsExtraLabels returns a copy of spec with the manager-derived
+// logs labels merged in under "extra_labels". The merge rule:
+//   - any pre-existing extra_labels[k] NOT in {device_id, task_name}
+//     is preserved (operator-added labels win through).
+//   - any pre-existing extra_labels[k] in {device_id, task_name} is
+//     overwritten with the manager-derived value — the manager is
+//     authoritative for these two because they are tied to the
+//     edge_devices / edges tables, not to operator wiring.
+//
+// Always returns a new map so we never mutate an operator-saved spec
+// by reference (the same map may be served across multiple edges if
+// the SQLite row is shared in test fixtures, and the test harness
+// catches accidental mutation).
+func (uc *PluginConfigUC) mergeLogsExtraLabels(spec map[string]interface{}, labels map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(spec)+2)
+	for k, v := range spec {
+		out[k] = v
+	}
+	existing := map[string]interface{}{}
+	if raw, ok := out["extra_labels"]; ok {
+		if m, ok := raw.(map[string]interface{}); ok {
+			existing = m
+		}
+	}
+	merged := make(map[string]interface{}, len(existing)+len(labels))
+	for k, v := range existing {
+		if k == "device_id" || k == "task_name" {
+			continue
+		}
+		merged[k] = v
+	}
+	for k, v := range labels {
+		merged[k] = v
+	}
+	out["extra_labels"] = merged
+	return out
 }
 
 // notify fires the reload signal to the edge without blocking the

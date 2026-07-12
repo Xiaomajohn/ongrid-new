@@ -215,7 +215,7 @@ func main() {
 		// manager-side ingester injects the canonical device_id label,
 		// which is the join key the Monitor / alert rule preview /
 		// correlate_incident all rely on.
-		edgepluginmetrics.New(client, agent.EdgeID, pluginLog),
+		edgepluginmetrics.New(client, agent.EdgeID, agent.ServerTimeMs, pluginLog),
 		// custommetrics: in-process scraper for arbitrary operator-provided
 		// Prometheus /metrics endpoints.
 		edgeplugincustommetrics.New(client, agent.EdgeID, pluginLog),

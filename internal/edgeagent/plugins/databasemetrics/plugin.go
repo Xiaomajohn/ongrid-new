@@ -276,7 +276,7 @@ func (p *Plugin) runExporterAndScraper(ctx context.Context, source sourceSpec) e
 func (p *Plugin) scrapeAndPush(ctx context.Context, source sourceSpec, target metricscommon.Target) {
 	rctx, cancel := context.WithTimeout(ctx, source.Timeout)
 	defer cancel()
-	samples, err := metricscommon.Scrape(rctx, target)
+	samples, err := metricscommon.Scrape(rctx, target, nil)
 	if err != nil {
 		if pushErr := p.pushTargetUp(ctx, target, false); pushErr != nil {
 			p.log.Warn("databasemetrics push scrape up failed",

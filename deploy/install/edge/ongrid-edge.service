@@ -22,6 +22,7 @@ Type=simple
 # + the on-grid-edge namespace layer (EDGE_ROOT=${PREFIX}/ongrid-edge):
 #   __ENV_FILE__    EDGE_ROOT/etc/ongrid-edge/ongrid-edge.env
 #   __BIN_DEST__    EDGE_ROOT/bin/ongrid-edge
+#   __LIB_DIR__     EDGE_ROOT/lib/ongrid-edge          (plugin binaries + auditbeat data/)
 #   __STATE_DIR__   EDGE_ROOT/var/lib/ongrid-edge
 #   __LOG_DIR__     EDGE_ROOT/var/log/ongrid-edge
 # StateDirectory= is NOT used: it always maps to ${LOCALSTATEDIR}/lib/<name>
@@ -31,6 +32,7 @@ Type=simple
 # do this before `systemctl daemon-reload`). The ReadWritePaths list also
 # covers systemd 233/234 where StateDirectory= would be silently ignored but
 # ProtectSystem=strict + ReadWritePaths= still take effect.
+# __LIB_DIR__ is included so auditbeat can create its data/ subdir for metadata.
 EnvironmentFile=__ENV_FILE__
 ExecStart=__BIN_DEST__
 Restart=always
@@ -42,7 +44,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=__STATE_DIR__ __LOG_DIR__
+ReadWritePaths=__STATE_DIR__ __LOG_DIR__ __LIB_DIR__
 StandardOutput=journal
 StandardError=journal
 

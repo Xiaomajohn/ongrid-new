@@ -17,6 +17,7 @@ import (
 
 	"github.com/ongridio/ongrid/internal/edgeagent/collector"
 	"github.com/ongridio/ongrid/internal/edgeagent/plugins"
+	"github.com/ongridio/ongrid/internal/edgeagent/plugins/metricscommon"
 	"github.com/ongridio/ongrid/internal/pkg/tunnel"
 )
 
@@ -29,13 +30,13 @@ import (
 // fresh edge produces both host- and process-level series via the
 // tunnel without any operator config.
 type specView struct {
-	URLs         []string
-	Interval     time.Duration
-	Timeout      time.Duration
-	TLSInsecure  bool
-	BearerToken  string
-	ExtraLabels  map[string]string
-	SourceLabel  string // value emitted on the wire as PushPromSamplesRequest.Source
+	URLs        []string
+	Interval    time.Duration
+	Timeout     time.Duration
+	TLSInsecure bool
+	BearerToken string
+	ExtraLabels map[string]string
+	SourceLabel string // value emitted on the wire as PushPromSamplesRequest.Source
 }
 
 // Defaults match the host/proc-metrics plugins' subprocesses
@@ -58,9 +59,10 @@ const (
 // (bad duration string, malformed URL); silently ignores unknown keys.
 //
 // Three target shapes accepted (first one set wins):
-//   target_urls: ["http://...", "http://..."]
-//   target_url: "http://..." (legacy single-URL form)
-//   <missing> → defaultURLs
+//
+//	target_urls: ["http://...", "http://..."]
+//	target_url: "http://..." (legacy single-URL form)
+//	<missing> → defaultURLs
 func parseSpec(spec map[string]interface{}) (specView, error) {
 	out := specView{
 		URLs:     append([]string(nil), defaultURLs...),
@@ -143,12 +145,16 @@ func sourceLabelForURL(raw string) string {
 	return "metrics:" + u.Host
 }
 
-// scrapeOnce performs one HTTP GET against targetURL, parses the
-// Prometheus text response, and returns a flat sample slice ready for
-// push_prom_samples plus the source label. Each entry in spec.URLs is
-// scraped separately so a 200 from one target doesn't get masked by a
-// failure from another.
-func scrapeOnce(ctx context.Context, spec specView, targetURL string) ([]tunnel.PromSample, string, error) {
+// scrapeOnce 执行一次 HTTP GET, 解析 Prometheus 文本响应, 返回
+// 扁平 sample 切片 + source label. 每个 spec.URL 独立 scrape, 一个
+// 200 不会掩盖另一个的失败.
+//
+// v3.3 起时间戳字段: TsMs = scrape 时刻的 edge 本地 time.Now() (事件时间);
+// ServerTimeMs 由 caller (Plugin) 通过 serverTimeMsFn 注入 —
+// Plugin 每 tick 从 agent 拿最新心跳响应里的 ServerTimeMs. 注意:
+// scrape 内部不钳位本地时间 (v2 的 SafeNow 钳位逻辑已取消, 改在
+// manager 端 ingester 用 ServerTimeMs 字段作 Prom sample.timestamp).
+func scrapeOnce(ctx context.Context, spec specView, targetURL string, serverTimeMsFn metricscommon.ServerTimeMsFn) ([]tunnel.PromSample, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
 		return nil, spec.SourceLabel, fmt.Errorf("build request: %w", err)
@@ -173,11 +179,18 @@ func scrapeOnce(ctx context.Context, spec specView, targetURL string) ([]tunnel.
 		return nil, spec.SourceLabel, fmt.Errorf("parse: %w", err)
 	}
 	mfs := familiesToSlice(families)
-	now := time.Now()
-	// FlattenSamples lives in internal/edgeagent/collector — it already
-	// handles counter / gauge / histogram / summary fan-out plus
-	// extraLabels merge. We don't reimplement.
-	samples := collector.FlattenSamples(now, spec.SourceLabel, mfs, spec.ExtraLabels)
+	// FlattenSamples 来自 internal/edgeagent/collector — 已经处理
+	// counter / gauge / histogram / summary fan-out + extraLabels merge.
+	// 我们不重复实现. samples[i].TsMs 由 FlattenSamples 写入 (用 time.Now()),
+	// ServerTimeMs 由下面的循环从 serverTimeMsFn 注入 (可为 nil → 留 0).
+	samples := collector.FlattenSamples(time.Now(), spec.SourceLabel, mfs, spec.ExtraLabels)
+	var serverTimeMs int64
+	if serverTimeMsFn != nil {
+		serverTimeMs = serverTimeMsFn()
+	}
+	for i := range samples {
+		samples[i].ServerTimeMs = serverTimeMs
+	}
 	return samples, spec.SourceLabel, nil
 }
 

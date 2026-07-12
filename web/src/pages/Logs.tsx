@@ -16,7 +16,6 @@ import { queryLogsRange, listLogLabels, type LokiStream } from '@/api/logs';
 import { ApiError } from '@/api/client';
 import { listEdges, type Edge, type EdgeRole } from '@/api/edges';
 import { listDevices, type Device } from '@/api/devices';
-import { listDeviceMonitors, type MonitorPanel } from '@/api/monitorPanels';
 import { onDevicesChanged } from '@/lib/events';
 import { Link } from 'react-router-dom';
 import { RoleSelect } from '@/components/ui';
@@ -215,18 +214,17 @@ export default function LogsPage() {
   const [deviceInput, setDeviceInput] = useState('');
   const [roleFilter, setRoleFilter] = useState<'' | EdgeRole>('');
   const [filenameFilter, setFilenameFilter] = useState(''); // value = unit OR filename label
-  // Monitor (panel) filter — narrows logs by the device's bound
-  // monitor_panels row. Only meaningful once a device is picked;
-  // `monitorOptions` is the per-device panel list returned by
-  // /v1/devices/{id}/monitors. UI is a UI hint — Loki's stream label
-  // set doesn't carry monitor_id, so picking a panel does not change
-  // the actual LogQL. (See plan §7.3 for the rationale.)
-  const [monitorFilter, setMonitorFilter] = useState('');
-  const [monitorOptions, setMonitorOptions] = useState<MonitorPanel[]>([]);
-  const [monitorLoading, setMonitorLoading] = useState(false);
-  // Shared toggle for the two "显示已删除" checkboxes (device + monitor).
-  // One state so the operator doesn't have to flip two switches when
-  // they want to see soft-deleted rows in both dropdowns at once.
+  // Task filter — narrows logs by `task_name` label stamped by the
+  // ongrid-edge logs plugin's promtail extra_labels (sourced from
+  // `edges.task_name`). `taskOptions` is the de-duplicated union of
+  // task_names across all currently registered edges; the dropdown
+  // is global (not per-device) because one task can span many edges
+  // / devices.
+  const [taskFilter, setTaskFilter] = useState('');
+  const [taskOptions, setTaskOptions] = useState<string[]>([]);
+  // Toggle for the device dropdown's "显示已删除" checkbox. The task
+  // dropdown derives its options from `edges` (which never includes
+  // soft-deleted rows), so it doesn't need its own deleted toggle.
   const [showDeleted, setShowDeleted] = useState(false);
   const [edges, setEdges] = useState<Edge[]>([]);
   const [rows, setRows] = useState<LogRow[]>([]);
@@ -290,8 +288,15 @@ export default function LogsPage() {
         op: '=',
       });
     }
+    // taskFilter is global across all edges (one task → many devices),
+    // so unlike deviceFilter / roleFilter it stacks on top of the
+    // device chip, not against it. Operator use case: "show me
+    // device X's logs that ran under task Y".
+    if (taskFilter) {
+      out.push({ label: 'task_name', value: taskFilter, op: '=' });
+    }
     return out;
-  }, [deviceFilter, roleFilter, filenameFilter, edges]);
+  }, [deviceFilter, roleFilter, filenameFilter, taskFilter, edges]);
 
   const effectiveQuery = useMemo(
     () => buildEffectiveQuery(committedQuery, topbarFacets, include, exclude),
@@ -469,45 +474,22 @@ export default function LogsPage() {
     };
   }, [showDeleted]);
 
-  // 设备选中后拉该 device 关联的 monitor_panels。include_deleted 由
-  // showDeleted 联动，device 清空则清空 options。失败时静默留空列表
-  // （设备下拉框仍可用）。
+  // Aggregate every edge's task_name into a global de-duped set.
+  // Reuses `edges` state (loaded by the device-dropdown effect above);
+  // listEdges() already returns the task_name column. If the current
+  // task selection falls out of the new options (e.g. all edges with
+  // that task went offline), reset to "all" so the UI never diverges
+  // from the injected LogQL.
   useEffect(() => {
-    if (!deviceFilter) {
-      setMonitorOptions([]);
-      setMonitorFilter('');
-      setMonitorLoading(false);
-      return;
+    const set = new Set<string>();
+    for (const e of edges) {
+      const tn = (e.task_name || '').trim();
+      if (tn) set.add(tn);
     }
-    const deviceId = Number(deviceFilter);
-    if (!Number.isFinite(deviceId) || deviceId <= 0) {
-      setMonitorOptions([]);
-      setMonitorLoading(false);
-      return;
-    }
-    let cancelled = false;
-    setMonitorLoading(true);
-    listDeviceMonitors(deviceId, { include_deleted: showDeleted })
-      .then((rows) => {
-        if (cancelled) return;
-        setMonitorOptions(rows);
-        // 如果当前选中的 monitor 已不在新列表中（含被切到 deleted
-        // 视图后又被排除），重置回「不限」，避免 LogQL 与 UI 不一致。
-        setMonitorFilter((cur) =>
-          cur && !rows.some((p) => String(p.id) === cur) ? '' : cur,
-        );
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setMonitorOptions([]);
-      })
-      .finally(() => {
-        if (!cancelled) setMonitorLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [deviceFilter, showDeleted]);
+    const options = Array.from(set).sort();
+    setTaskOptions(options);
+    setTaskFilter((cur) => (cur && !options.includes(cur) ? '' : cur));
+  }, [edges]);
 
   // Probe Loki for any indexed labels. If Loki has zero label values
   // we know the platform has never received a log push — distinguishes
@@ -699,9 +681,9 @@ export default function LogsPage() {
               onChange={(e) => {
                 const v = e.target.value;
                 setDeviceFilter(v);
-                // 换设备时同步清空 monitor 下拉与选项，避免 UI 与
-                // LogQL 不一致（monitor 列表由新 device 重新拉）。
-                setMonitorFilter('');
+                // Switching device doesn't reset the task dropdown —
+                // task is global across edges and stays useful as an
+                // orthogonal filter (e.g. "show device X under task Y").
                 if (!v) {
                   setDeviceInput('');
                   return;
@@ -737,51 +719,29 @@ export default function LogsPage() {
               {tr('显示已删除', 'Show deleted')}
             </label>
           </label>
-          {/* Monitor — new dropdown, lists the device's bound panels.
-              Disabled until a device is picked. Same look as the device
-              dropdown so the row stays visually consistent. */}
+          {/* Task — lists every distinct edges.task_name across all
+              currently-registered edges in this ongrid install.
+              Picking one injects `task_name="<value>"` into the LogQL
+              via topbarFacets. Source of truth for the label is the
+              promtail external_labels stamped by the ongrid-edge
+              logs plugin (see internal/edgeagent/plugins/logs/render.go).
+              The dropdown is always enabled — task is global and
+              orthogonal to device. */}
           <label className="block w-48 shrink-0">
-            <span className="mb-1 block text-[11px] text-zinc-500">{tr('监控', 'Monitor')}</span>
+            <span className="mb-1 block text-[11px] text-zinc-500">{tr('任务', 'Task')}</span>
             <select
-              value={monitorFilter}
-              onChange={(e) => setMonitorFilter(e.target.value)}
-              disabled={!deviceFilter || monitorLoading}
-              className={cn(
-                INPUT_BASE,
-                (!deviceFilter || monitorLoading) && 'cursor-not-allowed opacity-50',
-              )}
-              title={
-                !deviceFilter
-                  ? tr('先选设备', 'Pick a device first')
-                  : monitorLoading
-                    ? tr('加载中...', 'Loading...')
-                    : undefined
-              }
+              value={taskFilter}
+              onChange={(e) => setTaskFilter(e.target.value)}
+              className={cn(INPUT_BASE, 'font-mono')}
+              title={tr('按 edges.task_name 过滤', 'Filter by edges.task_name')}
             >
-              <option value="">{monitorLoading ? tr('加载中...', 'Loading...') : tr('全部监控', 'All monitors')}</option>
-              {!monitorLoading &&
-                monitorOptions.map((p) => {
-                  const isDeleted = !!p.deleted_at;
-                  return (
-                    <option
-                      key={p.id}
-                      value={String(p.id)}
-                      className={isDeleted ? 'text-zinc-500' : undefined}
-                    >
-                      {p.title} (#{p.id}){isDeleted ? ` (${tr('已删除', 'Deleted')})` : ''}
-                    </option>
-                  );
-                })}
+              <option value="">{tr('全部任务', 'All tasks')}</option>
+              {taskOptions.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
             </select>
-            <label className="mt-1 flex cursor-pointer items-center gap-1.5 text-[11px] text-zinc-500">
-              <input
-                type="checkbox"
-                checked={showDeleted}
-                onChange={(e) => setShowDeleted(e.target.checked)}
-                className="h-3 w-3 cursor-pointer rounded border-zinc-700 bg-zinc-950 accent-indigo-500"
-              />
-              {tr('显示已删除', 'Show deleted')}
-            </label>
           </label>
           {/* File / unit — native <select> for visual consistency with
               the other dropdowns in the row. Options come from the
@@ -1063,7 +1023,7 @@ export default function LogsPage() {
                       {tr('清空 LogQL', 'Clear LogQL')}
                     </button>
                   )}
-                  {(deviceFilter || roleFilter || filenameFilter || monitorFilter) && (
+                  {(deviceFilter || roleFilter || filenameFilter || taskFilter) && (
                     <button
                       type="button"
                       onClick={() => {
@@ -1071,11 +1031,11 @@ export default function LogsPage() {
                         setDeviceInput('');
                         setRoleFilter('');
                         setFilenameFilter('');
-                        setMonitorFilter('');
+                        setTaskFilter('');
                       }}
                       className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800"
                     >
-                      {tr('清除筛选（设备 / 角色 / 文件 / 监控）', 'Clear filters (device / role / file / monitor')}
+                      {tr('清除筛选（设备 / 角色 / 文件 / 任务）', 'Clear filters (device / role / file / task')}
                     </button>
                   )}
                   {(include || exclude) && (

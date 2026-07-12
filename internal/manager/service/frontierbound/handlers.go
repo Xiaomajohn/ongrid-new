@@ -278,7 +278,15 @@ func Install(ctx context.Context, c *Client, w Wiring) error {
 			}
 			w.EdgeUC.RecordPluginHealth(canonicalEdgeID, items)
 		}
-		return json.Marshal(tunnel.HeartbeatResponse{})
+		// v3.3: 在心跳响应里贴上 manager 端的 Unix 毫秒时间戳.
+		// edge 用这个填 PromSample.ServerTimeMs 字段, manager 端
+		// ingester 会以它作为 Prom 的 sample.timestamp —— 这样无论
+		// edge 端系统时钟怎么漂移都不会触发 Prom 的 5min hard-reject.
+		// 这不是 NTP 同步, 是"取 trusted 时间戳作为数据时间戳"的设计
+		// (详见 AGENTS.md 时钟管理硬规则).
+		return json.Marshal(tunnel.HeartbeatResponse{
+			ServerTimeMs: time.Now().UnixMilli(),
+		})
 	}); err != nil {
 		return fmt.Errorf("frontierbound: register %q: %w", tunnel.MethodHeartbeat, err)
 	}

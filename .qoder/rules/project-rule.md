@@ -9,6 +9,8 @@ trigger: always_on
 5、代码改动要添加记录，单独在.\record中，记录改了什么问题，加了什么代码，什么目的
 6、禁止在windows上调试linux上的脚本和打包程序
 7、注释要简单明了，使用中文
+8、不允许使用ps1的powershell脚本，要用cli
+<!-- 9、不允许edge端探针修改edge部署的设备，除了edge部署目录之外的其他系统配置 -->
 
 二、行为规则：
 作为AI编程助手，在协作编程时应遵循以下行为准则：
@@ -35,3 +37,21 @@ trigger: always_on
    - **层级 3**：后端网关/路由映射（Controller / Router）
    - **层级 4**：后端业务逻辑层（Service / Manager）
    - **层级 5**：数据交互层（Mapper / DAO / ORM 实体映射）
+
+四、部署环境信息（always_on，开发/调试全程使用）：
+以下主机与目录是当前开发调试环境的事实标准，任何涉及服务端部署、edge 装机、打包、SSH 调试的任务，**直接按下面取值使用，不要再问用户或搜索**。密码字段一律不在规则文件出现，需要时查阅 `.record/2026-07-11-deployment-info.md`。
+
+1. 主机清单：
+   - 服务端 + 打包机 = 同一台机器：192.168.25.30（root，密码见 `.record`）
+   - Edge 端目标机：192.168.25.56（root，密码见 `.record`）
+
+2. 目录约定：
+   - 服务端/打包机 - 打包源码目录：`/opt/remotework/ongrid-new`
+   - 服务端 - ongrid 安装目录：`/opt/ongrid`
+   - Edge 端 - ongrid-edge 安装目录：`/mnt/data/tools-temp`
+
+3. SSH 凭据：root 账号 + 密码（明文不入规则，详见 `.record/2026-07-11-deployment-info.md`）；Windows PowerShell 下用 `;` 分隔命令（不支持 `&&`）。
+
+4. 典型工作流：本地开发机改代码 → scp 到 `root@192.168.25.30:/opt/remotework/` → 在打包机上 `make package` 或 `make build-arm64`（构建产物在 `dist/`）→ 通过管理后台 Edges 页面的一键安装（服务端复用设备表 SSH 凭据直连 192.168.25.56）或手动 curl 一行，把 ongrid-edge 装到 `192.168.25.56:/mnt/data/tools-temp`。
+
+5. 约束：禁止在 Windows 上调试 Linux 上的 .sh 与打包脚本（参考第六条开发规则）；edge 装机路径以本节为准，与 `.record/2026-07-07-edge-create-bind-device-and-install.md` 等历史记录保持一致，如调整目录须同步回看这些记录。

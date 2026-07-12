@@ -295,14 +295,14 @@ func (w *Worker) Execute(ctx context.Context, jobID uint64) {
 		return
 	}
 
-	// 4) DB-level soft-delete of old SSH probes (belt-and-braces
-	// alongside whatever the installer did at the file level).
-	if w.softDelete != nil {
-		if err := w.softDelete.SoftDeleteOldProbes(execCtx, job.DeviceID); err != nil {
-			logCtx.Warn("installjob: soft delete old probes failed", slog.Any("err", err))
-			// non-fatal — proceed.
-		}
-	}
+	// 4) 注释掉自动软删除逻辑：安装探针不应该自动删除任何 edge，
+	// 无论是旧的还是新的。让用户自行决定是否清理旧的探针。
+	// if w.softDelete != nil {
+	// 	if err := w.softDelete.SoftDeleteOldProbes(execCtx, job.DeviceID); err != nil {
+	// 		logCtx.Warn("installjob: soft delete old probes failed", slog.Any("err", err))
+	// 		// non-fatal — proceed.
+	// 	}
+	// }
 
 	// 5) best-effort wait until the freshly-installed edge comes online.
 	//

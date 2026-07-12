@@ -27,7 +27,7 @@ demo_total{query="select 1",service="api"} 7
 		LabelDrop:   []string{"query"},
 		SampleLimit: 10,
 	}
-	samples, err := Scrape(context.Background(), target)
+	samples, err := Scrape(context.Background(), target, nil)
 	if err != nil {
 		t.Fatalf("Scrape() error = %v", err)
 	}
@@ -42,7 +42,7 @@ demo_total{query="select 1",service="api"} 7
 	}
 
 	target.SampleLimit = 0
-	if _, err := Scrape(context.Background(), target); err != nil {
+	if _, err := Scrape(context.Background(), target, nil); err != nil {
 		t.Fatalf("Scrape() with sample_limit=0 error = %v", err)
 	}
 }
@@ -64,7 +64,7 @@ demo_total{series="b"} 2
 		Timeout:     time.Second,
 		SourceLabel: "custom:api",
 		SampleLimit: 1,
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("Scrape() error = nil, want sample limit error")
 	}

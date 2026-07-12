@@ -10,7 +10,7 @@ import (
 
 func TestSetCustomMetricsRejectsDuplicateTargetURL(t *testing.T) {
 	repo := newFakePluginConfigRepo()
-	uc := NewPluginConfigUC(repo, nil, fakeEndpointResolver{}, nil)
+	uc := NewPluginConfigUC(repo, nil, nil, fakeEndpointResolver{}, nil)
 
 	_, err := uc.Set(context.Background(), 7, model.PluginNameCustomMetrics, SetInput{
 		Enabled: true,
@@ -40,7 +40,7 @@ func TestSetCustomMetricsRejectsDuplicateTargetURL(t *testing.T) {
 
 func TestSetCustomMetricsAcceptsDatabaseType(t *testing.T) {
 	repo := newFakePluginConfigRepo()
-	uc := NewPluginConfigUC(repo, nil, fakeEndpointResolver{}, nil)
+	uc := NewPluginConfigUC(repo, nil, nil, fakeEndpointResolver{}, nil)
 
 	row, err := uc.Set(context.Background(), 7, model.PluginNameCustomMetrics, SetInput{
 		Enabled: true,
@@ -79,7 +79,7 @@ func TestSetCustomMetricsAcceptsDatabaseType(t *testing.T) {
 
 func TestSetCustomMetricsRejectsDatabaseResourceWithoutDatabaseType(t *testing.T) {
 	repo := newFakePluginConfigRepo()
-	uc := NewPluginConfigUC(repo, nil, fakeEndpointResolver{}, nil)
+	uc := NewPluginConfigUC(repo, nil, nil, fakeEndpointResolver{}, nil)
 
 	_, err := uc.Set(context.Background(), 7, model.PluginNameCustomMetrics, SetInput{
 		Enabled: true,
@@ -108,7 +108,7 @@ func TestSetCustomMetricsRejectsDatabaseResourceWithoutDatabaseType(t *testing.T
 
 func TestSetCustomMetricsRejectsUnsupportedDatabaseType(t *testing.T) {
 	repo := newFakePluginConfigRepo()
-	uc := NewPluginConfigUC(repo, nil, fakeEndpointResolver{}, nil)
+	uc := NewPluginConfigUC(repo, nil, nil, fakeEndpointResolver{}, nil)
 
 	_, err := uc.Set(context.Background(), 7, model.PluginNameCustomMetrics, SetInput{
 		Enabled: true,
@@ -138,7 +138,7 @@ func TestSetCustomMetricsRejectsUnsupportedDatabaseType(t *testing.T) {
 
 func TestSetCustomMetricsRejectsTopLevelDatabaseType(t *testing.T) {
 	repo := newFakePluginConfigRepo()
-	uc := NewPluginConfigUC(repo, nil, fakeEndpointResolver{}, nil)
+	uc := NewPluginConfigUC(repo, nil, nil, fakeEndpointResolver{}, nil)
 
 	_, err := uc.Set(context.Background(), 7, model.PluginNameCustomMetrics, SetInput{
 		Enabled: true,
@@ -165,7 +165,7 @@ func TestSetCustomMetricsRejectsTopLevelDatabaseType(t *testing.T) {
 
 func TestSetCustomMetricsRejectsUnsupportedResourceCategory(t *testing.T) {
 	repo := newFakePluginConfigRepo()
-	uc := NewPluginConfigUC(repo, nil, fakeEndpointResolver{}, nil)
+	uc := NewPluginConfigUC(repo, nil, nil, fakeEndpointResolver{}, nil)
 
 	_, err := uc.Set(context.Background(), 7, model.PluginNameCustomMetrics, SetInput{
 		Enabled: true,

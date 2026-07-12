@@ -41,18 +41,40 @@ type Target struct {
 	Kind          string
 }
 
+// DefaultInterval is the default scrape interval when callers don't
+// supply one (30s). It is also the period the metrics plugin's
+// internal ticker falls back to when the operator's spec is missing
+// or zero-valued.
 const (
 	DefaultInterval = 30 * time.Second
 	DefaultTimeout  = 5 * time.Second
-	// ScrapeUpMetricName mirrors Prometheus's synthetic scrape health metric.
-	// Edge-side scrapers push it because these targets are not scraped by the
-	// central Prometheus server directly.
+	// ScrapeUpMetricName mirrors Prometheus's synthetic scrape health
+	// metric. Edge-side scrapers push it because these targets are not
+	// scraped by the central Prometheus server directly.
 	ScrapeUpMetricName = "up"
 )
 
-// Scrape performs one GET, parses the Prometheus text response, applies
-// target-side cardinality controls, and returns flat samples.
-func Scrape(ctx context.Context, target Target) ([]tunnel.PromSample, error) {
+// ServerTimeMsFn 返回 agent 最近一次心跳响应里 manager 端的
+// Unix 毫秒时间戳 (trusted 时间源). nil 是合法值 —— helper 会
+// 把 PromSample.ServerTimeMs 留为 0, manager 端 ingester 看到
+// ServerTimeMs=0 走 legacy fallback (用 TsMs 作 Prom sample.timestamp,
+// 不加 edge_ts_ms label).
+//
+// 这不是 NTP / 时钟同步, 是"以数据时间戳代替系统时钟同步"的设计
+// (详见 AGENTS.md 时钟管理硬规则).
+type ServerTimeMsFn func() int64
+
+// Scrape 执行一次 GET, 解析 Prometheus 文本响应, 应用 target 侧
+// cardinality 控制, 返回扁平 sample 切片.
+//
+// samples 里的时间戳:
+//   - TsMs: edge 本地 time.Now().UnixMilli() (事件时间)
+//   - ServerTimeMs: serverTimeMsFn() 的返回值 (ongrid 时间, 0 则表示未就绪)
+//
+// serverTimeMsFn 可以是 nil (老 variant / 部署初期 agent 未接收到任何
+// 带 ServerTimeMs 字段的心跳响应) —— 此时 ServerTimeMs 留 0, manager
+// 端 ingester 自动走 legacy fallback, 服务可用但不跱跱 5min hard-reject.
+func Scrape(ctx context.Context, target Target, serverTimeMsFn ServerTimeMsFn) ([]tunnel.PromSample, error) {
 	if target.URL == "" {
 		return nil, fmt.Errorf("target_url required")
 	}
@@ -82,7 +104,18 @@ func Scrape(ctx context.Context, target Target) ([]tunnel.PromSample, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse: %w", err)
 	}
-	samples := collector.FlattenSamples(time.Now(), target.SourceLabel, familiesToSlice(families), target.ExtraLabels)
+	now := time.Now()
+	var serverTimeMs int64
+	if serverTimeMsFn != nil {
+		serverTimeMs = serverTimeMsFn()
+	}
+	samples := collector.FlattenSamples(now, target.SourceLabel, familiesToSlice(families), target.ExtraLabels)
+	// 写入 ongrid 时间戳锚点, manager 端 ingester 会用它作为 Prom 的 sample.timestamp.
+	// v3.3 前这里用 SafeNow(serverTime) 钳位本地时间, 避免触发 Prom 的 5min hard-reject;
+	// v3.3 后这个职责迁到 ingester (用 ServerTimeMs 字段), edge 只负责搬运, 不钳位.
+	for i := range samples {
+		samples[i].ServerTimeMs = serverTimeMs
+	}
 	applyLabelDrop(samples, target.LabelDrop)
 	if target.SampleLimit > 0 && len(samples) > target.SampleLimit {
 		return nil, fmt.Errorf("sample limit exceeded: got %d limit %d", len(samples), target.SampleLimit)

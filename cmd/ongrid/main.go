@@ -788,7 +788,7 @@ func main() {
 		loki:      lokiResolver,
 		tempo:     tempoResolver,
 	}
-	pluginConfigUC := managerbizedge.NewPluginConfigUC(pluginConfigRepo, nil, pluginEndpointResolver, log)
+	pluginConfigUC := managerbizedge.NewPluginConfigUC(pluginConfigRepo, edgeRepo, nil, pluginEndpointResolver, log)
 
 	edgeHandler := managerserveredge.NewHandler(edgeSvc, deviceRepo, pluginConfigUC)
 	edgeHandler.SetAuthz(authzMW)
