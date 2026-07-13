@@ -56,7 +56,18 @@ ARG GOPROXY
 ENV GOPROXY=${GOPROXY:-https://goproxy.cn,https://goproxy.io,https://proxy.golang.org,direct}
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# 配 apt 源：清华镜像优先，deb.debian.org 兜底。
+# 治本：deb.debian.org 是全球 CDN，部分边缘节点在 CN 网络下
+# 对个别包（如 bzip2）偶发 502，而 6/7 其它包能下；切到清华源
+# 后命中率稳定。tuna 同步延迟的包 apt 会按顺序自动回退到 official。
+# 与同文件 runtime stage 的写法保持一致。
+RUN set -eux; \
+    rm -f /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; \
+    printf 'deb https://mirrors.tuna.tsinghua.edu.cn/debian bookworm main\ndeb https://mirrors.tuna.tsinghua.edu.cn/debian bookworm-updates main\ndeb https://mirrors.tuna.tsinghua.edu.cn/debian-security bookworm-security main\n' \
+        > /etc/apt/sources.list.d/00-tuna.list; \
+    printf 'deb http://deb.debian.org/debian bookworm main\ndeb http://deb.debian.org/debian bookworm-updates main\ndeb http://deb.debian.org/debian-security bookworm-security main\n' \
+        > /etc/apt/sources.list.d/10-official.list; \
+    apt-get update && apt-get install -y --no-install-recommends \
         build-essential pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
@@ -143,10 +154,18 @@ RUN set -eux; \
 #     persistent volume (/var/lib/ongrid/tools, the cloud_bash PYTHONUSERBASE)
 #     so they survive container recreation, don't bloat the image, and can be
 #     added at runtime via the approval-gated cloud_bash (no image rebuild).
-# Retry up to 5× — deb.debian.org intermittently 502s, and a single transient
-# failure here otherwise kills the whole image build. Acquire::Retries also
-# retries individual package downloads within one apt run.
+# 多层兜底：
+# 1) 清华镜像作为首选源（治本：CN 网络下 deb.debian.org CDN
+#    偶发 502 的根因）
+# 2) deb.debian.org 作为兜底源（tuna 同步延迟时 apt 会自动 fallback）
+# 3) Acquire::Retries 3（单包在单次 apt run 内的内部重试）
+# 4) 外层 5 次循环（极端情况下整层 apt 重跑，最后一道防线）
 RUN set -eux; \
+    rm -f /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; \
+    printf 'deb https://mirrors.tuna.tsinghua.edu.cn/debian bookworm main\ndeb https://mirrors.tuna.tsinghua.edu.cn/debian bookworm-updates main\ndeb https://mirrors.tuna.tsinghua.edu.cn/debian-security bookworm-security main\n' \
+        > /etc/apt/sources.list.d/00-tuna.list; \
+    printf 'deb http://deb.debian.org/debian bookworm main\ndeb http://deb.debian.org/debian bookworm-updates main\ndeb http://deb.debian.org/debian-security bookworm-security main\n' \
+        > /etc/apt/sources.list.d/10-official.list; \
     echo 'Acquire::Retries "3";' > /etc/apt/apt.conf.d/80-retries; \
     for i in 1 2 3 4 5; do \
         apt-get update && apt-get install -y --no-install-recommends \
