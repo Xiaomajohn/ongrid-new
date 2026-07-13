@@ -14,11 +14,10 @@ import {
 } from 'lucide-react';
 import { queryLogsRange, listLogLabels, type LokiStream } from '@/api/logs';
 import { ApiError } from '@/api/client';
-import { listEdges, type Edge, type EdgeRole } from '@/api/edges';
+import { type EdgeRole } from '@/api/edges';
 import { listDevices, type Device } from '@/api/devices';
-import { onDevicesChanged } from '@/lib/events';
 import { Link } from 'react-router-dom';
-import { RoleSelect } from '@/components/ui';
+import { RoleSelect, SearchableSelect, type SearchableSelectOption } from '@/components/ui';
 import { NLQueryHelper } from '@/components/NLQueryHelper';
 import { useObservability } from '@/store/observability';
 import { openObservabilityUrl, buildExploreUrl } from '@/lib/drilldown';
@@ -208,25 +207,20 @@ export default function LogsPage() {
   // matchers into the effective LogQL just like facet chips do, but
   // live above the LogQL box so common filters don't need typing.
   const [deviceFilter, setDeviceFilter] = useState(''); // value = device_id (string)
-  // deviceInput is the literal text in the searchable combobox (display
-  // label or raw device_id). Kept separate from deviceFilter so the
-  // input doesn't disagree with what the user typed when no edge match.
-  const [deviceInput, setDeviceInput] = useState('');
   const [roleFilter, setRoleFilter] = useState<'' | EdgeRole>('');
   const [filenameFilter, setFilenameFilter] = useState(''); // value = unit OR filename label
   // Task filter — narrows logs by `task_name` label stamped by the
   // ongrid-edge logs plugin's promtail extra_labels (sourced from
   // `edges.task_name`). `taskOptions` is the de-duplicated union of
-  // task_names across all currently registered edges; the dropdown
-  // is global (not per-device) because one task can span many edges
-  // / devices.
+  // task_names across every device's nested edges (from the
+  // GET /v1/devices response). The dropdown is global (not per-device)
+  // because one task can span many edges / devices.
   const [taskFilter, setTaskFilter] = useState('');
-  const [taskOptions, setTaskOptions] = useState<string[]>([]);
   // Toggle for the device dropdown's "显示已删除" checkbox. The task
-  // dropdown derives its options from `edges` (which never includes
-  // soft-deleted rows), so it doesn't need its own deleted toggle.
+  // dropdown derives its options from the device list (which never
+  // includes soft-deleted rows by default), so it doesn't need its own
+  // deleted toggle.
   const [showDeleted, setShowDeleted] = useState(false);
-  const [edges, setEdges] = useState<Edge[]>([]);
   const [rows, setRows] = useState<LogRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -247,6 +241,11 @@ export default function LogsPage() {
   const findInputRef = useRef<HTMLInputElement | null>(null);
   const rowsContainerRef = useRef<HTMLDivElement | null>(null);
 
+  // 设备全量列表：mount + showDeleted 变化时拉一次。供设备下拉 option
+  // 渲染、role chip 展开（topbarFacets 里 .filter roles）、任务下拉
+  // options 聚合（taskOptions useMemo）共享同一数据源。
+  const [devices, setDevices] = useState<Device[]>([]);
+
   // Build the top-bar selector contributions. Device picks the right
   // label key based on what's actually present in the rows (the
   // promtail/filelog conventions are: `host` for collectors, `device_id`
@@ -266,9 +265,12 @@ export default function LogsPage() {
       // matches gets an impossible `device_id="__no_match__"` so the
       // query returns empty rather than silently dropping the filter and
       // showing ALL logs — which is what made the role chip look broken.
-      const matching = edges
-        .filter((e) => Array.isArray(e.roles) && (e.roles as string[]).includes(roleFilter))
-        .map((e) => String(e.id));
+      //
+      // 数据源：device 自身就有 roles 字段（May 2026 拆分后 operator
+      // 角色直接挂在 device 行），不再需要先查 edges 再 JOIN。
+      const matching = devices
+        .filter((d) => Array.isArray(d.roles) && (d.roles as string[]).includes(roleFilter))
+        .map((d) => String(d.id));
       if (matching.length === 0) {
         out.push({ label: 'device_id', value: '__no_match__', op: '=' });
       } else if (matching.length === 1) {
@@ -296,7 +298,7 @@ export default function LogsPage() {
       out.push({ label: 'task_name', value: taskFilter, op: '=' });
     }
     return out;
-  }, [deviceFilter, roleFilter, filenameFilter, taskFilter, edges]);
+  }, [deviceFilter, roleFilter, filenameFilter, taskFilter, devices]);
 
   const effectiveQuery = useMemo(
     () => buildEffectiveQuery(committedQuery, topbarFacets, include, exclude),
@@ -418,78 +420,62 @@ export default function LogsPage() {
     return () => window.clearInterval(id);
   }, [live, liveTick]);
 
-  // Load edge inventory once for the device dropdown. Best-effort —
-  // failure just leaves the dropdown empty (operators can still type a
-  // device_id directly into the LogQL box).
-  // Mount-fetch + subscribe to devices-changed: role chip expansion below
-  // depends on `edges` (role → device_id matcher), so a role edit on Edges
-  // page must propagate here, not just on a full page reload.
-  useEffect(() => {
-    let cancelled = false;
-    const load = () => {
-      void (async () => {
-        try {
-          const r = await listEdges();
-          if (!cancelled) setEdges(r.items ?? []);
-        } catch {
-          // silent
-        }
-      })();
-    };
-    load();
-    const unsubscribe = onDevicesChanged(load);
-    return () => {
-      cancelled = true;
-      unsubscribe();
-    };
-  }, []);
-
-  // mount 时拉一次全量 devices，构造 deviceId → Device 的 map。
-  // 设备下拉 option 文本和 onChange 同步 deviceInput 时用这里回填
-  // device.name / hostname / ip_address，替代 d.name（探针名）。
-  // 不走 Edges.tsx 的 module-level 缓存：本轮最小改动，不抽 lib。
-  //
+  // mount 时拉一次全量 devices，构造设备下拉的 options。
   // 数据源从「带 edge 的 device 子集」改为「全量 device」——这样没装
   // edge 的纯 host 也能选。include_deleted 由 showDeleted 联动。
-  // 同时保留一份 devices: Device[] 给下拉框 option 列表用（map 只能
-  // 按 id 取值；下拉要遍历整个集合）。
-  const [deviceMap, setDeviceMap] = useState<Map<number, Device>>(new Map());
-  const [devices, setDevices] = useState<Device[]>([]);
+  // 不再拉 edges：后端 GET /v1/devices 响应已内嵌 edges[]，任务下拉
+  // 与 role 展开都从 devices 聚合，避免额外的 listEdges 请求。
   useEffect(() => {
     let cancelled = false;
-    listDevices({ limit: 1000, include_deleted: showDeleted })
+    listDevices({ include_deleted: showDeleted })
       .then((r) => {
         if (cancelled) return;
         const items = r.items ?? [];
-        const m = new Map<number, Device>();
-        for (const d of items) m.set(d.id, d);
-        setDeviceMap(m);
         setDevices(items);
       })
       .catch(() => {
-        /* best-effort：失败时回退到 d.name，行为与现状一致 */
+        /* best-effort：失败时下拉为空，行为与现状一致 */
       });
     return () => {
       cancelled = true;
     };
   }, [showDeleted]);
 
-  // Aggregate every edge's task_name into a global de-duped set.
-  // Reuses `edges` state (loaded by the device-dropdown effect above);
-  // listEdges() already returns the task_name column. If the current
-  // task selection falls out of the new options (e.g. all edges with
-  // that task went offline), reset to "all" so the UI never diverges
-  // from the injected LogQL.
-  useEffect(() => {
+  // 设备下拉 options：客户端渲染，由 SearchableSelect 内部 filter。
+  // label 用 name > hostname > ip 的级联回退；hint 显示次级信息（ip 或
+  // hostname），与 ip LIKE 模糊搜索时区分。已删除行 option label 灰字
+  // "（已删除）"，值保留供过滤。
+  const deviceOptions = useMemo<SearchableSelectOption[]>(() => {
+    return devices.map((d) => {
+      const name = d.name || d.hostname || d.ip_address || `#${d.id}`;
+      const isDeleted = !!d.deleted_at;
+      const sub = d.ip_address && d.ip_address !== name ? d.ip_address : d.hostname;
+      return {
+        value: String(d.id),
+        label: isDeleted ? `${name} (#${d.id})（已删除）` : `${name} (#${d.id})`,
+        hint: sub && sub !== name ? sub : undefined,
+        muted: isDeleted,
+      };
+    });
+  }, [devices]);
+
+  // 任务下拉 options：从 devices[].edges[].task_name 聚合全局去重排序。
+  // 单源：不再调 listEdges，避免双请求 + 数据不一致。如果当前 task
+  // 选择不再在 options 里（例如所有用此 task 的 edge 都下线），重置为
+  // "all" 以避免 UI 与注入 LogQL 不一致。
+  const taskOptions = useMemo<string[]>(() => {
     const set = new Set<string>();
-    for (const e of edges) {
-      const tn = (e.task_name || '').trim();
-      if (tn) set.add(tn);
+    for (const d of devices) {
+      for (const e of d.edges ?? []) {
+        const tn = (e.task_name || '').trim();
+        if (tn) set.add(tn);
+      }
     }
-    const options = Array.from(set).sort();
-    setTaskOptions(options);
-    setTaskFilter((cur) => (cur && !options.includes(cur) ? '' : cur));
-  }, [edges]);
+    return Array.from(set).sort();
+  }, [devices]);
+  useEffect(() => {
+    if (taskFilter && !taskOptions.includes(taskFilter)) setTaskFilter('');
+  }, [taskOptions, taskFilter]);
 
   // Probe Loki for any indexed labels. If Loki has zero label values
   // we know the platform has never received a log push — distinguishes
@@ -668,47 +654,20 @@ export default function LogsPage() {
             onChange={(v) => setRoleFilter(v as '' | EdgeRole)}
             className="w-36 shrink-0"
           />
-          {/* Device — native <select> so it visually reads as a dropdown.
-              Data source is the device table (not edges) so a host
-              without an installed probe still shows up here. Soft-deleted
-              rows render with "(已删除)" suffix in zinc-500. Free-form
-              'paste a device_id' (rare) is preserved via the deviceInput
-              state for the "?device=" URL param path. */}
-          <label className="block w-48 shrink-0">
+          {/* Device — 可搜索 combobox，客户端按 name / hostname / ip
+              模糊匹配（由 SearchableSelect 内部 filter）。数据源是
+              devices table（不依赖 edge），未装探针的纯 host 也能选。
+              软删除行 option 以 zinc-500 灰字 "（已删除）" 呈现，值
+              保留供过滤。"显示已删除" 勾选置于下拉下方，与原布局一致。 */}
+          <div className="block w-48 shrink-0">
             <span className="mb-1 block text-[11px] text-zinc-500">{tr("设备", "Device")}</span>
-            <select
+            <SearchableSelect
               value={deviceFilter}
-              onChange={(e) => {
-                const v = e.target.value;
-                setDeviceFilter(v);
-                // Switching device doesn't reset the task dropdown —
-                // task is global across edges and stays useful as an
-                // orthogonal filter (e.g. "show device X under task Y").
-                if (!v) {
-                  setDeviceInput('');
-                  return;
-                }
-                const dev = deviceMap.get(Number(v));
-                const display = dev?.name || dev?.hostname || dev?.ip_address || v;
-                setDeviceInput(`${display} (#${v})`);
-              }}
-              className={INPUT_BASE}
-            >
-              <option value="">{tr('全部设备', 'All devices')}</option>
-              {devices.map((d) => {
-                const name = d.name || d.hostname || d.ip_address || `#${d.id}`;
-                const isDeleted = !!d.deleted_at;
-                return (
-                  <option
-                    key={d.id}
-                    value={String(d.id)}
-                    className={isDeleted ? 'text-zinc-500' : undefined}
-                  >
-                    {name} (#{d.id}){isDeleted ? ` (${tr('已删除', 'Deleted')})` : ''}
-                  </option>
-                );
-              })}
-            </select>
+              options={deviceOptions}
+              onChange={setDeviceFilter}
+              placeholder={tr('全部设备', 'All devices')}
+              emptyText={tr('无匹配设备', 'No matching devices')}
+            />
             <label className="mt-1 flex cursor-pointer items-center gap-1.5 text-[11px] text-zinc-500">
               <input
                 type="checkbox"
@@ -718,31 +677,23 @@ export default function LogsPage() {
               />
               {tr('显示已删除', 'Show deleted')}
             </label>
-          </label>
-          {/* Task — lists every distinct edges.task_name across all
-              currently-registered edges in this ongrid install.
-              Picking one injects `task_name="<value>"` into the LogQL
-              via topbarFacets. Source of truth for the label is the
-              promtail external_labels stamped by the ongrid-edge
-              logs plugin (see internal/edgeagent/plugins/logs/render.go).
-              The dropdown is always enabled — task is global and
-              orthogonal to device. */}
-          <label className="block w-48 shrink-0">
+          </div>
+          {/* Task — 可搜索 combobox，options 从 devices[].edges[].task_name
+              聚合（见上方 taskOptions useMemo）。选中后由 topbarFacets
+              注入 `task_name="<value>"` 到 LogQL。源是 ongrid-edge logs
+              plugin 的 promtail external_labels。task 全局 orthogonal
+              于 device：切换设备不需要重置任务。 */}
+          <div className="block w-48 shrink-0">
             <span className="mb-1 block text-[11px] text-zinc-500">{tr('任务', 'Task')}</span>
-            <select
+            <SearchableSelect
               value={taskFilter}
-              onChange={(e) => setTaskFilter(e.target.value)}
-              className={cn(INPUT_BASE, 'font-mono')}
-              title={tr('按 edges.task_name 过滤', 'Filter by edges.task_name')}
-            >
-              <option value="">{tr('全部任务', 'All tasks')}</option>
-              {taskOptions.map((t) => (
-                <option key={t} value={t}>
-                  {t}
-                </option>
-              ))}
-            </select>
-          </label>
+              options={taskOptions.map((t) => ({ value: t, label: t }))}
+              onChange={setTaskFilter}
+              placeholder={tr('全部任务', 'All tasks')}
+              emptyText={tr('无匹配任务', 'No matching tasks')}
+              className="font-mono"
+            />
+          </div>
           {/* File / unit — native <select> for visual consistency with
               the other dropdowns in the row. Options come from the
               observed-label index built by the labels endpoint; users
@@ -1028,7 +979,6 @@ export default function LogsPage() {
                       type="button"
                       onClick={() => {
                         setDeviceFilter('');
-                        setDeviceInput('');
                         setRoleFilter('');
                         setFilenameFilter('');
                         setTaskFilter('');

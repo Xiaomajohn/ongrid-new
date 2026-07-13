@@ -18,7 +18,7 @@ import (
 // RolesUnknownOnly, when true, narrows to rows with roles == 0 (the
 // "未分类" bucket); it is mutually exclusive with RolesAny — set one or
 // the other, not both. Online filters by the live online flag.
-// Hostname / Name are substring matches. IncludeDeleted opts out of the
+// Hostname / Name / IP are substring matches. IncludeDeleted opts out of the
 // GORM soft-delete scope so callers (Logs page's "显示已删除" toggle)
 // can surface soft-deleted rows in a "已删除" UI list. Default false
 // keeps the default-scope behaviour (no soft-deleted rows visible).
@@ -28,9 +28,24 @@ type ListFilter struct {
 	Online           *bool
 	Hostname         string
 	Name             string
+	IP               string
 	Limit            int
 	Offset           int
 	IncludeDeleted   bool
+}
+
+// EdgeMini is the trimmed edge summary attached to each device in
+// GET /v1/devices response. Excludes tunnel-y secrets (access_key_id /
+// secret_key_hash) so the device list doesn't leak agent auth material
+// to a broader audience than GET /v1/edges does. The data powers the
+// SPA's Logs page device / task dropdowns — task_name here is the
+// source of truth for the task facet.
+type EdgeMini struct {
+	ID         uint64
+	Name       string
+	Status     string
+	TaskName   string
+	LastSeenAt *time.Time
 }
 
 // Repo is the device persistence contract. The sqlite/mysql implementation

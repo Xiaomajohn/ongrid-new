@@ -342,6 +342,9 @@ func (r *Repo) List(ctx context.Context, f biz.ListFilter) ([]*model.Device, err
 	if f.Name != "" {
 		tx = tx.Where("name LIKE ?", "%"+f.Name+"%")
 	}
+	if f.IP != "" {
+		tx = tx.Where("ip_address LIKE ?", "%"+f.IP+"%")
+	}
 	if f.Limit > 0 {
 		tx = tx.Limit(f.Limit)
 	}

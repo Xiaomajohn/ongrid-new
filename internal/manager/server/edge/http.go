@@ -366,6 +366,11 @@ type listItem struct {
 	AgentVersion string       `json:"agent_version,omitempty"`
 	DeviceID     *uint64      `json:"device_id,omitempty"`
 	HostInfo     *hostInfoDTO `json:"host_info,omitempty"`
+	// TaskName 是操作员在「新建 Edge」弹窗填写的任务标识；写入到
+	// edge.task_name 列，install worker 不会再覆盖。空字符串由
+	// omitempty 在 JSON 里省略 —— 区分「未填」和「显式清空」靠 DB 列
+	// 实际值，UI 端统一渲染成 —。Logs 页面的 task_name 筛选也读这一列。
+	TaskName string `json:"task_name,omitempty"`
 }
 
 type listResp struct {
@@ -385,6 +390,8 @@ type getResp struct {
 	AgentVersion string       `json:"agent_version,omitempty"`
 	DeviceID     *uint64      `json:"device_id,omitempty"`
 	HostInfo     *hostInfoDTO `json:"host_info,omitempty"`
+	// TaskName 任务标识，详见 listItem.TaskName 注释。
+	TaskName string `json:"task_name,omitempty"`
 }
 
 type rotateResp struct {
@@ -486,6 +493,7 @@ func (h *Handler) listEdges(w http.ResponseWriter, r *http.Request) {
 			AgentVersion: e.AgentVersion,
 			DeviceID:     e.DeviceID,
 			HostInfo:     deviceToHostInfo(dev),
+			TaskName:     e.TaskName,
 		})
 	}
 	writeJSON(w, http.StatusOK, listResp{Items: items, Total: len(items)})
@@ -519,6 +527,7 @@ func (h *Handler) getEdge(w http.ResponseWriter, r *http.Request) {
 		AgentVersion: e.AgentVersion,
 		DeviceID:     e.DeviceID,
 		HostInfo:     deviceToHostInfo(dev),
+		TaskName:     e.TaskName,
 	})
 }
 

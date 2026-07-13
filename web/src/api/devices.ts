@@ -57,11 +57,34 @@ export type Device = {
   ssh_auth_kind?: 'password' | 'key';
   ssh_password?: string;
   ssh_key?: string;
+  // — GET /v1/devices 列表内嵌的关联 edge 精简行。仅在调用 listDevices
+  // 时存在（单查 GET /v1/devices/{id} 不返这个字段）。SPA 的 Logs 页
+  // 设备 / 任务下拉靠这个字段聚合 task_name。后端不带凭据字段，避免
+  // 列表接口授权面比 GET /v1/edges 更广时借机泄漏 access_key_id。
+  // 空数组表示该 device 未装任何 edge；undefined 表示后端批量查失败
+  // 或调用方用的是单查路径。
+  edges?: EdgeMini[];
+};
+
+// EdgeMini 是 device 列表内嵌的 edge 精简行。与 api/edges.ts 的 Edge
+// 区别：不返 access_key_id / secret_key_hash / host_info 等敏感或
+// 大字段，专供「设备 / 任务下拉」「详情页直引」两个轻量场景。
+export type EdgeMini = {
+  id: number;
+  name: string;
+  status: string;
+  // task_name 是 installjob 写入 edges.task_name 的任务标识。SPA 的
+  // Logs 页面任务下拉用此字段做全局聚合过滤。
+  task_name?: string;
+  last_seen_at?: string | null;
 };
 
 export function listDevices(params?: {
   hostname?: string;
   name?: string;
+  // ip 是 ip_address 模糊匹配参数（后端 SQL: ip_address LIKE %ip%），
+  // 配 Logs 页面设备下拉按 IP 段快速定位。空串 / null 不进 qs。
+  ip?: string;
   roles?: string;
   online?: boolean;
   limit?: number;

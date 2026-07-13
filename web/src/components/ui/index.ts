@@ -7,3 +7,4 @@ export { EmptyState } from './EmptyState';
 export { PageHeader } from './PageHeader';
 export { Button } from './Button';
 export { RoleSelect, type RoleFilterValue } from './RoleSelect';
+export { SearchableSelect, type SearchableSelectOption } from './SearchableSelect';

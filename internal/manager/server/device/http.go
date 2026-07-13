@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -136,6 +137,24 @@ type deviceItem struct {
 	// a separate /v1/topology lookup. Nullable until topology.Migrate
 	// has run its backfill for this row.
 	NodeID *uint64 `json:"node_id,omitempty"`
+	// Edges 列出与本 device 关联的所有 edge 精简行（不含凭据字段），
+	// 用于 SPA 的 Logs 页面设备 / 任务下拉一次拿到 task_name 等，避免
+	// 单独再发 N 次反查。空 slice（不是 nil）表示该 device 没装任何
+	// edge；nil 表示后端批量查失败时降级不返。列表接口 best-effort：
+	// 失败仅记 stderr，不影响 device 主表数据返回。
+	Edges []edgeMiniItem `json:"edges"`
+}
+
+// edgeMiniItem 是 device 列表内嵌的 edge 精简版：仅保留与 SPA 下拉 /
+// 详情展示相关的字段。不含 access_key_id / secret_key_hash —— 列表
+// 接口授权面比 GET /v1/edges 更广，不能借机泄漏 agent 凭据。源数据由
+// biz/device.EdgeMini 经 devToItem 在 list handler 中转译而来。
+type edgeMiniItem struct {
+	ID         uint64     `json:"id"`
+	Name       string     `json:"name"`
+	Status     string     `json:"status"`
+	TaskName   string     `json:"task_name,omitempty"`
+	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
 }
 
 type listResp struct {
@@ -221,6 +240,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	f := devicebiz.ListFilter{
 		Hostname: q.Get("hostname"),
 		Name:     q.Get("name"),
+		IP:       q.Get("ip"),
 	}
 	if rolesParam := q.Get("roles"); rolesParam != "" {
 		var mask uint8
@@ -276,9 +296,37 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	// Best-effort 批量拉每台 device 关联的 edge 精简行。失败不阻断主
+	// 列表（device 数据照样返），只是 edges 字段缺省；前端下拉会
+	// 退化为只有 device 主信息可用。空 rows 时直接跳过，省一次 DB。
+	var edgesByDevice map[uint64][]devicebiz.EdgeMini
+	if links := h.uc.Links(); links != nil && len(rows) > 0 {
+		ids := make([]uint64, 0, len(rows))
+		for _, d := range rows {
+			ids = append(ids, d.ID)
+		}
+		if m, lerr := links.ListEdgesForDevices(r.Context(), ids); lerr == nil {
+			edgesByDevice = m
+		} else {
+			fmt.Fprintf(os.Stderr, "device list: list edges for devices failed: %v\n", lerr)
+		}
+	}
 	out := make([]deviceItem, 0, len(rows))
 	for _, d := range rows {
-		out = append(out, devToItem(d))
+		item := devToItem(d)
+		if edges, ok := edgesByDevice[d.ID]; ok {
+			item.Edges = make([]edgeMiniItem, 0, len(edges))
+			for _, e := range edges {
+				item.Edges = append(item.Edges, edgeMiniItem{
+					ID:         e.ID,
+					Name:       e.Name,
+					Status:     e.Status,
+					TaskName:   e.TaskName,
+					LastSeenAt: e.LastSeenAt,
+				})
+			}
+		}
+		out = append(out, item)
 	}
 	writeJSON(w, http.StatusOK, listResp{Items: out, Total: len(out)})
 }
