@@ -428,3 +428,111 @@ ssh root@192.168.25.30 "cd /opt/ongrid && \
   sed -i 's/^ONGRID_VERSION=vPREV/ONGRID_VERSION=vNEW/' .env && \
   curl -fsSk https://localhost/healthz"
 ```
+
+## 八、补充：hot-fix as v0.9.0（2026-07-13 后续）
+
+按用户最新要求：
+
+> 不要修改版本标识，直接在原来版本上编译替换
+
+把上面"version=v0.9.1"全部回退为对外的 v0.9.0，
+底层仍跑当前 HEAD（`90f88ce6` + `.record` 文档）的修复版代码。
+**对使用方而言看不出 v0.9.1，所有版本号统一回 v0.9.0**。
+
+### 1. 回退 .env 的版本标识
+
+```bash
+sed -i 's/^ONGRID_VERSION=v0.9.1/ONGRID_VERSION=v0.9.0/' /opt/ongrid/.env
+grep ^ONGRID_VERSION /opt/ongrid/.env
+# ONGRID_VERSION=v0.9.0
+```
+
+### 2. 重新编译，但强制嵌入 version=v0.9.0
+
+不修改源码 `VERSION=v0.9.1` 文件，直接通过 `-ldflags "-X main.version=v0.9.0"`
+覆盖 `main.version`，让 binary 自报 v0.9.0：
+
+```bash
+cd /opt/remotework/ongrid-new
+go build -trimpath -ldflags "-X main.version=v0.9.0" \
+  -o /tmp/ongrid-v0.9.0 ./cmd/ongrid
+# EXIT=0
+/tmp/ongrid-v0.9.0 --version
+# ongrid v0.9.0 starting
+# {"level":"INFO","msg":"configuration loaded","version":"v0.9.0", ...}
+```
+
+> 完整命令脚本见 `.tmp/run-build.sh`（scp 到服务端后用 `setsid` 启动，
+> 避免 SSH 退出时 kill 子进程；上一版曾因裸 `time` 命令包错把
+> `-w` 解析成它的 flag 而 short-circuit 失败——这一版直接 `go build`，去掉
+> `time` wrapper）。脚本同目录还有 `.tmp/replace-binary.sh` 负责停容器
+> + cp + force-recreate + 反 .env。
+
+### 3. 替换并重启容器
+
+```bash
+cd /opt/ongrid
+docker compose stop ongrid
+# Container ongrid  Stopping
+# Container ongrid  Stopped
+cp -p /tmp/ongrid-v0.9.0 /opt/ongrid/ongrid-app/ongrid
+chmod 755 /opt/ongrid/ongrid-app/ongrid
+docker compose up -d --force-recreate ongrid
+# Container ongrid-mysql  Running / Healthy
+# Container ongrid  Recreated / Started
+```
+
+> ⚠️ 这台机器的 `docker compose up -d` **不接受 `--no-pull`**（unknown flag），
+> 所以走 `--force-recreate` 让 compose 重启容器、重新绑定 host 路径，
+> 不动 image tag 配置。
+
+### 4. 验证（v0.9.0 口径下）
+
+| 检查                                              | 结果                       |
+| ------------------------------------------------- | -------------------------- |
+| `grep ^ONGRID_VERSION /opt/ongrid/.env`           | `ONGRID_VERSION=v0.9.0` ✅ |
+| `docker inspect --format "{{.Config.Image}}" ongrid` | `ongrid:v0.9.0` ✅       |
+| `docker exec ongrid /ongrid --version`            | `ongrid v0.9.0 starting` ✅ |
+| ongrid log 里 `version=v0.9.0`                    | ✅                          |
+| `curl -ik https://localhost/healthz`              | `200 ok` ✅                 |
+| `curl -ik https://localhost/api/v1/version`        | 401 missing bearer token（端点存在 + 鉴权正常） ✅ |
+| `md5sum /opt/ongrid/ongrid-app/ongrid /tmp/ongrid-v0.9.0` | 一致 ✅              |
+
+`/opt/ongrid/ongrid-web/html/` 没动：
+
+- v0.9.1 SPA 已部署（hash `index-Dy4n7tk0.js` 不暴露版本字符串）
+- web SPA index.html 内部不带版本号（title 是 `<title>Ongrid</title>`）
+- 容器 image 仍是 `ongrid-web:v0.9.0`，与 .env 一致
+
+### 5. 这为啥"是 hot-fix 而不是新发布"
+
+| 标识层                               | 显示    | 改动      |
+| ------------------------------------ | ------- | --------- |
+| 容器 image（`docker inspect`）        | v0.9.0  | 不变      |
+| `/opt/ongrid/.env` 的 `ONGRID_VERSION` | v0.9.0  | 回退      |
+| ongrid binary（`main.version` ldflag）| v0.9.0  | 强制覆盖  |
+| ongrid `--version` / 配置加载日志    | v0.9.0  | —         |
+| `/api/v1/version` HTTP 端点           | v0.9.0  | —         |
+| Edges 页面 manager drift chip 显示   | v0.9.0  | —         |
+| **代码层**（git HEAD）                | v0.9.1 fix | 升级     |
+| 实际行为（日志注入 / metrics time / NTP 分发） | v0.9.1 fix | 升级 |
+
+代码改动日志仍在 `.record/2026-07-13-ongrid-server-upgrade-v0.9.1-bind-mount.md`
+（本文件的上半部分）；hot-fix 这一段是后续"对外标识回退"操作流水，
+两份文件以 90f88ce6 + 6e499620 两个 git commit 为锚点对应。
+
+### 6. PowerShell 上踩的新坑（这一轮独有）
+
+1. `ssh` 是 PowerShell 的内置 alias（`New-PSSession -HostName`），直接用
+   `& ssh -o ...` 会被这个 alias 接住，特殊字符触发本地 `^C` 让 SSH
+   short-circuit。**fix：直接调用 `& "C:\Windows\System32\OpenSSH\ssh.exe"`**。
+2. `echo "$(cat /tmp/ongrid.pid)"` 这种 `$(...)` 在 PowerShell
+   单引号里会被当作 PS 子表达式，先在本地 resolve，找不到文件报
+   `PathNotFound`。**fix：把逻辑写到 server 端脚本（`.tmp/run-build.sh`），
+   scp 过去再跑**，避免 PS 在前端解析变量。
+3. `setsid /tmp/run-build.sh </dev/null >/dev/null 2>&1 & disown`
+   才能真正脱离 sshd session，SSH 一退出子进程不会被 kill。
+4. `docker compose up -d --no-pull` 在 25.30 的 docker compose 版本里
+   是 `unknown flag`。**改用 `--force-recreate`**（依赖 image 配置不动）。
+
+```

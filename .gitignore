@@ -7,7 +7,7 @@
 record/
 # Test binary, built with `go test -c`
 *.test
-
+./tmp/
 # Go coverage output
 *.out
 coverage.out
@@ -18,7 +18,7 @@ bin/
 dist/stage/
 dist/out/
 tmp/
-
+scripts
 # Stray top-level binaries from `go build` / `go run`
 /ongrid
 /ongrid-frontier
