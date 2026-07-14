@@ -97,15 +97,24 @@ const PANEL_META: PanelMeta[] = [
 
 function panelExpr(key: PanelKey, deviceId: string): string {
   const sel = `device_id="${deviceId}"`;
+  // 显式 by (...) 聚合掉写入侧注入的 edge_ts_ms 动态 label
+  // （同个 cpu / device 多次 scrape 会被拆成 N 个时序，不聚合会出
+  // 现图例重复 + rate() 缺样本不返回值）。用 avg 保持「原始比率/
+  // 原始比例」语义，与 Monitor 页面的 avg by (device_id) 一致。
+  //
+  // CPU 用 rate(...[2m]) 而不是 [5m]：edge 是 push 模型而非 pull，
+  // scrape interval 可能拉长，6h 窗口中很可能出现 ≥2 采样本的区段
+  // 很稀且经常不足 5m，rate 5m 在前几个小时返回空。改 2m + irate
+  // 兑底：1 个以上样本都能算。
   switch (key) {
     case 'cpu':
-      return `100 * (1 - rate(node_cpu_seconds_total{${sel},mode="idle"}[5m]))`;
+      return `100 * (1 - avg by(cpu) (irate(node_cpu_seconds_total{${sel},mode="idle"}[2m])))`;
     case 'disk':
-      return `100 * (1 - node_filesystem_avail_bytes{${sel},fstype=~"ext4|xfs|btrfs|zfs|ext3|ext2|f2fs",device=~"(/dev/)?(vd|sd|xvd)[a-z]+[0-9]*|(/dev/)?nvme[0-9]+n[0-9]+(p[0-9]+)?"} / node_filesystem_size_bytes{${sel},fstype=~"ext4|xfs|btrfs|zfs|ext3|ext2|f2fs",device=~"(/dev/)?(vd|sd|xvd)[a-z]+[0-9]*|(/dev/)?nvme[0-9]+n[0-9]+(p[0-9]+)?"})`;
+      return `100 * (1 - avg by(device) (node_filesystem_avail_bytes{${sel},fstype=~"ext4|xfs|btrfs|zfs|ext3|ext2|f2fs",device=~"(/dev/)?(vd|sd|xvd)[a-z]+[0-9]*|(/dev/)?nvme[0-9]+n[0-9]+(p[0-9]+)?"} / node_filesystem_size_bytes{${sel},fstype=~"ext4|xfs|btrfs|zfs|ext3|ext2|f2fs",device=~"(/dev/)?(vd|sd|xvd)[a-z]+[0-9]*|(/dev/)?nvme[0-9]+n[0-9]+(p[0-9]+)?"}))`;
     case 'netRx':
-      return `rate(node_network_receive_bytes_total{${sel}}[5m])`;
+      return `avg by(device) (rate(node_network_receive_bytes_total{${sel}}[5m]))`;
     case 'netTx':
-      return `rate(node_network_transmit_bytes_total{${sel}}[5m])`;
+      return `avg by(device) (rate(node_network_transmit_bytes_total{${sel}}[5m]))`;
   }
 }
 
@@ -141,11 +150,24 @@ function matrixToPanel(
     return !['tmpfs', 'devtmpfs', 'overlay', 'squashfs', 'autofs'].includes(fstype);
   });
 
-  const series: SeriesDescriptor[] = filtered
+  // 第二层兑底：按 labelVal 去重 series（即使 PromQL 改了，后端 edge_ts_ms
+  // 动态 label 仍可能让同 cpu/device 拆出 N 个 series）。同一 label 的
+  // 多余 series 的 values 按 ts 原盖合并，避免图例出现 “/dev/sda2” 重复 N
+  // 次的问题。
+  const seenLabels = new Set<string>();
+  const deduped: PromMatrixSeries[] = [];
+  for (const s of filtered) {
+    const labelVal = s.metric[nameLabel] ?? '';
+    if (seenLabels.has(labelVal)) continue;
+    seenLabels.add(labelVal);
+    deduped.push(s);
+  }
+
+  const series: SeriesDescriptor[] = deduped
     .map((s, idx) => {
       const labelVal = s.metric[nameLabel] ?? `series ${idx}`;
       const key = `${panelKey}_${labelVal}`;
-      return { labelVal, key, raw: s };
+      return { labelVal, key };
     })
     .sort((a, b) => a.labelVal.localeCompare(b.labelVal))
     .map((entry, idx) => ({
@@ -158,12 +180,15 @@ function matrixToPanel(
   for (const s of filtered) {
     const labelVal = s.metric[nameLabel] ?? '';
     const key = `${panelKey}_${labelVal}`;
-    const m = new Map<number, number>();
+    let m = valuesByKey.get(key);
+    if (!m) {
+      m = new Map<number, number>();
+      valuesByKey.set(key, m);
+    }
     for (const [tsSec, vStr] of s.values) {
       const v = parseFloat(vStr);
       if (Number.isFinite(v)) m.set(tsSec, v);
     }
-    if (!valuesByKey.has(key)) valuesByKey.set(key, m);
   }
 
   const tsSet = new Set<number>();
