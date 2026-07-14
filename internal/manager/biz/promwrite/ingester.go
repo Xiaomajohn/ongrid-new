@@ -131,15 +131,27 @@ func (i *Ingester) Push(ctx context.Context, deviceID uint64, source string, sam
 		if source != "" {
 			labels = append(labels, pkgpromwrite.Label{Name: "ongrid_source", Value: source})
 		}
-		if s.ServerTimeMs > 0 {
-			// Edge 本地事件时间作为 label. 仅在 edge v3.3+ 提供
-			// (s.ServerTimeMs > 0). 帮 post-hoc 分析收敛 "edge 在 X 看到"
-			// vs "Prom 在 Y 存储" 两个时间点差异 (主要是查漂移机器).
-			labels = append(labels, pkgpromwrite.Label{Name: "edge_ts_ms", Value: strconv.FormatInt(s.TsMs, 10)})
-		}
+		// 注意: 早期版本 (v3.3 ~ v0.9.1) 把 edge 本地事件时间 (TsMs) 作为
+		// edge_ts_ms label 写入 Prom, 用于 post-hoc 校准. 但这是动态 label —
+		// 每次 scrape 都生成不同值, 把同名 (cpu/mode/device) 的样本拆成 N 个
+		// 独立 series, 每个 series 内仅 1 个点. 结果: rate/irate/deriv 等依赖
+		// 时间序列 monotonic 性的函数全部失效 (返回空), 监控面板 CPU/网络
+		// 等依赖 rate 的图全部画不出来.
+		//
+		// 修复 (2026-07-14): 不主动注入 edge_ts_ms label. 但云端保留 reserved
+		// 丢弃列表 (下方 loop), 即使老 edge 或上游某个 exporter 未来又注入
+		// edge_ts_ms, 云端也会静默 drop — 防止该 label 再次拆碎时序.
+		//
+		// Prom sample 的时间戳已锚定到 manager 时钟 (ServerTimeMs), 这是
+		// "避免 edge 与 ongrid 时钟不一致导致 Prom 5min out-of-order 拒绝"
+		// 的真正机制. edge 本地事件时间如有 drift 追溯需求, 走独立的
+		// ongrid_internal_clock_skew_seconds 指标上报, 不污染主指标 series.
 		for k, v := range s.Labels {
 			switch k {
-			case "__name__", "device_id", "ongrid_source", "edge_ts_ms":
+			case "__name__", "device_id", "ongrid_source",
+				"edge_ts_ms", // 保留云端静默丢弃: 防止未来上游
+				// exporter 再次注入这个动态 label, 拆碎时序.
+				"edge_ts": // 早期某个版本的简称, 同样丢弃.
 				// Reserved; cloud value wins. Skip.
 				continue
 			}
