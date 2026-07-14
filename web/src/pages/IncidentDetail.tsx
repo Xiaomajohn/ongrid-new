@@ -25,6 +25,7 @@ import { cn } from '@/lib/cn';
 import { openObservabilityUrl, buildExploreUrl } from '@/lib/drilldown';
 import { relativeTime } from '@/lib/format';
 import { usePoll } from '@/lib/usePoll';
+import { escapeLokiLineFilter } from '@/lib/loki';
 import { useObservability } from '@/store/observability';
 import {
   ackIncident,
@@ -1251,9 +1252,15 @@ function useLokiExploreUrl(incident: Incident | null): string | null {
       (grafanaBaseUrl || '').replace(/\/+$/, '') || `${window.location.origin}/grafana`;
     // Build a minimal LogQL expression. Prefer the rule's stream_selector
     // if it leaks through labels; otherwise scope to device_id only.
+    //
+    // The alert-rule `line_filter` is raw RE2 (e.g. `(?i)error\.fatal`),
+    // so it must be escaped for Loki's line-filter string literal —
+    // see escapeLokiLineFilter in pages/Logs.tsx for why `\.` etc.
+    // need to be doubled (`\\.`) before Loki's string lexer will
+    // accept the query.
     let expr = `{device_id="${edgeId}"}`;
     const lineFilter = labels.line_filter || labels.regex;
-    if (lineFilter) expr += ` |~ "${lineFilter.replace(/"/g, '\\"')}"`;
+    if (lineFilter) expr += ` |~ "${escapeLokiLineFilter(lineFilter).replace(/"/g, '\\"')}"`;
     return buildGrafanaExploreUrl({
       base,
       orgId: grafanaOrgId,

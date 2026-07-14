@@ -23,6 +23,7 @@ import { useObservability } from '@/store/observability';
 import { openObservabilityUrl, buildExploreUrl } from '@/lib/drilldown';
 import { cn } from '@/lib/cn';
 import { useI18n } from '@/i18n/locale';
+import { escapeLokiLineFilter } from '@/lib/loki';
 
 // Simple range presets — short windows by default; Loki query_range gets
 // expensive on big windows. "custom" lets the user pick start/end manually.
@@ -77,12 +78,15 @@ const LOGS_QUICK_CHIPS: { labelZh: string; labelEn: string; query: string; title
   },
   {
     labelZh: '服务重启', labelEn: 'Service restart',
-    query: '{ongrid_source=~".+"} |~ "(Started|Stopping|systemd\\[1\\])"',
+    // JS 字面量里 `\\\\[1\\\\]` 解析后是 `\\[1\\]`（双反斜杠）—— Loki 字符串
+    // lexer 把 `\\` 视作字面 `\`，RE2 看到 `\[` 才是字面 `[`。
+    query: '{ongrid_source=~".+"} |~ "(Started|Stopping|systemd\\\\[1\\\\])"',
     titleZh: 'systemd 启停事件', titleEn: 'systemd start/stop events',
   },
   {
     labelZh: 'ssh 失败', labelEn: 'ssh failures',
-    query: '{unit=~"sshd?\\.service"} |~ "(?i)(Failed|invalid)"',
+    // 同上：JS 的 `\\\\.` 解析后是 `\\.`，Loki lexer 剥一层后 RE2 看到 `\.`。
+    query: '{unit=~"sshd?\\\\.service"} |~ "(?i)(Failed|invalid)"',
     titleZh: 'ssh 登录失败 / 非法用户', titleEn: 'ssh login failures / invalid users',
   },
 ];
@@ -109,12 +113,6 @@ function splitTokens(s: string): string[] {
     .split(/\s+/)
     .map((t) => t.trim())
     .filter((t) => t.length > 0);
-}
-
-// Escape a string for LogQL line-filter regex. LogQL line filters
-// (|~ / !~) take Go regex; we use them for the OR-multi-keyword case.
-function reEscape(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 // Build the effective LogQL: base query + facet matchers + include / exclude
@@ -148,12 +146,12 @@ function buildEffectiveQuery(
 
   const incTokens = splitTokens(include);
   if (incTokens.length > 0) {
-    const expr = incTokens.map(reEscape).join('|');
+    const expr = incTokens.map(escapeLokiLineFilter).join('|');
     q += ` |~ "(?i)${expr}"`;
   }
   const excTokens = splitTokens(exclude);
   if (excTokens.length > 0) {
-    const expr = excTokens.map(reEscape).join('|');
+    const expr = excTokens.map(escapeLokiLineFilter).join('|');
     q += ` !~ "(?i)${expr}"`;
   }
   return q;

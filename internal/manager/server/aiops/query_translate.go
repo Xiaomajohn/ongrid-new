@@ -65,12 +65,19 @@ var dialectGuide = map[string]string{
 	"logql": `LogQL（Loki 查询语言）。规则：
 - 必须以 stream selector 开头：{label="value"} 或 {label=~"regex"}
 - ongrid 标签：device_id (string数字), service, level, unit (systemd unit), filename, host
-- 行过滤：|= "substring" 或 |~ "regex"
+- 行过滤：|= "substring"（大小写不敏感）或 |~ "regex"（RE2，大小写敏感，可用 (?i) 前缀切不敏感）
 - 反向过滤：!= 或 !~
 - 多个匹配用 | 串联
 - 严禁随意编造标签，只用上面列出的
+- 字符串字面量里的 RE2 元字符转义要双反斜杠。Loki 的字符串 lexer 先走一遍 Go 风格转义
+  （\" \\ \n \r \t \f 都是合法的），然后才交给 RE2。所以你要让 RE2 看到一个字面 \.，
+  必须写 \\.；要看到 \(，写 \\(；要看到 \[，写 \\[。从原意到 query 多写一个 \。
+  \? \. \+ \( \) \[ \] \{ \} \| \^ \$ 这些都需要多写一个 \。原样不转义也可以（如
+  192.168.33.91 里的点就是裸点、含一点模糊匹配）。不要把 (?i) 和 \. 同时写成 \?i 这种，
+  (?i) 是 RE2 合法 inline flag，不需要转义。
 示例：
 "dev-host-3 最近 error 日志" → {device_id="3"} |~ "(?i)error"
+"主机 1 最近包含 192.168.33.91 的日志" → {device_id="1"} |~ "(?i)192\\.168\\.33\\.91"
 "ssh 服务的失败登录" → {unit=~"sshd?\\.service"} |~ "(?i)(Failed|invalid)"
 "OOM 杀掉的进程" → {} |~ "(Out of memory|OOM|invoked oom-killer)"`,
 
