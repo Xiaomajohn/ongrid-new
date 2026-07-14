@@ -294,8 +294,26 @@ export default function LogsPage() {
     // so unlike deviceFilter / roleFilter it stacks on top of the
     // device chip, not against it. Operator use case: "show me
     // device X's logs that ran under task Y".
+    //
+    // 哨兵 value `__edge_<id>__` 走 device_id 路径：查 devices[].edges[]
+    // 找该 edge 对应的 device，把 `device_id="<id>"` 推进 facets。
+    // 这是「这个 edge 没填 task_name，但仍要看它的日志」的唯一可行
+    // 方式（Loki 不会为没 task_name 的日志打 task_name label）。
     if (taskFilter) {
-      out.push({ label: 'task_name', value: taskFilter, op: '=' });
+      const m = /^__edge_(\d+)__$/.exec(taskFilter);
+      if (m) {
+        const eid = m[1];
+        const owning = devices.find((dd) =>
+          (dd.edges ?? []).some((ee) => String(ee.id) === eid),
+        );
+        if (owning) {
+          out.push({ label: 'device_id', value: String(owning.id), op: '=' });
+        } else {
+          out.push({ label: 'device_id', value: '__no_match__', op: '=' });
+        }
+      } else {
+        out.push({ label: 'task_name', value: taskFilter, op: '=' });
+      }
     }
     return out;
   }, [deviceFilter, roleFilter, filenameFilter, taskFilter, devices]);
@@ -442,39 +460,72 @@ export default function LogsPage() {
   }, [showDeleted]);
 
   // 设备下拉 options：客户端渲染，由 SearchableSelect 内部 filter。
-  // label 用 name > hostname > ip 的级联回退；hint 显示次级信息（ip 或
-  // hostname），与 ip LIKE 模糊搜索时区分。已删除行 option label 灰字
-  // "（已删除）"，值保留供过滤。
+  // label 按 ip_address → #id 回退（名字字段不参与主名）。设计动机：
+  //   - d.name 经常是创建时从 edge agent 上报的 hostname 复制的
+  //     （model/edge 注释：edge.Name "when left empty" 会用 hostname 补）
+  //     或者操作员根本没填、就由设备表默认值取得 d.name=hostname。这种
+  //     "d.name == d.hostname" 的「自动填」设备名没有信息量，不该
+  //     作为主名展示。
+  //   - 主名限定用 ip_address（最稳定，跨 hostname 漂移不联），没
+  //     ip 才退到 `#<id>`。
+  //   - d.name / d.hostname / d.id 三者作为 hint 副标题，附在主名
+  //     旁供搜索 / 识别。
+  // 软删行 option label 灰字 "（已删除）"，值保留供过滤。
   const deviceOptions = useMemo<SearchableSelectOption[]>(() => {
     return devices.map((d) => {
-      const name = d.name || d.hostname || d.ip_address || `#${d.id}`;
+      const name = d.ip_address || `#${d.id}`;
       const isDeleted = !!d.deleted_at;
-      const sub = d.ip_address && d.ip_address !== name ? d.ip_address : d.hostname;
+      // hint 优先展示 d.name（如果与 name 不同），其次 hostname，最后
+      // #id。多个次级信息拼接以 · 分隔。
+      const hintParts: string[] = [];
+      if (d.name && d.name !== name) hintParts.push(d.name);
+      if (d.hostname && d.hostname !== name && d.hostname !== d.name) {
+        hintParts.push(d.hostname);
+      }
+      if (hintParts.length === 0 && d.id) hintParts.push(`#${d.id}`);
       return {
         value: String(d.id),
         label: isDeleted ? `${name} (#${d.id})（已删除）` : `${name} (#${d.id})`,
-        hint: sub && sub !== name ? sub : undefined,
+        hint: hintParts.join(' · ') || undefined,
         muted: isDeleted,
       };
     });
   }, [devices]);
 
-  // 任务下拉 options：从 devices[].edges[].task_name 聚合全局去重排序。
-  // 单源：不再调 listEdges，避免双请求 + 数据不一致。如果当前 task
-  // 选择不再在 options 里（例如所有用此 task 的 edge 都下线），重置为
-  // "all" 以避免 UI 与注入 LogQL 不一致。
-  const taskOptions = useMemo<string[]>(() => {
-    const set = new Set<string>();
+  // 任务下拉 options：从所有 device 关联的 edge 聚合（不再过滤空
+  // task_name），label 与 LogQL 注入耦合：
+  //   - task_name 非空 → { value: task_name, label: task_name,
+  //     hint: edge.name }。Loki 注入 task_name="<v>"。
+  //   - task_name 为空 → { value: `__edge_<id>__`（哨兵）, label: (无任务) }，
+  //     注入时由 topbarFacets 切到 device_id="<device_id>" 路径。
+  //
+  // 为什么 task_name 为空时 label 用 (无任务) 而不是 edge.name？
+  // edge.name 在生产环境经常 = hostname（"localhost.localdomain"），
+  // 跟 d.name 同质都是「系统自动填的没信息量的名字」。把它当任务
+  // 名回退会误导 operator。明确显示 (无任务) 让用户知道这条 edge
+  // 创建时没填 task_name，避免继续点击后发现过滤为空。
+  // hint 字段在两个分支都不再传 edge.name（避免误导），仅在
+  // task_name 非空时给 `#<edge.id>` 作为副标识。
+  const taskOptions = useMemo<SearchableSelectOption[]>(() => {
+    const out: SearchableSelectOption[] = [];
     for (const d of devices) {
       for (const e of d.edges ?? []) {
         const tn = (e.task_name || '').trim();
-        if (tn) set.add(tn);
+        if (tn) {
+          out.push({ value: tn, label: tn, hint: `#${e.id}` });
+        } else {
+          out.push({
+            value: `__edge_${e.id}__`,
+            label: `（无任务）· edge #${e.id}`,
+            hint: `device #${d.id}`,
+          });
+        }
       }
     }
-    return Array.from(set).sort();
+    return out.sort((a, b) => a.label.localeCompare(b.label));
   }, [devices]);
   useEffect(() => {
-    if (taskFilter && !taskOptions.includes(taskFilter)) setTaskFilter('');
+    if (taskFilter && !taskOptions.some((o) => o.value === taskFilter)) setTaskFilter('');
   }, [taskOptions, taskFilter]);
 
   // Probe Loki for any indexed labels. If Loki has zero label values
@@ -658,7 +709,9 @@ export default function LogsPage() {
               模糊匹配（由 SearchableSelect 内部 filter）。数据源是
               devices table（不依赖 edge），未装探针的纯 host 也能选。
               软删除行 option 以 zinc-500 灰字 "（已删除）" 呈现，值
-              保留供过滤。"显示已删除" 勾选置于下拉下方，与原布局一致。 */}
+              保留供过滤。"显示已删除" 拆成独立 cell（h-[34px]，跨 5
+              个下拉列同 baseline），避免它把设备列撑高导致
+              items-end 下 select 顶部错位。 */}
           <div className="block w-48 shrink-0">
             <span className="mb-1 block text-[11px] text-zinc-500">{tr("设备", "Device")}</span>
             <SearchableSelect
@@ -668,26 +721,27 @@ export default function LogsPage() {
               placeholder={tr('全部设备', 'All devices')}
               emptyText={tr('无匹配设备', 'No matching devices')}
             />
-            <label className="mt-1 flex cursor-pointer items-center gap-1.5 text-[11px] text-zinc-500">
-              <input
-                type="checkbox"
-                checked={showDeleted}
-                onChange={(e) => setShowDeleted(e.target.checked)}
-                className="h-3 w-3 cursor-pointer rounded border-zinc-700 bg-zinc-950 accent-indigo-500"
-              />
-              {tr('显示已删除', 'Show deleted')}
-            </label>
           </div>
-          {/* Task — 可搜索 combobox，options 从 devices[].edges[].task_name
-              聚合（见上方 taskOptions useMemo）。选中后由 topbarFacets
-              注入 `task_name="<value>"` 到 LogQL。源是 ongrid-edge logs
-              plugin 的 promtail external_labels。task 全局 orthogonal
-              于 device：切换设备不需要重置任务。 */}
+          <label className="flex h-[34px] shrink-0 cursor-pointer items-center gap-1.5 text-[11px] text-zinc-500">
+            <input
+              type="checkbox"
+              checked={showDeleted}
+              onChange={(e) => setShowDeleted(e.target.checked)}
+              className="h-3 w-3 cursor-pointer rounded border-zinc-700 bg-zinc-950 accent-indigo-500"
+            />
+            {tr('显示已删除', 'Show deleted')}
+          </label>
+          {/* Task — 可搜索 combobox，options 从 devices[].edges[] 聚
+              合（见上方 taskOptions useMemo），不再过滤空 task_name
+              的 edge。task_name 非空时 label/value 都用 task_name；为
+              空时用 edge.name 显示，value 编码为 `__edge_<id>__`，
+              注入时由 topbarFacets 切到 device_id 路径。task 全局
+              orthogonal 于 device：切换设备不需要重置任务。 */}
           <div className="block w-48 shrink-0">
             <span className="mb-1 block text-[11px] text-zinc-500">{tr('任务', 'Task')}</span>
             <SearchableSelect
               value={taskFilter}
-              options={taskOptions.map((t) => ({ value: t, label: t }))}
+              options={taskOptions}
               onChange={setTaskFilter}
               placeholder={tr('全部任务', 'All tasks')}
               emptyText={tr('无匹配任务', 'No matching tasks')}

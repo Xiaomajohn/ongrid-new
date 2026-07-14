@@ -134,7 +134,11 @@ export function SearchableSelect({
     <div ref={wrapRef} className={cn('relative w-full', className)}>
       <div
         className={cn(
-          'flex items-center gap-1 rounded-md border bg-zinc-950 pl-2 pr-1.5 py-1 text-xs text-zinc-100 transition-colors',
+          // 高度固定 34px，与 Logs 页面 INPUT_BASE (h-[34px]) 保持一
+          // 致，让设备 / 任务下拉与旁边的角色 / 文件 / unit 下拉视觉
+          // 对齐。py-0 换成 h-[34px] 是为消除不同 line-height 引起的
+          // 高度漂移。
+          'flex h-[34px] items-center gap-1 rounded-md border bg-zinc-950 pl-2 pr-1.5 text-xs text-zinc-100 transition-colors',
           open
             ? 'border-zinc-600 ring-1 ring-zinc-600/30'
             : 'border-zinc-800 hover:border-zinc-700',
@@ -210,7 +214,13 @@ export function SearchableSelect({
                   className={cn(
                     'flex cursor-pointer items-center gap-2 px-2 py-1.5 text-xs',
                     active
-                      ? 'bg-indigo-500/15 text-indigo-100'
+                      // active 文字色用 text-zinc-100 而不是 text-indigo-100：
+                      // index.css 在 html.light 下把 text-zinc-100 覆盖为
+                      // --text（深色），与浅紫背景对比强；text-indigo-100 在
+                      // light mode 下未被覆盖仍是浅蓝紫，与 bg-indigo-500/15
+                      // 背景同色 → 用户只能看到 hint 文字、看不到主名。dark
+                      // mode 下 text-zinc-100（近白）与偏暗紫底对比也清楚。
+                      ? 'bg-indigo-500/15 text-zinc-100'
                       : selected
                         ? 'bg-zinc-800/60 text-zinc-100'
                         : 'text-zinc-200 hover:bg-zinc-900',

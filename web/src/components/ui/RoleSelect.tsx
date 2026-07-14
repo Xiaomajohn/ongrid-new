@@ -50,7 +50,11 @@ export function RoleSelect({
         <select
           value={value}
           onChange={(e) => onChange(e.target.value as RoleFilterValue)}
-          className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 focus:border-zinc-600 focus:outline-none"
+          // h-[34px] 与 Logs 页面 INPUT_BASE / SearchableSelect 对齐，
+          // 让"角色 / 设备 / 任务 / 文件-unit / 时间范围"五个下拉基线
+          // 一致。py-0 + leading-none 避免不同 line-height 引起的
+          // 高度漂移。
+          className="h-[34px] w-full rounded-md border border-zinc-800 bg-zinc-950 px-2 text-xs leading-none text-zinc-100 focus:border-zinc-600 focus:outline-none"
         >
           {options.map((o) => (
             <option key={o.value} value={o.value} className="bg-zinc-900">
