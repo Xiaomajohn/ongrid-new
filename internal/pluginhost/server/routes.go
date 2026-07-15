@@ -64,6 +64,10 @@ func Register(mux chi.Router, h *Handler, logger *slog.Logger) {
 				r.Post("/disable", h.DisableCapability)
 				r.Post("/invoke", h.InvokeCapability)
 			})
+
+			// Asset Server:plugin 前端资源(/api/pluginhost/{id}/assets/{path...})
+			// 走 http.ServeFile,由 sandbox 校验路径不越狱;只允许 GET
+			r.Get("/assets/*", h.AssetPlugin)
 		})
 	})
 }
