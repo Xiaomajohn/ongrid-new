@@ -1,9 +1,9 @@
-// Package model 定义 pluginhost 子系统的持久化实体(GORM 模型)。
+// Package model 定义 pluginhost 子系统的 gorm 持久化实体。
 //
 // 四张表(plugin_instances / plugin_capabilities / plugin_invocations /
-// plugin_audits)与 A 老项目共享同一个 *gorm.DB,经由 Phase 2 的
-// data/migrate.go 调 AutoMigrate 建表;本包只做实体定义,不负责迁移、
-// 不做仓储、不依赖任何 A 子包。
+// plugin_audits)与 A 主项目共享同一个 *gorm.DB,由 Phase 2 的 data/migrate.go
+// 在启动时 AutoMigrate 建表。本包只声明实体,不写仓储、不依赖 A 任何子包,
+// 也不依赖 pluginhost 内部其他子包(model 是叶子节点)。
 package model
 
 import (
@@ -12,28 +12,28 @@ import (
 	"gorm.io/gorm"
 )
 
-// PluginInstance 已安装的单个插件实例。
+// PluginInstance 一个已安装 plugin 的实例行。
 //
-// 一行 = 一个具体的插件实例(同一 PackID + Version 可以安装多次,各自一行)。
-// 通过 (PackID, TenantID) 复合唯一索引保证同一租户下同一插件包不重复登记。
+// PackID 列语义:直接存储 plugin.json.name(PascalCase,如 "AlarmPlugin"),
+// 不做 slug 转换,不拼接 version/uuid 后缀;磁盘目录名 =
+// /var/lib/ongrid/plugins/<PackID>/,与 PackID 完全相等;API URL 段
+// /plugins/<PackID>/... 也直接用 PackID。任何代码路径都不允许重写 pack_id。
 type PluginInstance struct {
 	gorm.Model
-	TenantID         uint64     `gorm:"index"` // 租户隔离
-	PackID           string     `gorm:"size:128;uniqueIndex:idx_pack_tenant,priority:1"`
-	Version          string     `gorm:"size:64"`  // 语义化版本
-	Source           string     `gorm:"size:64"`  // 安装来源:local / tarball / git / remote / inproc
-	InstallPath      string     `gorm:"size:512"` // 物理安装路径(根目录)
-	ManifestSHA256   string     `gorm:"size:64"`  // manifest 哈希,用于完整性校验
-	SignatureState   string     `gorm:"size:32"`  // 签名校验状态:unsigned / verified / failed
-	Enabled          bool       `gorm:"default:true;index"`
-	HealthStatus     string     `gorm:"size:32"` // 健康状态:healthy / degraded / down / unknown
-	LastHealthAt     *time.Time // 最近一次健康探测时间
-	CapabilitiesJSON string     `gorm:"type:text"` // 能力清单的 JSON 快照(冗余,便于审计)
-	BindingsJSON     string     `gorm:"type:text"` // 绑定关系(vault 引用、edge target 等)JSON
-	UIMetadataJSON   string     `gorm:"type:text"` // UI 展示元数据 JSON
-	Format           string     `gorm:"size:32"`   // 插件格式:pluginhost / claude / openclaw / bare_skills
-	Transport        string     `gorm:"size:32"`   // 运行传输方式:subprocess / http / inproc
-	TimeoutSeconds   int        `gorm:"default:30"`
+	TenantID         uint64 `gorm:"index"`
+	PackID           string `gorm:"size:128;uniqueIndex:idx_pack_tenant"` // = plugin.json.name (PascalCase, 如 "AlarmPlugin");磁盘目录名 = PackID,无后缀
+	UUID             string `gorm:"size:64;index"`
+	Version          string `gorm:"size:32"`
+	Source           string `gorm:"size:32"` // "tarball" | "filesystem"
+	InstallPath      string `gorm:"size:512"` // = "/var/lib/ongrid/plugins/<PackID>/",与 PackID 拼接
+	ManifestSHA256   string `gorm:"size:64"`  // 可选,本次不动 sha 校验,留空
+	SignatureState   string `gorm:"size:16"`  // "unsigned" | "valid" | "invalid"
+	Enabled          bool   `gorm:"default:true"`
+	HealthStatus     string `gorm:"size:32"`
+	LastHealthAt     *time.Time
+	CapabilitiesJSON string `gorm:"type:text"` // 序列化 []Capability
+	BindingsJSON     string `gorm:"type:text"`
+	UIMetadataJSON   string `gorm:"type:text"`
 }
 
 // TableName 指定 GORM 表名。

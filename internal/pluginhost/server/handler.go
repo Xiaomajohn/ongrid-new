@@ -363,11 +363,13 @@ func parseIntQuery(r *http.Request, key string, def int) int {
 //
 // TenantID 直接从 ctx 取(X-Tenant-ID);UserID 暂走 X-User-ID
 // header(P1 阶段无 auth,默认 0);Component 默认 "web"。
+//
+// 注意:TraceID 不在 rtp.Caller 里(TraceID 是 rtp.Request 的字段,通过
+// InvokeOptions 注入),不要混在一起。
 func buildCaller(r *http.Request) rtp.Caller {
 	c := rtp.Caller{
 		Component: "web",
 		TenantID:  TenantIDFrom(r.Context()),
-		TraceID:   RequestIDFrom(r.Context()),
 	}
 	if v := r.Header.Get("X-User-ID"); v != "" {
 		if n, err := strconv.ParseUint(v, 10, 64); err == nil {

@@ -119,57 +119,32 @@ func (r *Router) Invoke(
 	params json.RawMessage,
 	opts InvokeOptions,
 ) (rtp.Response, error) {
-	// 把 uint64 pluginID 规整成 registry / pool 内部使用的 string key。
-	// Phase 1.5 暂时以 plugin instance 的 ID 字符串化为 key;Phase 2
-	// 调整 registry 使 caps map 直接以 ID 为 key 后,此处无需变动。
-	pluginKey := fmt.Sprintf("%d", pluginID)
+	if pluginID == 0 {
+		return rtp.Response{}, ErrUnknownCapability
+	}
 
-	// 1. Lookup capability
-	cap, ok := r.reg.Lookup(pluginKey, capName)
+	// 1. Lookup capability(registry 接 uint64 instanceID + capName 二元组查)
+	cap, ok := r.reg.LookupCapabilityByInstanceID(pluginID, capName)
 	if !ok {
 		return rtp.Response{}, ErrUnknownCapability
 	}
 
 	// 2. 找 plugin instance 并检查 Enabled
-	inst := findPlugin(r.reg, pluginKey, pluginID)
-	if inst == nil {
+	inst, ok := r.reg.LookupByID(pluginID)
+	if !ok {
 		return rtp.Response{}, ErrUnknownCapability
 	}
 	if !inst.Enabled {
 		return rtp.Response{}, ErrPluginDisabled
 	}
 
-	// 3. Pool Get runtime
-	rt, ok := r.pool.Get(pluginKey)
+	// 3. Pool Get runtime(Pool key 是 packID 字符串,从 instance 取)
+	rt, ok := r.pool.Get(inst.PackID)
 	if !ok {
 		return rtp.Response{}, ErrRuntimeUnavailable
 	}
 
-	// 4. 构造 rtp.PluginInstance(给 runtime 用)。
-	// Entry 字段 Phase 1 暂时用 InstallPath 兜底,Phase 2 接入 manifest.entry
-	// 后由 registry.PluginInstance.InstallPath + cap.Metadata["entry"] 拼接。
-	rtpPlugin := &rtp.PluginInstance{
-		ID:             inst.ID,
-		TenantID:       inst.TenantID,
-		PackID:         inst.PackID,
-		Version:        inst.Version,
-		InstallPath:    inst.InstallPath,
-		Entry:          inst.InstallPath,
-		ManifestSHA256: inst.ManifestSHA256,
-		Enabled:        inst.Enabled,
-		TimeoutSeconds: defaultTimeoutSeconds,
-	}
-
-	// 构造 rtp.Capability(只透传必要字段,Metadata 在 hostcall 时再用)。
-	rtpCap := &rtp.Capability{
-		PluginID: cap.PluginID,
-		Kind:     cap.Kind,
-		Name:     cap.Name,
-		Class:    cap.Class,
-		Schema:   cap.Schema,
-	}
-
-	// 5. 构造 rtp.Request
+	// 4. 构造 rtp.Request
 	deadline := opts.Deadline
 	if deadline.IsZero() {
 		deadline = time.Now().Add(time.Duration(defaultTimeoutSeconds) * time.Second)
@@ -180,11 +155,13 @@ func (r *Router) Invoke(
 		Params:   params,
 		Caller:   opts.Caller,
 		Deadline: deadline,
+		TraceID:  opts.TraceID,
 	}
 
-	// 6. 调 runtime 并度量 latency
+	// 5. 调 runtime 并度量 latency;直接传 registry.PluginInstance 与 registry.Capability
+	//(runtime.Runtime 接口按 plan §6.1 接受 registry 类型)
 	start := time.Now()
-	resp, err := rt.Invoke(ctx, rtpPlugin, rtpCap, req)
+	resp, err := rt.Invoke(ctx, inst, cap, req)
 	latency := time.Since(start)
 
 	// audit 回调(若有)同步执行;回调内部 panic 由调用方负责 recover。
@@ -196,25 +173,6 @@ func (r *Router) Invoke(
 	}
 
 	return resp, err
-}
-
-// findPlugin 在 registry 中按 pluginKey 查找 plugin instance。
-//
-// Phase 1.5 兼容策略:优先匹配 PackID == pluginKey(registry 内部
-// 当前用 packKey(tenantID, PackID) 作 caps map key1,Phase 1 实现的
-// packKey 直接返回 PackID);若不命中再尝试 ID == pluginID(uint64 严格相等)。
-//
-// 任一命中即返回。找不到返 nil。
-func findPlugin(reg *registry.Registry, pluginKey string, pluginID uint64) *registry.PluginInstance {
-	for _, p := range reg.List() {
-		if p.PackID == pluginKey {
-			return p
-		}
-		if p.ID == pluginID {
-			return p
-		}
-	}
-	return nil
 }
 
 // generateReqID 生成形如 "inv-<unixnano>-<rand4>" 的请求 ID。

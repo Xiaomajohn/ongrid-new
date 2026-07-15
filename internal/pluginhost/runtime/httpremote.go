@@ -13,162 +13,158 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/ongridio/ongrid/internal/pluginhost/registry"
 )
 
-// 默认熔断参数。
+// 默认熔断 + 客户端超时参数。
 const (
-	defaultBreakerThreshold    = 5
-	defaultBreakerOpenDuration = 30 * time.Second
-	defaultHTTPTimeout         = 30 * time.Second
+	defaultHTTPTimeout          = 30 * time.Second
+	circuitBreakerFailThreshold = 5 // 连续失败次数,触发打开
+	circuitBreakerOpenDuration  = 30 * time.Second
 )
 
-// ErrCircuitOpen 熔断器打开,请求被快速失败。
-var ErrCircuitOpen = errors.New("http runtime: circuit open")
+// ErrBreakerOpen 熔断器打开期间调用被快速失败。
+var ErrBreakerOpen = errors.New("http runtime: circuit breaker open")
 
-// ErrRemote5xx 远程 5xx 响应(计入熔断失败计数)。
-var ErrRemote5xx = errors.New("http runtime: remote 5xx")
-
-// CircuitBreaker 简易熔断器。
-//
-// 状态机:
-//   - Closed:failureCount < threshold,所有请求放行。
-//   - Open:failureCount >= threshold,openUntil 之前所有请求拒绝。
-//   - Half-Open:openUntil 过期后下一次 Allow 进入探测期,放行 1 次;
-//     探测成功 → RecordSuccess 关闭;探测失败 → RecordFailure 重新打开。
-//
-// 计数器只对 transport 层错误(5xx / 网络错误)递增,4xx 等客户端错误不计数。
-type CircuitBreaker struct {
-	mu            sync.Mutex
-	failureCount  int
-	openUntil     time.Time
-	halfOpenToken bool
-	threshold     int           // 触发打开的连续失败次数,默认 5
-	openDuration  time.Duration // 打开后保持时间,默认 30s
-}
-
-// NewCircuitBreaker 构造默认配置的熔断器(threshold=5,openDuration=30s)。
-func NewCircuitBreaker() *CircuitBreaker {
-	return &CircuitBreaker{
-		threshold:    defaultBreakerThreshold,
-		openDuration: defaultBreakerOpenDuration,
-	}
-}
-
-// Allow 判断当前请求是否被允许。
-//
-//   - Open 期内直接拒绝(openUntil > now 且无探测 token);
-//   - Open 期刚结束(now > openUntil)→ 进入 Half-Open,放行 1 次探测;
-//   - Closed / 已冷却 → 直接放行。
-func (cb *CircuitBreaker) Allow() bool {
-	cb.mu.Lock()
-	defer cb.mu.Unlock()
-	now := time.Now()
-	if now.Before(cb.openUntil) {
-		// Open 期内的探测 token(用于半开)
-		if cb.halfOpenToken {
-			cb.halfOpenToken = false
-			return true
-		}
-		return false
-	}
-	// openUntil 已过:进入 Half-Open,发放 1 个探测 token,重置计数。
-	if !cb.openUntil.IsZero() {
-		cb.halfOpenToken = true
-		cb.openUntil = time.Time{}
-		cb.failureCount = 0
-		return true
-	}
-	return true
-}
-
-// RecordSuccess 记录一次成功:清零失败计数、关闭熔断。
-func (cb *CircuitBreaker) RecordSuccess() {
-	cb.mu.Lock()
-	defer cb.mu.Unlock()
-	cb.failureCount = 0
-	cb.openUntil = time.Time{}
-	cb.halfOpenToken = false
-}
-
-// RecordFailure 记录一次失败。Half-Open 探测失败立即重新打开;
-// Closed 状态累加计数,达到阈值后打开。
-func (cb *CircuitBreaker) RecordFailure() {
-	cb.mu.Lock()
-	defer cb.mu.Unlock()
-	// Half-Open 探测失败:无论阈值直接重开,确保熔断"真起作用"。
-	if cb.halfOpenToken == false && !cb.openUntil.IsZero() {
-		// 不可能进入此分支(openUntil 重置后才设 halfOpenToken),保留防御
-	}
-	if !cb.openUntil.IsZero() && cb.failureCount >= cb.threshold {
-		// 已开,再失败只是续期 openUntil
-		cb.openUntil = time.Now().Add(cb.openDuration)
-		cb.halfOpenToken = false
-		return
-	}
-	cb.failureCount++
-	if cb.failureCount >= cb.threshold {
-		cb.openUntil = time.Now().Add(cb.openDuration)
-		cb.halfOpenToken = false
-	}
-}
-
-// httpEnvelope 是 HTTP 远端的 JSON-RPC 请求体。
-type httpEnvelope struct {
+// httpRequest 是 POST {URL}/invoke 的请求 body。
+type httpRequest struct {
 	ID     string          `json:"id"`
 	Cap    string          `json:"cap"`
 	Params json.RawMessage `json:"params,omitempty"`
 }
 
-// httpResponseFrame 是 HTTP 远端返回的 JSON 帧。
+// httpResponseFrame 是 2xx 响应的解析形态。
 type httpResponseFrame struct {
 	ID     string          `json:"id"`
 	Result json.RawMessage `json:"result,omitempty"`
 	Error  string          `json:"error,omitempty"`
 }
 
+// CircuitBreaker 简易计数器式熔断器。
+//
+// 状态机(见 plan §9 + plan §17 可观测性):
+//
+//   - Closed(failures < threshold):
+//       全部放行;RecordFailure 把 failures++。
+//   - Open(failures >= threshold 且 time.Now() < openUntil):
+//       全部拒绝 → 返 ErrBreakerOpen;探测期内不计数(已在开期)。
+//   - Half-Open(time.Now() >= openUntil,failures >= threshold):
+//       放行 1 次探测;探测成功 → RecordSuccess 关闭;
+//       探测失败 → RecordFailure 重新打开(openUntil 续期)。
+//
+// 计数器只对 transport 层错误(5xx / 网络错误 / 解析失败)递增;
+// 4xx 等客户端错误(参数错 / 鉴权错)不计数。
+type CircuitBreaker struct {
+	mu        sync.Mutex
+	failures  int
+	openUntil time.Time
+}
+
+// allow 判断本次调用是否被允许;true 表示可以发出请求。
+//
+// 副作用:进入 Half-Open 时**消耗唯一探测 token**(用一个微秒
+// 级 openUntil 标记),防止探测并发跑飞。
+func (cb *CircuitBreaker) allow() bool {
+	if cb == nil {
+		return true
+	}
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	now := time.Now()
+
+	// failures 还在阈值下 → Closed,无条件放行
+	if cb.failures < circuitBreakerFailThreshold {
+		return true
+	}
+
+	// failures 触顶,但开期未到 → Open,直接拒绝
+	if now.Before(cb.openUntil) {
+		return false
+	}
+
+	// Open 期刚结束(openUntil 已过)→ 转入 Half-Open,放行 1 次探测;
+	// 将 openUntil 置为 now+1us 标记探测已发,后续并发请求仍判 Open。
+	cb.openUntil = now.Add(time.Microsecond)
+	return true
+}
+
+// recordFailure 失败回调:递增 + 触顶时打开 openUntil。
+func (cb *CircuitBreaker) recordFailure() {
+	if cb == nil {
+		return
+	}
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.failures++
+	if cb.failures >= circuitBreakerFailThreshold {
+		cb.openUntil = time.Now().Add(circuitBreakerOpenDuration)
+	}
+}
+
+// recordSuccess 成功回调:清零失败计数 + 关闭熔断。
+func (cb *CircuitBreaker) recordSuccess() {
+	if cb == nil {
+		return
+	}
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.failures = 0
+	cb.openUntil = time.Time{}
+}
+
 // HTTPRemoteRuntime 通过 HTTPS + HMAC-SHA256 签名与远程 C 插件通信,
 // 自带熔断保护。
 //
-// 协议:POST {URL}/invoke,body 为 JSON envelope;
-// 头部 X-Plugin-Signature = hex(HMAC-SHA256(Secret, body));
-// 响应 body 为 JSON,字段同 stdio。
+// 协议(plan §9 + §7.5):
+//   - method:POST {URL}/invoke
+//   - body:JSON envelope {"id":...,"cap":...,"params":...}
+//   - headers:
+//        X-Plugin-ID        = plugin.PackID
+//        X-Plugin-Signature = hex(HMAC-SHA256(Secret, body))
+//        X-Trace-ID         = req.TraceID
+//   - 响应:JSON {"id":...,"result":...} 或 {"id":...,"error":...}
+//   - 超时:30s(可注入 Client 自定义 timeout)
 type HTTPRemoteRuntime struct {
-	URL     string        // 远端基础 URL(如 https://plugin.example.com)
-	Secret  string        // HMAC 共享密钥
-	Timeout time.Duration // 单次调用超时,默认 30s
-	Client  *http.Client  // 可由调用方注入自定义 transport
-	Breaker *CircuitBreaker
+	URL     string          // 远端基础 URL(如 https://plugin.example.com)
+	Secret  string          // HMAC 共享密钥
+	Client  *http.Client    // http 客户端;默认 30s 超时
+	Breaker *CircuitBreaker // 熔断器;可注入自定义
 }
 
-// NewHTTPRemoteRuntime 构造 HTTP remote runtime;timeout <= 0 走默认 30s;
-// Breaker 缺省自动 NewCircuitBreaker。
-func NewHTTPRemoteRuntime(url, secret string, timeout time.Duration) *HTTPRemoteRuntime {
-	if timeout <= 0 {
-		timeout = defaultHTTPTimeout
-	}
+// NewHTTPRemoteRuntime 构造 HTTP remote runtime。
+//
+// Client 默认 30s 超时;Breaker 缺省自动初始化一个空熔断器
+// (默认阈值 5 / 开期 30s)。
+func NewHTTPRemoteRuntime(url string, secret string) *HTTPRemoteRuntime {
 	return &HTTPRemoteRuntime{
 		URL:     url,
 		Secret:  secret,
-		Timeout: timeout,
-		Client:  &http.Client{Timeout: timeout},
-		Breaker: NewCircuitBreaker(),
+		Client:  &http.Client{Timeout: defaultHTTPTimeout},
+		Breaker: &CircuitBreaker{},
 	}
 }
 
 // Invoke 同步调用远端 C 插件的 capability。
 //
-// 错误返回语义:
-//   - ErrCircuitOpen:熔断打开,未发出请求。
-//   - ErrTimeout:ctx 超时或客户端 timeout。
-//   - ErrRemote5xx:远端返回 5xx,已计入熔断失败。
-//   - 其他 fmt.Errorf:网络错误、4xx 响应、解析错误等。
-func (h *HTTPRemoteRuntime) Invoke(ctx context.Context, plugin *PluginInstance, cap *Capability, req Request) (Response, error) {
-	if h.Breaker != nil && !h.Breaker.Allow() {
-		return Response{}, ErrCircuitOpen
+// 错误归类:
+//   - ErrBreakerOpen:熔断打开,未发出请求。
+//   - 其他 fmt.Errorf:网络错误 / 4xx / 5xx / 解析错误等。
+//
+// 熔断计数语义:
+//   - 5xx → 计入失败;
+//   - 网络错误(io.ErrUnexpectedEOF / timeout / connection refused)
+//     → 计入失败;
+//   - 4xx → 不计入失败(调用方参数错误,不是 transport 故障);
+//   - 解析失败(body 不是合法 envelope)→ 计入失败。
+func (h *HTTPRemoteRuntime) Invoke(ctx context.Context, plugin *registry.PluginInstance, cap *registry.Capability, req Request) (Response, error) {
+	// 0. 熔断检查
+	if !h.Breaker.allow() {
+		return Response{}, ErrBreakerOpen
 	}
 
-	// 1. 构造 envelope body
-	env := httpEnvelope{ID: req.ID, Cap: req.CapName, Params: req.Params}
+	// 1. 构造请求 body
+	env := httpRequest{ID: req.ID, Cap: req.CapName, Params: req.Params}
 	body, err := json.Marshal(env)
 	if err != nil {
 		return Response{}, fmt.Errorf("http runtime: marshal envelope: %w", err)
@@ -179,68 +175,60 @@ func (h *HTTPRemoteRuntime) Invoke(ctx context.Context, plugin *PluginInstance, 
 	mac.Write(body)
 	sig := hex.EncodeToString(mac.Sum(nil))
 
-	// 3. 构造请求
+	// 3. 构造请求(30s timeout via context)
+	httpCtx, cancel := context.WithTimeout(ctx, defaultHTTPTimeout)
+	defer cancel()
 	endpoint := h.URL + "/invoke"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(httpCtx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return Response{}, fmt.Errorf("http runtime: new request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-Plugin-ID", plugin.PackID)
 	httpReq.Header.Set("X-Plugin-Signature", sig)
-	httpReq.Header.Set("X-Request-ID", req.ID)
+	httpReq.Header.Set("X-Trace-ID", req.TraceID)
 
-	// 4. 执行
+	// 4. 发送
 	resp, err := h.Client.Do(httpReq)
 	if err != nil {
-		if h.Breaker != nil {
-			h.Breaker.RecordFailure()
-		}
-		if ctx.Err() == context.DeadlineExceeded {
-			return Response{}, ErrTimeout
-		}
+		h.Breaker.recordFailure()
 		return Response{}, fmt.Errorf("http runtime: do request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	// 5. 状态码分发
 	if resp.StatusCode >= 500 {
-		if h.Breaker != nil {
-			h.Breaker.RecordFailure()
-		}
-		return Response{}, ErrRemote5xx
+		// 5xx:计入熔断失败计数
+		h.Breaker.recordFailure()
+		raw, _ := io.ReadAll(resp.Body)
+		return Response{}, fmt.Errorf("http runtime: 5xx status %d: %s", resp.StatusCode, string(raw))
 	}
 	if resp.StatusCode >= 400 {
-		// 4xx 是客户端错误(参数 / 鉴权 / 路由错),不计入熔断。
+		// 4xx:客户端错误,不计入熔断
 		raw, _ := io.ReadAll(resp.Body)
-		return Response{}, fmt.Errorf("http runtime: status %d: %s", resp.StatusCode, string(raw))
+		return Response{}, fmt.Errorf("http runtime: 4xx status %d: %s", resp.StatusCode, string(raw))
 	}
 
 	// 6. 解析 2xx 响应
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		if h.Breaker != nil {
-			h.Breaker.RecordFailure()
-		}
+		h.Breaker.recordFailure()
 		return Response{}, fmt.Errorf("http runtime: read body: %w", err)
 	}
 	var frame httpResponseFrame
 	if err := json.Unmarshal(raw, &frame); err != nil {
-		if h.Breaker != nil {
-			h.Breaker.RecordFailure()
-		}
-		return Response{}, fmt.Errorf("http runtime: unmarshal response: %w", err)
+		h.Breaker.recordFailure()
+		return Response{}, fmt.Errorf("http runtime: unmarshal response: %w; raw: %s", err, string(raw))
 	}
-	if h.Breaker != nil {
-		h.Breaker.RecordSuccess()
-	}
+
+	// 7. 成功:清零失败计数
+	h.Breaker.recordSuccess()
 	return Response{ID: frame.ID, Result: frame.Result, Error: frame.Error}, nil
 }
 
-// Close 关闭底层 http.Client 的空闲连接(CloseIdleConnections 不会返错)。
+// Close 是 no-op:HTTP transport 不持有长生命周期资源;连接池
+// 由 http.Client 自身管理。若需主动释放空闲连接可后续扩展
+// 为 client.CloseIdleConnections。
 func (h *HTTPRemoteRuntime) Close() error {
-	if h.Client != nil {
-		h.Client.CloseIdleConnections()
-	}
 	return nil
 }

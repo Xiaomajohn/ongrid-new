@@ -1,187 +1,282 @@
-// Package registry 是 pluginhost 的进程级能力注册表。
-//
-// 一行 PluginInstance = 一份 manifest 解析结果 + 已经过 sandbox 校验,
-// 每个 instance 持有一组 Capability;Registry 提供 Register / Unregister /
-// Lookup / ListByKind / List / SetEnabled 等基本操作。
-//
-// Registry 本身是并发安全的,但调用方在批量改完后应通过 SetEnabled /
-// Unregister 显式发变更事件给 invoke router(避免同进程内 A 端的 adapter
-// 与注册表漂移)。
-//
-// 本包不依赖 A 的任何子包,纯数据结构 + 互斥锁。
 package registry
 
 import (
 	"encoding/json"
 	"errors"
+	"sort"
 	"sync"
+	"time"
 )
 
-// ErrDuplicatePlugin:PackID 已被注册。
-var ErrDuplicatePlugin = errors.New("registry: duplicate plugin id")
+var (
+	ErrDuplicate = errors.New("registry: duplicate plugin")
+	ErrNotFound  = errors.New("registry: plugin not found")
+)
 
-// PluginInstance 已注册的插件实例(已通过 sandbox 校验,可在 host 加载)。
 type PluginInstance struct {
 	ID             uint64
 	TenantID       uint64
 	PackID         string
 	Version        string
-	Source         string // local / tarball / git / remote / inproc
+	UUID           string
+	Source         string
 	InstallPath    string
 	ManifestSHA256 string
+	SignatureState string
 	Enabled        bool
-	HealthStatus   string // healthy / degraded / down / unknown
+	HealthStatus   string
+	LastHealthAt   *time.Time
 	Capabilities   []*Capability
 }
 
-// Capability 单个能力点描述。
-//
-// 与 manifest.Capability 字段集接近(都是 plugin 的能力视图),但独立
-// 维护:registry 关心"已注册后的视图",manifest 关心"磁盘上的源数据";
-// 二者之间由 Phase 2 的 biz/adopt 流程转译。
 type Capability struct {
 	PluginID string
 	Kind     string
 	Name     string
-	Class    string // safe / mutating / dangerous
+	Class    string
 	Schema   json.RawMessage
 	Metadata map[string]any
 }
 
-// Registry 进程级注册表。mu 保护 plugins / caps;读多写少,RLock 优先。
 type Registry struct {
 	mu      sync.RWMutex
-	plugins map[string]*PluginInstance        // key = packKey(tenantID, packID)
-	caps    map[string]map[string]*Capability // key1 = pluginID(=packKey), key2 = cap.Name
+	plugins map[string]*PluginInstance
+	caps    map[string]map[string]*Capability
 }
 
-// NewRegistry 构造空注册表。
-func NewRegistry() *Registry {
+func New() *Registry {
 	return &Registry{
 		plugins: make(map[string]*PluginInstance),
 		caps:    make(map[string]map[string]*Capability),
 	}
 }
 
-// Register 注入一个新 instance;同 PackID 已存在则返 ErrDuplicatePlugin。
-//
-// 注册成功的同时,把每个 Capability 写入 caps 索引(以 pluginID + cap.Name
-// 为 key),Lookup / ListByKind 走索引,不再遍历 plugins。
-func (r *Registry) Register(p *PluginInstance) error {
-	if p == nil {
-		return errors.New("registry: nil plugin")
-	}
-	if p.PackID == "" {
-		return errors.New("registry: empty pack id")
+func (r *Registry) Register(inst *PluginInstance) error {
+	if inst == nil || inst.PackID == "" {
+		return errors.New("registry: invalid plugin")
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	key := packKey(p.TenantID, p.PackID)
-	if _, exists := r.plugins[key]; exists {
-		return ErrDuplicatePlugin
-	}
-
-	// 浅拷贝 instance + capability slice,避免外部修改穿透。
-	stored := *p
-	if p.Capabilities != nil {
-		caps := make([]*Capability, len(p.Capabilities))
-		for i, c := range p.Capabilities {
-			cc := *c
-			if cc.PluginID == "" {
-				cc.PluginID = key
-			}
-			caps[i] = &cc
+	stored := cloneInstance(inst)
+	for _, cap := range stored.Capabilities {
+		if cap.PluginID == "" {
+			cap.PluginID = stored.PackID
 		}
-		stored.Capabilities = caps
 	}
-	r.plugins[key] = &stored
 
-	capMap := make(map[string]*Capability, len(stored.Capabilities))
-	for _, c := range stored.Capabilities {
-		capMap[c.Name] = c
-	}
-	r.caps[key] = capMap
-	return nil
-}
-
-// Unregister 摘除 pluginID 的 instance 与全部 capabilities。
-// pluginID 不存在返 registry: plugin not found。
-func (r *Registry) Unregister(pluginID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
-	if _, ok := r.plugins[pluginID]; !ok {
-		return errors.New("registry: plugin not found")
+	if _, exists := r.plugins[stored.PackID]; exists {
+		return ErrDuplicate
 	}
-	delete(r.plugins, pluginID)
-	delete(r.caps, pluginID)
+
+	r.plugins[stored.PackID] = stored
+	capMap := make(map[string]*Capability, len(stored.Capabilities))
+	for _, cap := range stored.Capabilities {
+		if cap != nil {
+			capMap[cap.Name] = cap
+		}
+	}
+	r.caps[stored.PackID] = capMap
 	return nil
 }
 
-// Lookup 按 (pluginID, capName) 取 capability,不存在返 (nil, false)。
-func (r *Registry) Lookup(pluginID, capName string) (*Capability, bool) {
+func (r *Registry) Unregister(packID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.plugins[packID]; !exists {
+		return ErrNotFound
+	}
+	delete(r.plugins, packID)
+	delete(r.caps, packID)
+	return nil
+}
+
+func (r *Registry) Lookup(packID string) (*PluginInstance, bool) {
+	r.mu.RLock()
+	inst, exists := r.plugins[packID]
+	if !exists {
+		r.mu.RUnlock()
+		return nil, false
+	}
+	copy := cloneInstance(inst)
+	r.mu.RUnlock()
+	return copy, true
+}
+
+// LookupCapability 在指定 packID 下按 capName 查找单个 capability。
+//
+// 用于 invoke/router:Router 拿到 (packID, capName) 二元组后,先拿到 capability,
+// 再用 packing 的 PluginInstance 喂给 runtime.Runtime.Invoke。
+//
+// 不存在返 (nil, false);成功返深拷贝,调用方可安全修改 Schema/Metadata。
+func (r *Registry) LookupCapability(packID, capName string) (*Capability, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-
-	m, ok := r.caps[pluginID]
+	byName, ok := r.caps[packID]
 	if !ok {
 		return nil, false
 	}
-	c, ok := m[capName]
-	return c, ok
+	cap, ok := byName[capName]
+	if !ok {
+		return nil, false
+	}
+	return cloneCapability(cap), true
 }
 
-// ListByKind 返回所有 Kind 等于 kind 的 capability(用于 Phase 3 adapter
-// 按 kind 批量注入到 A 子系统)。
-func (r *Registry) ListByKind(kind string) []*Capability {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	out := make([]*Capability, 0)
-	for _, m := range r.caps {
-		for _, c := range m {
-			if c.Kind == kind {
-				out = append(out, c)
+// SetEnabled 翻转某个 packID 对应实例的启用标志。返回 ErrNotFound 时
+// 调用方需要区分"实例不存在"vs"持久层失败",自行处理。
+func (r *Registry) SetEnabled(packID string, enabled bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	inst, ok := r.plugins[packID]
+	if !ok {
+		return ErrNotFound
+	}
+	copy := *inst
+	copy.Enabled = enabled
+	r.plugins[packID] = &copy
+	if byName, ok := r.caps[packID]; ok {
+		for _, cap := range byName {
+			if cap != nil {
+				capCopy := *cap
+				r.caps[packID][cap.Name] = &capCopy
 			}
 		}
 	}
-	return out
-}
-
-// List 返回当前所有 instance 的快照(切片内 instance 指针指向内部数据,
-// 调用方只读,不可修改)。
-func (r *Registry) List() []*PluginInstance {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	out := make([]*PluginInstance, 0, len(r.plugins))
-	for _, p := range r.plugins {
-		out = append(out, p)
-	}
-	return out
-}
-
-// SetEnabled 仅修改 instance 的 Enabled 字段,不删除注册项(Enable /
-// Disable 操作的语义)。
-//
-// 调用方在切完 Enabled 后应同步通知 invoke router / adapter 重新分发。
-func (r *Registry) SetEnabled(pluginID string, enabled bool) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	p, ok := r.plugins[pluginID]
-	if !ok {
-		return errors.New("registry: plugin not found")
-	}
-	p.Enabled = enabled
 	return nil
 }
 
-// packKey 构造注册表内部 key。当前仅用 PackID;Phase 2 起接租户隔离
-// 时,把 TenantID 前缀拼入。
-func packKey(tenantID uint64, packID string) string {
-	_ = tenantID
-	return packID
+// LookupByID 通过 PluginInstance.ID(uint64 PK,从 model.PluginInstance.DB)查找实例。
+//
+// Registry 内部用 packID 字符串作 map key,但外部 API(pluginhost.Install
+// 返回 uint64 instanceID 后)需要 uint64 主键查找,用于 lifecycle 等回路。
+// O(N) 线性扫描:N 是 plugin 总量,Phase 2 接 data 屉可替换为 reverse index。
+func (r *Registry) LookupByID(id uint64) (*PluginInstance, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, inst := range r.plugins {
+		if inst != nil && inst.ID == id {
+			return cloneInstance(inst), true
+		}
+	}
+	return nil, false
+}
+
+// SetEnabledByID 通过 uint64 主键启用/关闭 plugin instance。
+//
+// 与 SetEnabled 同语义,输入参数是 uint64 主键。返 ErrNotFound 时
+// lifecycle 层需区分"实例不存在"vs"persistence 失败"。
+func (r *Registry) SetEnabledByID(id uint64, enabled bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for packID, inst := range r.plugins {
+		if inst == nil || inst.ID != id {
+			continue
+		}
+		inst.Enabled = enabled
+		if byName, ok := r.caps[packID]; ok {
+			for _, cap := range byName {
+				if cap != nil {
+					capCopy := *cap
+					r.caps[packID][cap.Name] = &capCopy
+				}
+			}
+		}
+		return nil
+	}
+	return ErrNotFound
+}
+
+// LookupCapabilityByInstanceID 跨 uint64 instanceID + capName 查找 capability。
+//
+// 是 LookupCapability + LookupByID 的复合包装,提供给 lifecycle / server 等不
+// 愿意先 Lookup 实例再查 cap 的调用方,避免两次遍历。
+func (r *Registry) LookupCapabilityByInstanceID(instanceID uint64, capName string) (*Capability, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for packID, inst := range r.plugins {
+		if inst == nil || inst.ID != instanceID {
+			continue
+		}
+		byName, ok := r.caps[packID]
+		if !ok {
+			return nil, false
+		}
+		cap, ok := byName[capName]
+		if !ok {
+			return nil, false
+		}
+		return cloneCapability(cap), true
+	}
+	return nil, false
+}
+
+func (r *Registry) ListByKind(kind string) []*Capability {
+	r.mu.RLock()
+	out := make([]*Capability, 0)
+	for _, byName := range r.caps {
+		for _, cap := range byName {
+			if cap != nil && cap.Kind == kind {
+				out = append(out, cloneCapability(cap))
+			}
+		}
+	}
+	r.mu.RUnlock()
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].PluginID == out[j].PluginID {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].PluginID < out[j].PluginID
+	})
+	return out
+}
+
+func (r *Registry) List() []*PluginInstance {
+	r.mu.RLock()
+	out := make([]*PluginInstance, 0, len(r.plugins))
+	for _, inst := range r.plugins {
+		out = append(out, cloneInstance(inst))
+	}
+	r.mu.RUnlock()
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].PackID < out[j].PackID
+	})
+	return out
+}
+
+func cloneInstance(inst *PluginInstance) *PluginInstance {
+	if inst == nil {
+		return nil
+	}
+	copy := *inst
+	if inst.LastHealthAt != nil {
+		lastHealthAt := *inst.LastHealthAt
+		copy.LastHealthAt = &lastHealthAt
+	}
+	if inst.Capabilities != nil {
+		copy.Capabilities = make([]*Capability, 0, len(inst.Capabilities))
+		for _, cap := range inst.Capabilities {
+			if cap != nil {
+				copy.Capabilities = append(copy.Capabilities, cloneCapability(cap))
+			}
+		}
+	}
+	return &copy
+}
+
+func cloneCapability(cap *Capability) *Capability {
+	if cap == nil {
+		return nil
+	}
+	copy := *cap
+	if cap.Schema != nil {
+		copy.Schema = append(json.RawMessage(nil), cap.Schema...)
+	}
+	if cap.Metadata != nil {
+		copy.Metadata = make(map[string]any, len(cap.Metadata))
+		for key, value := range cap.Metadata {
+			copy.Metadata[key] = value
+		}
+	}
+	return &copy
 }

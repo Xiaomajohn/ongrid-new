@@ -1,55 +1,31 @@
+// Package model 定义 pluginhost 子系统的 gorm 持久化实体。
+//
+// 四张表(plugin_instances / plugin_capabilities / plugin_invocations /
+// plugin_audits)与 A 主项目共享同一个 *gorm.DB,由 Phase 2 的 data/migrate.go
+// 在启动时 AutoMigrate 建表。本包只声明实体,不写仓储、不依赖 A 任何子包,
+// 也不依赖 pluginhost 内部其他子包(model 是叶子节点)。
 package model
 
-import (
-	"encoding/json"
+import "gorm.io/gorm"
 
-	"gorm.io/gorm"
-)
-
-// PluginCapability 插件实例暴露的单个能力(capability)。
+// PluginCapability 一个 plugin 实例暴露的单个 capability 行。
 //
-// 一个 PluginInstance 拥有 0..N 个 capability,每行一个能力点。
-// 通过 (PluginInstanceID, Kind, Name) 三字段复合唯一索引,保证同一插件
-// 实例下不重复注册同 kind+name 的能力(Class 用于安全等级校验,
-// 详见 plan §6.6 sandbox/permission 与 hostcall/scope)。
+// 一行 = 一个 (Kind, Name) 能力点;属于 PluginInstance。DB 层不做
+// (PluginInstanceID, Kind, Name) 复合唯一约束,由 repo / biz 层
+// 应用层校验,DB 仅按列各自加索引。
 type PluginCapability struct {
 	gorm.Model
-	PluginInstanceID uint64 `gorm:"index;uniqueIndex:idx_cap_unique,priority:1"`
+	PluginInstanceID uint64 `gorm:"index"`
 	TenantID         uint64 `gorm:"index"`
-	Kind             string `gorm:"size:32;uniqueIndex:idx_cap_unique,priority:2"` // ai.tool / notifier / workflow.node / skill.runner / llm.provider / embedding.provider / alert.evaluator
-	Name             string `gorm:"size:128;uniqueIndex:idx_cap_unique,priority:3"`
-	Class            string `gorm:"size:32"` // 安全等级:safe / mutating / dangerous
+	Kind             string `gorm:"size:32;index"`
+	Name             string `gorm:"size:128"`
+	Class            string `gorm:"size:32"`
 	SchemaJSON       string `gorm:"type:text"`
-	MetadataJSON     string `gorm:"type:text"` // 静态元数据 JSON
-	UIMetadataJSON   string `gorm:"type:text"` // UI 渲染元数据 JSON
+	UIMetadataJSON   string `gorm:"type:text"`
 	Enabled          bool   `gorm:"default:true"`
 }
 
 // TableName 指定 GORM 表名。
 func (PluginCapability) TableName() string {
 	return "plugin_capabilities"
-}
-
-// SnapshotJSON 把能力的关键字段与 JSON-text 字段打包为一段可读 JSON,
-// 便于 hostcall/adapter/审计日志展示。仅做序列化,不参与 GORM 的 ORM 行为。
-func (c PluginCapability) SnapshotJSON() ([]byte, error) {
-	return json.Marshal(struct {
-		PluginInstanceID uint64
-		Kind             string
-		Name             string
-		Class            string
-		Enabled          bool
-		Schema           json.RawMessage
-		Metadata         json.RawMessage
-		UIMetadata       json.RawMessage
-	}{
-		PluginInstanceID: c.PluginInstanceID,
-		Kind:             c.Kind,
-		Name:             c.Name,
-		Class:            c.Class,
-		Enabled:          c.Enabled,
-		Schema:           json.RawMessage(c.SchemaJSON),
-		Metadata:         json.RawMessage(c.MetadataJSON),
-		UIMetadata:       json.RawMessage(c.UIMetadataJSON),
-	})
 }
