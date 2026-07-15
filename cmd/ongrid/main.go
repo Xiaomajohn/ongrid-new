@@ -2496,7 +2496,8 @@ func main() {
 			phCapRepo := phdata.NewCapabilityRepo(db)
 			phInvokeRepo := phdata.NewInvocationRepo(db)
 			phAuditRepo := phdata.NewAuditRepo(db)
-			phReg := phregistry.NewRegistry()
+			// 注册表构造器在 internal/pluginhost/registry 是 New(),不是 NewRegistry()
+			phReg := phregistry.New()
 			phPool := phpool.NewPool()
 			phRouter := phinvoke.NewRouter(phReg, phPool)
 			phRouter = phRouter.WithAudit(func(ctx context.Context, pluginID uint64, capName string, latency time.Duration, err error) {
