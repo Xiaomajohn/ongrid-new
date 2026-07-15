@@ -98,9 +98,83 @@ OK: 6 个反斜杠 = 3 对 \. — Loki lexer 会剥为 3 个 \. 给 RE2，匹配
 
 ## 备注
 
-- 行为约束：遵守项目规则"代码改动要添加记录，单独在 .\record 中"。
-- 不写单元测试（按规则"不需要写单元测试验证，从逻辑上验证通过、打包正常即
-  可"）。
-- 不在本地验证 .sh / Makefile（按规则"本地开发环境不需要验证.sh、make 文件
-  是否错误"）。
+- 行为约束：遵守项目规则“代码改动要添加记录，单独在 .\record 中”。
+- 不写单元测试（按规则“不需要写单元测试验证，从逻辑上验证通过、打包正常即
+  可”）。
+- 不在本地验证 .sh / Makefile（按规则“本地开发环境不需要验证.sh、make 文件
+  是否错误”）。
 - 视觉/UI 无变化：这次纯逻辑修复。
+
+---
+
+## 补充：前端 SPA 重打 + 同步（2026-07-14 20:50）
+
+### 背景
+
+修复 commit `41fada87` 提交后，192.168.25.30 上的 SPA 仍然是 `Logs-VW2hmUBs.js`
+那个旧 chunk（dist 产物 `2026-07-14 10:05`，比源码晚 9 小时）。用户报
+“输入 192.168.33.93 仍报错” —— 根因不是修复本身有 bug，而是前端 bundle 还没
+重新打包 & 同步到服务端，浏览器拿到的还是不含 `escapeLokiLineFilter` 的旧版。
+
+### 验证旧 bundle 确实不含修复
+
+`curl -sk https://192.168.25.30/assets/Logs-VW2hmUBs.js` 里 systemd chip 的
+query 仍是 `{ongrid_source=~".+"} |~ "(Started|Stopping|systemd\\[1\\])"`（JS
+escape 后字符串值 = 1 个 `\`），不是修复后预期的 2 个 `\`。
+
+### 重新打包 + 同步（仅修前端静态资源）
+
+1. **本地 rebuild**（不走 `make docker-ongrid-web` 重打镜像，参考
+   `.record/2026-07-06-build-and-sync-spa.md` 的快速同步路径）：
+   ```bash
+   cd web
+   npm run build          # → web/dist/，新 Logs chunk = Logs-Bmx3Hdyr.js
+   ```
+
+2. **scp 到服务端**（Windows OpenSSH 用 `SSH_ASKPASS` 模式免交互密码）：
+   ```bash
+   DISPLAY=:0 \
+     SSH_ASKPASS=/d/Env/Git/askpass.sh \
+     SSH_ASKPASS_REQUIRE=force \
+     scp -r web/dist/. root@192.168.25.30:/tmp/web-dist-loki-fix/
+   ```
+
+3. **替换容器 bind-mount 源**（不需重启 nginx；只是静态文件替换）：
+   ```bash
+   ssh root@192.168.25.30 '
+     cd /opt/ongrid/ongrid-web/html
+     find . -maxdepth 1 -mindepth 1 -name 50x.html -prune -o -exec rm -rf {} +
+     cp -a /tmp/web-dist-loki-fix/. .
+   '
+   ```
+
+4. **恢复 50x.html**（`rm` 步骤会枝掉 nginx 自定义错误页，需事后放回）：
+
+   `scp 50x.html root@192.168.25.30:/opt/ongrid/ongrid-web/html/50x.html`
+
+### 服务端 Loki 验证
+
+`/tmp/loki_test.sh` （`docker exec ongrid-loki wget ... /loki/api/v1/query_range`）
+对三种 query 跑对照：
+
+| query | HTTP | 说明 |
+|-------|------|------|
+| `(?i)192.168.33.93`（裸）| 200 | RE2 `.` 元字符，默认匹配 |
+| `(?i)192\.168\.33\.91`（单层转义）| **400** | 复现用户原报错 |
+| `(?i)192\\.168\\.33\\.93`（双重转义）| **200** | 修复后 query |
+| `(?i)systemd\\[1\\]`（双重转义）| **200** | 修复后 chip query |
+
+实琇证明：双重转义 query 被 Loki 接受并返回 `success: 0 条`（没有该 IP / 服务的
+日志，不是错误）。
+
+### 注意事项
+
+- **不需要重启 nginx 容器**：`/opt/ongrid/ongrid-web/html/` 是容器
+  `/usr/share/nginx/html` 的 bind-mount 源，nginx 的 `open_file_cache` 对静态
+  文件只缓存元数据，下次请求会重新 read 拿到新内容。
+- **不需要重启 ongrid 服务**：这次改的是前端 SPA + 后端 `query_translate.go`
+  prompt（后端代码需要重新编译部署，但 prompt 只影响 AI 翻译输出，不影响 Loki
+  直查路径；后端二进制已在 commit `41fada87` 后随 v0.9.0 hot-fix 重打过）。
+- **30x.html、favicon.svg、ongrid-logo.svg**：都是与 SPA 重打无关的手动产物，
+  每次重打后要检查是否还在。本次只 50x.html 被枝掉（以 `.` 开头被 `-prune`
+  抓不住），手动恢复。

@@ -320,6 +320,15 @@ const PLUGIN_META: Record<
         'Edge-managed database exporters; the UI sends connection info and the edge writes a local secret',
       ),
   },
+  audit: {
+    label: 'audit',
+    pill: 'bg-red-500/10 text-red-300 ring-red-500/30',
+    getHint: () =>
+      trInline(
+        'subprocess auditbeat，文件完整性 + auditd + 系统状态采集；Linux only；JSONL 由 logs plugin 自动 tail 到 Loki',
+        'subprocess auditbeat — file integrity + auditd + system state; Linux only; JSONL auto-tailed to Loki by the logs plugin',
+      ),
+  },
 };
 
 function pluginMeta(name: string): { label: string; pill: string; hint: string } {
@@ -857,7 +866,8 @@ function PluginSpecEditor({
     name === 'logs' ||
     name === 'traces' ||
     name === 'custommetrics' ||
-    name === 'databasemetrics';
+    name === 'databasemetrics' ||
+    name === 'audit';
   const allowJSON = name !== 'databasemetrics';
   const [mode, setMode] = useState<'form' | 'json'>(supportsForm ? 'form' : 'json');
   const [draft, setDraft] = useState<Record<string, unknown>>(spec);
@@ -982,6 +992,9 @@ function PluginSpecEditor({
       )}
       {mode === 'form' && name === 'databasemetrics' && (
         <DatabaseMetricsSpecForm draft={draft} targetHealth={targetHealth} onChange={updateDraft} />
+      )}
+      {mode === 'form' && name === 'audit' && (
+        <AuditSpecForm draft={draft} onChange={updateDraft} />
       )}
       {mode === 'json' && (
         <div>
@@ -3338,6 +3351,321 @@ function TracesSpecForm({
           {tr('监听 localhost / docker bridge；应用 SDK 直接 export 到 edge:4317。', 'Listens on localhost / docker bridge; app SDKs export directly to edge:4317.')}
         </div>
       </div>
+    </div>
+  );
+}
+
+// AuditSpecForm 是 audit plugin 的结构化表单。Spec 字段全部可选（后端
+// internal/edgeagent/plugins/audit/render.go buildTemplateData 负责默认值），
+// 这里只读取已存在的字段并在用户编辑时回写。modules 至少保留一个，避免
+// 渲染出空 modules 块；output_file 与 audit.jsonl-* 排除规则强关联，
+// 因此允许用户改但提示说明不要瞎改。
+function AuditSpecForm({
+  draft,
+  onChange,
+}: {
+  draft: Record<string, unknown>;
+  onChange(next: Record<string, unknown>): void;
+}) {
+  const { tr } = useI18n();
+  // setField 是约定俗成的浅拷贝回写助手：复用 LogsSpecForm 的写法。
+  const setField = (key: string, value: unknown) =>
+    onChange({ ...draft, [key]: value });
+
+  // modules 默认 ["fim"]，下面前期渲染通过 modules.includes(...) 判断。
+  const modules = asStringArray(draft.modules);
+  const hasFim = modules.includes('fim');
+  const hasAuditd = modules.includes('auditd');
+  const hasSystem = modules.includes('system');
+
+  // 在 modules 数组里增删一项。至少保留一项，避免空 modules 打入后台导致
+  // auditbeat 启动失败。
+  const toggleModule = (name: 'fim' | 'auditd' | 'system', enabled: boolean) => {
+    const exists = modules.includes(name);
+    let next: string[];
+    if (enabled && !exists) {
+      next = [...modules, name];
+    } else if (!enabled && exists) {
+      next = modules.filter((m) => m !== name);
+      if (next.length === 0) {
+        // 不能全空。保留当前模块。
+        return;
+      }
+    } else {
+      return;
+    }
+    setField('modules', next);
+  };
+
+  // fim 字段。只有在 modules 包含 fim 时才进入下方渲染，因此默认安全的
+  // 读取模式总是返回 string / boolean。
+  const fimPaths = asStringArray(draft.fim_paths);
+  const fimRecursive = draft.fim_recursive !== false;
+  const fimScanAtStart = draft.fim_scan_at_start !== false;
+  const fimScanRatePerSec =
+    typeof draft.fim_scan_rate_per_sec === 'string'
+      ? draft.fim_scan_rate_per_sec
+      : '5 MiB';
+  const fimHashTypes =
+    typeof draft.fim_hash_types === 'string' ? draft.fim_hash_types : 'sha1';
+
+  // auditd 字段。
+  const auditdResolveIds = draft.auditd_resolve_ids !== false;
+  const auditdFailureMode =
+    typeof draft.auditd_failure_mode === 'string'
+      ? draft.auditd_failure_mode
+      : 'silent';
+  const auditdBacklogLimit =
+    typeof draft.auditd_backlog_limit === 'number'
+      ? draft.auditd_backlog_limit
+      : 8192;
+  const auditdRateLimit =
+    typeof draft.auditd_rate_limit === 'number' ? draft.auditd_rate_limit : 0;
+  const auditdRules = asStringArray(draft.auditd_rules);
+
+  // system 字段。
+  const systemLogin = draft.system_login !== false;
+  const systemPackage = draft.system_package !== false;
+  const systemUser = draft.system_user !== false;
+  const systemProcess = draft.system_process !== false;
+  const systemSocket = draft.system_socket === true;
+  const systemStatePeriod =
+    typeof draft.system_state_period === 'string'
+      ? draft.system_state_period
+      : '12h';
+
+  const outputFile =
+    typeof draft.output_file === 'string' ? draft.output_file : 'audit.jsonl';
+
+  return (
+    <div className="space-y-4">
+      {/* 顶部 hint 卡：解释 modules / fim_paths / exclude_files 三个核心概念。
+          exclude_files 是后端自动注入的 RE2 规则，UI 无需配置。 */}
+      <div className="rounded-md border border-zinc-800 bg-zinc-950/40 p-3 text-[11px] text-zinc-400">
+        {tr(
+          'auditbeat 模块集合：fim = 文件完整性、auditd = 内核审计、system = 系统状态采集。fim_paths 默认已拆分 /mnt/data 为 apps / components 子目录，避免拖入 ongrid-edge 安装树。如需监控其他目录请显式添加精确路径。',
+          'auditbeat module set: fim = file integrity, auditd = kernel audit, system = system state. fim_paths splits /mnt/data into apps / components by default to avoid pulling the ongrid-edge install tree; add precise paths explicitly for anything else.',
+        )}
+      </div>
+
+      {/* modules 选择：3 个 checkbox。至少保留一项。 */}
+      <div>
+        <span className="mb-1 block text-xs text-zinc-400">modules</span>
+        <div className="space-y-1.5">
+          {(
+            [
+              { id: 'fim', label: 'fim', desc: tr('文件完整性 (file_integrity)', 'File integrity (file_integrity)') },
+              { id: 'auditd', label: 'auditd', desc: tr('内核审计 (auditd)', 'Kernel audit (auditd)') },
+              { id: 'system', label: 'system', desc: tr('系统状态采集 (datasets)', 'System state (datasets)') },
+            ] as const
+          ).map((m) => {
+            const checked = modules.includes(m.id);
+            return (
+              <label key={m.id} className="flex items-start gap-2 text-[12px] text-zinc-300">
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={(e) => toggleModule(m.id, e.target.checked)}
+                  className="mt-0.5 h-3.5 w-3.5 rounded border-zinc-700 bg-zinc-900"
+                />
+                <span>
+                  <span className="font-mono text-zinc-200">{m.label}</span>
+                  <span className="ml-1.5 text-[11px] text-zinc-500">{m.desc}</span>
+                </span>
+              </label>
+            );
+          })}
+        </div>
+        <div className="mt-1 text-[11px] text-zinc-500">
+          {tr('至少启用一个模块；后端默认启用 fim。', 'At least one module must stay enabled; the backend defaults to fim.')}
+        </div>
+      </div>
+
+      {/* fim 子分组：仅当勾选 fim 时渲染。 */}
+      {hasFim && (
+        <div className="space-y-3 rounded-md border border-zinc-800/60 bg-zinc-950/30 p-3">
+          <div className="text-xs font-medium text-zinc-300">{tr('fim 模块', 'fim module')}</div>
+          <StringListField
+            label="fim_paths"
+            values={fimPaths}
+            placeholder="/opt/ongrid"
+            onChange={(next) => setField('fim_paths', next)}
+            hint={tr(
+              '监控路径列表。后端排除规则会自动跳过 ${pluginDir}（含 audit.jsonl-*）以避免自我监控。',
+              'Watched paths. The backend auto-injects excludes for ${pluginDir} (incl. audit.jsonl-*) so the plugin never watches itself.',
+            )}
+          />
+          <div className="grid gap-3 md:grid-cols-2">
+            <label className="flex items-center gap-2 text-[12px] text-zinc-300">
+              <input
+                type="checkbox"
+                checked={fimRecursive}
+                onChange={(e) => setField('fim_recursive', e.target.checked)}
+                className="h-3.5 w-3.5 rounded border-zinc-700 bg-zinc-900"
+              />
+              fim_recursive
+              <span className="text-[11px] text-zinc-500">
+                {tr('递归扫描子目录', 'Recursive into subdirectories')}
+              </span>
+            </label>
+            <label className="flex items-center gap-2 text-[12px] text-zinc-300">
+              <input
+                type="checkbox"
+                checked={fimScanAtStart}
+                onChange={(e) => setField('fim_scan_at_start', e.target.checked)}
+                className="h-3.5 w-3.5 rounded border-zinc-700 bg-zinc-900"
+              />
+              fim_scan_at_start
+              <span className="text-[11px] text-zinc-500">
+                {tr('启动时输出基线事件', 'Emit baseline events at startup')}
+              </span>
+            </label>
+          </div>
+          <div className="grid gap-3 md:grid-cols-2">
+            <SpecInput
+              label="fim_scan_rate_per_sec"
+              value={fimScanRatePerSec}
+              placeholder="5 MiB"
+              onChange={(v) => setField('fim_scan_rate_per_sec', v)}
+            />
+            <SpecInput
+              label="fim_hash_types"
+              value={fimHashTypes}
+              placeholder="sha1"
+              onChange={(v) => setField('fim_hash_types', v)}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* auditd 子分组：仅当勾选 auditd 时渲染。 */}
+      {hasAuditd && (
+        <div className="space-y-3 rounded-md border border-zinc-800/60 bg-zinc-950/30 p-3">
+          <div className="text-xs font-medium text-zinc-300">{tr('auditd 模块', 'auditd module')}</div>
+          <div className="grid gap-3 md:grid-cols-2">
+            <label className="flex items-center gap-2 text-[12px] text-zinc-300">
+              <input
+                type="checkbox"
+                checked={auditdResolveIds}
+                onChange={(e) => setField('auditd_resolve_ids', e.target.checked)}
+                className="h-3.5 w-3.5 rounded border-zinc-700 bg-zinc-900"
+              />
+              auditd_resolve_ids
+              <span className="text-[11px] text-zinc-500">
+                {tr('解析 uid/gid 为用户名 / 组名', 'Resolve uid/gid to user / group names')}
+              </span>
+            </label>
+            <label className="block text-[12px] text-zinc-300">
+              <span className="mb-1 block text-xs text-zinc-400">auditd_failure_mode</span>
+              <select
+                value={auditdFailureMode}
+                onChange={(e) => setField('auditd_failure_mode', e.target.value)}
+                className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1 font-mono text-[11px] text-zinc-100 focus:border-zinc-600 focus:outline-none"
+              >
+                <option value="silent">silent</option>
+                <option value="log">log</option>
+                <option value="warn">warn</option>
+              </select>
+            </label>
+          </div>
+          <div className="grid gap-3 md:grid-cols-2">
+            <SpecNumberInput
+              label="auditd_backlog_limit"
+              value={auditdBacklogLimit}
+              onChange={(v) => setField('auditd_backlog_limit', v)}
+            />
+            <SpecNumberInput
+              label="auditd_rate_limit"
+              value={auditdRateLimit}
+              onChange={(v) => setField('auditd_rate_limit', v)}
+            />
+          </div>
+          <StringListField
+            label="auditd_rules"
+            values={auditdRules}
+            placeholder="-w /etc/passwd -p wa -k passwd_changes"
+            onChange={(next) => setField('auditd_rules', next)}
+            hint={tr(
+              '自定义 audit rules，每行一条。等价于 auditbeat.yml 中的 audit_rules: 块。',
+              'Custom audit rules, one per line. Mirrors the audit_rules: block in auditbeat.yml.',
+            )}
+          />
+        </div>
+      )}
+
+      {/* system 子分组：仅当勾选 system 时渲染。 */}
+      {hasSystem && (
+        <div className="space-y-3 rounded-md border border-zinc-800/60 bg-zinc-950/30 p-3">
+          <div className="text-xs font-medium text-zinc-300">{tr('system 模块', 'system module')}</div>
+          <div className="grid gap-3 md:grid-cols-2">
+            <label className="flex items-center gap-2 text-[12px] text-zinc-300">
+              <input
+                type="checkbox"
+                checked={systemLogin}
+                onChange={(e) => setField('system_login', e.target.checked)}
+                className="h-3.5 w-3.5 rounded border-zinc-700 bg-zinc-900"
+              />
+              system_login
+              <span className="text-[11px] text-zinc-500">login</span>
+            </label>
+            <label className="flex items-center gap-2 text-[12px] text-zinc-300">
+              <input
+                type="checkbox"
+                checked={systemPackage}
+                onChange={(e) => setField('system_package', e.target.checked)}
+                className="h-3.5 w-3.5 rounded border-zinc-700 bg-zinc-900"
+              />
+              system_package
+              <span className="text-[11px] text-zinc-500">package</span>
+            </label>
+            <label className="flex items-center gap-2 text-[12px] text-zinc-300">
+              <input
+                type="checkbox"
+                checked={systemUser}
+                onChange={(e) => setField('system_user', e.target.checked)}
+                className="h-3.5 w-3.5 rounded border-zinc-700 bg-zinc-900"
+              />
+              system_user
+              <span className="text-[11px] text-zinc-500">user</span>
+            </label>
+            <label className="flex items-center gap-2 text-[12px] text-zinc-300">
+              <input
+                type="checkbox"
+                checked={systemProcess}
+                onChange={(e) => setField('system_process', e.target.checked)}
+                className="h-3.5 w-3.5 rounded border-zinc-700 bg-zinc-900"
+              />
+              system_process
+              <span className="text-[11px] text-zinc-500">process</span>
+            </label>
+            <label className="flex items-center gap-2 text-[12px] text-zinc-300">
+              <input
+                type="checkbox"
+                checked={systemSocket}
+                onChange={(e) => setField('system_socket', e.target.checked)}
+                className="h-3.5 w-3.5 rounded border-zinc-700 bg-zinc-900"
+              />
+              system_socket
+              <span className="text-[11px] text-zinc-500">socket</span>
+            </label>
+          </div>
+          <SpecInput
+            label="system_state_period"
+            value={systemStatePeriod}
+            placeholder="12h"
+            onChange={(v) => setField('system_state_period', v)}
+          />
+        </div>
+      )}
+
+      {/* output_file 适用于任何模块组合，始终暴露。
+          后端会写入 ${pluginDir}/<output_file> 并由 logs plugin 自动 tail。 */}
+      <SpecInput
+        label="output_file"
+        value={outputFile}
+        placeholder="audit.jsonl"
+        onChange={(v) => setField('output_file', v)}
+      />
     </div>
   );
 }

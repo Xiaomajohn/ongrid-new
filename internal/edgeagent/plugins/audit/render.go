@@ -289,7 +289,11 @@ func buildTemplateData(workDir string, cfg plugins.PluginConfig) templateData {
 		}
 	}
 	if len(fimPaths) == 0 {
-		fimPaths = []string{"/opt", "/tmp", "/mnt/data", "/root/x1"}
+		// 默认 fim_paths 拆分 /mnt/data 为 apps / components 两个细分路径，
+		// 避免拖入整个 ongrid-edge 安装树（默认 PREFIX=/mnt/data/tools-temp，
+		// 整个 /mnt/data/tools-temp/ongrid-edge 树都在 /mnt/data 下）。
+		// 其他规则保持不变：env override / spec 显式配置都仍生效。
+		fimPaths = []string{"/opt", "/tmp", "/mnt/data/apps", "/mnt/data/components", "/root/x1"}
 	}
 
 	// FIM exclude_files: RE2 regex patterns (auditbeat 9.4.2 dropped
@@ -398,6 +402,44 @@ func auditWorkDirExclude(pluginDir string) string {
 // `audit.jsonl.99`) still self-excludes. The new branch covers 9.x.
 func auditOutputExclude() string {
 	return `^.*/audit\.jsonl(-\d{8}(-\d+)?\.ndjson|(\.\d+)?)$`
+}
+
+// DefaultSpec 返回 audit plugin 默认 spec 的 JSON 化形式，供 manager
+// 侧在 ListForUI / FetchForEdge 当 DB row 没 spec 时填默认用。这样
+// UI 上能直接看到完整模板而不是空 {}，操作员在 form/json 间切换修改
+// 后存回 DB。
+//
+// 内容镜像 buildTemplateData() 中所有非运行时注入字段的默认值。
+// 注意：EdgeID / WorkDir / OutputFilename 是运行时注入字段，不在 spec
+// 里；env override (ONGRID_EDGE_AUDIT_FIM_PATHS) 不影响此函数——env
+// 仅影响 edge 渲染时的最终值，UI 看到的应是不带 env 的纯默认值，避免
+// 不同 edge 在 UI 上看到的 spec 不一致。
+//
+// 双源问题：manager 侧会在 model 层镜像一份相同的默认 spec（见
+// internal/manager/model/edge/audit_default.go 的 AuditDefaultSpec()），
+// 因为 manager 不能直接 import edgeagent 包（跨域隔离）。修改默认值时
+// 必须同步两边。
+func DefaultSpec() map[string]interface{} {
+	return map[string]interface{}{
+		"modules":               []string{"fim"},
+		"fim_paths":             []string{"/opt", "/tmp", "/mnt/data/apps", "/mnt/data/components", "/root/x1"},
+		"fim_recursive":         true,
+		"fim_scan_at_start":     true,
+		"fim_scan_rate_per_sec": "5 MiB",
+		"fim_hash_types":        "sha1",
+		"output_file":           "audit.jsonl",
+		"auditd_resolve_ids":    true,
+		"auditd_failure_mode":   "silent",
+		"auditd_backlog_limit":  8192,
+		"auditd_rate_limit":     0,
+		"auditd_rules":          []string{},
+		"system_state_period":   "12h",
+		"system_login":          true,
+		"system_package":        true,
+		"system_user":           true,
+		"system_process":        true,
+		"system_socket":         false,
+	}
 }
 
 // ---- spec field helpers (tolerate JSON-decoded shapes) ----

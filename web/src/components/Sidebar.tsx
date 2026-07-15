@@ -418,6 +418,7 @@ export function Sidebar() {
           <SidebarNavItem to="/workflows" icon={Route} label={tr('工作流', 'Workflows')} />
           <SidebarNavItem to="/skills" icon={Wrench} label={tr('技能', 'Skills')} />
           <SidebarNavItem to="/mcp" icon={Plug} label="MCP" />
+          <SidebarNavItem to="/plugins" icon={Boxes} label={tr('插件', 'Plugins')} />
         </NavSection>
 
         <SectionLabel>{tr('知识库', 'Knowledge')}</SectionLabel>

@@ -187,6 +187,15 @@ import (
 	// (dispatcher) need this import to populate the registry.
 	skillcore "github.com/ongridio/ongrid/internal/skill"
 	skillbuiltin "github.com/ongridio/ongrid/internal/skill/builtin"
+
+	// Phase 4 D2 wire-up:pluginhost 子系统 7 个子包。
+	phpluginhost "github.com/ongridio/ongrid/internal/pluginhost"
+	phdata "github.com/ongridio/ongrid/internal/pluginhost/data"
+	phinvoke "github.com/ongridio/ongrid/internal/pluginhost/invoke"
+	phmodel "github.com/ongridio/ongrid/internal/pluginhost/model"
+	phregistry "github.com/ongridio/ongrid/internal/pluginhost/registry"
+	phpool "github.com/ongridio/ongrid/internal/pluginhost/runtime"
+	phserver "github.com/ongridio/ongrid/internal/pluginhost/server"
 )
 
 // version is overwritten at build time via -ldflags.
@@ -2480,6 +2489,40 @@ func main() {
 			managerserveraudit.NewHandler(auditUC).Register(protected)
 			reportHandler.Register(protected)
 			flowHandler.Register(protected)
+			// pluginhost 子系统:Phase 4 D2 wire-up。pluginhost 自管 /api/pluginhost 子树,
+			// 内置 RequestID/Recovery/Tenant 三层中间件。Installer/Lifecycle 留 nil,
+			// Install/Uninstall/Enable/Disable 端点返 501 — Phase 5 接入 biz 后填充。
+			phPluginRepo := phdata.NewPluginRepo(db)
+			phCapRepo := phdata.NewCapabilityRepo(db)
+			phInvokeRepo := phdata.NewInvocationRepo(db)
+			phAuditRepo := phdata.NewAuditRepo(db)
+			phReg := phregistry.NewRegistry()
+			phPool := phpool.NewPool()
+			phRouter := phinvoke.NewRouter(phReg, phPool)
+			phRouter = phRouter.WithAudit(func(ctx context.Context, pluginID uint64, capName string, latency time.Duration, err error) {
+				errStr := ""
+				if err != nil {
+					errStr = err.Error()
+				}
+				_ = phAuditRepo.Record(ctx, &phmodel.PluginAudit{
+					Action:      "invoke",
+					Actor:       "system",
+					DetailsJSON: fmt.Sprintf(`{"cap":%q,"latency_ms":%d,"err":%q}`, capName, latency.Milliseconds(), errStr),
+					OccurredAt:  time.Now(),
+				})
+			})
+			phHandler := &phserver.Handler{
+				PluginRepo: phPluginRepo,
+				CapRepo:    phCapRepo,
+				InvokeRepo: phInvokeRepo,
+				AuditRepo:  phAuditRepo,
+				Reg:        phReg,
+				Pool:       phPool,
+				Router:     phRouter,
+			}
+			protected.Route("/api/pluginhost", func(phRoute chi.Router) {
+				phserver.Register(phRoute, phHandler, log.With(slog.String("comp", "pluginhost-http")))
+			})
 		})
 	})
 
@@ -2675,6 +2718,22 @@ func main() {
 	// eg.Go(func() error { return metricDownsampler.Loop(egCtx) })
 	// metricRetention := managerbizmetric.NewRetention(metricWriter, log)
 	// eg.Go(func() error { return metricRetention.Loop(egCtx) })
+
+	// pluginhost 启动:Phase 4 D2 wire-up。New 仅做引用装配,Run 内部自动
+	// 调 data.Migrate + manifest.LoadDirs + startBackgroundLoops + server.Register。
+	// 此处把 Run 交给 errgroup,rootCtx 取消时 pluginhost 一起优雅退出。
+	ph, phErr := phpluginhost.New(phpluginhost.Deps{
+		DB:     db,
+		Logger: log.With(slog.String("comp", "pluginhost")),
+		Ctx:    rootCtx,
+		Mux:    mux,
+	})
+	if phErr != nil {
+		log.Warn("pluginhost: init failed; pluginhost subsystem disabled", slog.Any("err", phErr))
+	} else {
+		eg.Go(func() error { return ph.Run(egCtx) })
+		log.Info("pluginhost enabled")
+	}
 
 	err = eg.Wait()
 

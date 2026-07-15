@@ -178,6 +178,11 @@ func (uc *PluginConfigUC) ListForUI(ctx context.Context, edgeID uint64) ([]Plugi
 			row.Enabled = r.Enabled
 			row.Spec = decodeSpec(r.SpecJSON)
 		}
+		// audit plugin：spec 为空时填默认 spec，让 UI 能看到完整模板。
+		// 操作员在 form/json 间修改后存回 DB，下次走 DB row 分支。
+		if len(row.Spec) == 0 && name == model.PluginNameAudit {
+			row.Spec = model.AuditDefaultSpec()
+		}
 		out = append(out, row)
 	}
 	return out, nil
@@ -310,6 +315,11 @@ func (uc *PluginConfigUC) FetchForEdge(ctx context.Context, edgeID uint64) (*Wir
 			// Enabled=false and the default does not override it.
 			cfg.Enabled = r.Enabled
 			cfg.Spec = decodeSpec(r.SpecJSON)
+		}
+		// audit plugin：spec 为空时填默认 spec（跟 ListForUI 行为一致，
+		// 确保 edge 端 fetch 到的 spec 跟 UI 看到的模板相同）。
+		if len(cfg.Spec) == 0 && name == model.PluginNameAudit {
+			cfg.Spec = model.AuditDefaultSpec()
 		}
 		if name == model.PluginNameLogs && logsExtra != nil {
 			cfg.Spec = uc.mergeLogsExtraLabels(cfg.Spec, logsExtra)

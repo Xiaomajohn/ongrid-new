@@ -1,0 +1,65 @@
+{
+  "id": "gitlab-issue",
+  "name": "GitLab Issue",
+  "version": "0.1.0",
+  "format": "pluginhost",
+  "entry": "./bin/gitlab-issue",
+  "transport": "subprocess",
+  "description": "Demo plugin: create GitLab issues from ongrid alerts",
+  "capabilities": [
+    {
+      "kind": "ai.tool",
+      "name": "create_issue",
+      "class": "mutating",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "GitLab project ID"
+          },
+          "title": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_id",
+          "title"
+        ]
+      }
+    }
+  ],
+  "permissions": {
+    "network_egress": [
+      "gitlab.com:443"
+    ],
+    "fs_write": []
+  },
+  "host_dependencies": [
+    "loki",
+    "prom",
+    "skill"
+  ],
+  "data_scopes": {
+    "loki": {
+      "label_selectors": {
+        "job": [
+          "ongrid"
+        ]
+      },
+      "stream_limit": 100
+    },
+    "prom": {
+      "allowed_metrics": [
+        "ongrid_alert_*"
+      ]
+    }
+  },
+  "ui_metadata": {
+    "category": "ticketing",
+    "icon": "gitlab"
+  }
+}
