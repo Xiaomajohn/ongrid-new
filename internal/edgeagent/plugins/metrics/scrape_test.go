@@ -192,7 +192,7 @@ func TestScrapeOnce_HappyPath(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	samples, source, err := scrapeOnce(ctx, spec, spec.URLs[0], nil, 0)
+	samples, source, err := scrapeOnce(ctx, spec, spec.URLs[0], nil)
 	if err != nil {
 		t.Fatalf("scrapeOnce: %v", err)
 	}
@@ -236,7 +236,7 @@ func TestScrapeOnce_ExtraLabels(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	samples, _, err := scrapeOnce(ctx, spec, spec.URLs[0], nil, 0)
+	samples, _, err := scrapeOnce(ctx, spec, spec.URLs[0], nil)
 	if err != nil {
 		t.Fatalf("scrapeOnce: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestScrapeOnce_HTTPError(t *testing.T) {
 	spec, _ := parseSpec(map[string]interface{}{"target_url": srv.URL})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, _, err := scrapeOnce(ctx, spec, spec.URLs[0], nil, 0); err == nil {
+	if _, _, err := scrapeOnce(ctx, spec, spec.URLs[0], nil); err == nil {
 		t.Errorf("scrapeOnce should error on 5xx")
 	}
 }

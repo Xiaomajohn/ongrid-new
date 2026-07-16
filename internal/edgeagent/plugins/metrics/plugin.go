@@ -93,14 +93,6 @@ type Plugin struct {
 	health       plugins.PluginHealth
 	scrapeCount  uint64
 	failureCount uint64
-	// tsCounter 单调递增,每个 scrape tick 在 runLoop 自增 1(失败 tick 也递增,
-	// 目的是占住 ts 位以保证下次成功 tick 不会跟历史撞). ts 偏移公式:
-	//   scrapeTs = lastServerTimeMs + tsCounter * scrapeInterval
-	// 跨心跳周期 counter 只增不减,lastServerTimeMs 在 heartbeatLoop
-	// 收到响应时直接覆盖 —— 这样每个 scrape tick 拿到唯一 ts,
-	// 避开 30s 心跳周期内相邻 scrape 共用同一 ServerTimeMs 触发
-	// Prom "duplicate sample ... overrides not allowed" 整批拒收.
-	tsCounter uint64
 }
 
 // New 构造 metrics plugin. pusher 必须是活着的 tunnel client
@@ -218,8 +210,7 @@ func (p *Plugin) runLoop(ctx context.Context, cfg plugins.PluginConfig, stopped 
 	}
 
 	// Fire one immediate scrape so the first batch lands quickly.
-	// counter=0: 立即 scrape 用基线 ts,后续 ticker 触发才自增.
-	p.scrapeAndPush(ctx, spec, 0)
+	p.scrapeAndPush(ctx, spec)
 
 	t := time.NewTicker(spec.Interval)
 	defer t.Stop()
@@ -229,13 +220,7 @@ func (p *Plugin) runLoop(ctx context.Context, cfg plugins.PluginConfig, stopped 
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			// 自增 counter 在持锁下做,避免多个 runLoop 实例竞争
-			// (虽然 plugin 级 Start 是幂等的, 守 lock 仍是无害且明确).
-			p.mu.Lock()
-			p.tsCounter++
-			counter := p.tsCounter
-			p.mu.Unlock()
-			p.scrapeAndPush(ctx, spec, counter)
+			p.scrapeAndPush(ctx, spec)
 		}
 	}
 }
@@ -244,27 +229,20 @@ func (p *Plugin) runLoop(ctx context.Context, cfg plugins.PluginConfig, stopped 
 // per-target sample slice in its own RPC. Per-URL failures are
 // logged but never abort the rest of the tick — node_exporter being
 // down shouldn't silence process_exporter.
-//
-// tickCounter 由 runLoop 在 case <-t.C 自增后传入,失败 tick 也占位
-// 以保证下次成功 tick 的 ts 不撞. 同 tick 内 2 个 URL(9102/9256)
-// 共用同一个 counter 值 —— 它们 series 完全独立(node_* vs namedprocess_*),
-// 不会撞,共用 ts 无副作用.
-func (p *Plugin) scrapeAndPush(ctx context.Context, spec specView, tickCounter uint64) {
+func (p *Plugin) scrapeAndPush(ctx context.Context, spec specView) {
 	for _, targetURL := range spec.URLs {
-		p.scrapeAndPushOne(ctx, spec, targetURL, tickCounter)
+		p.scrapeAndPushOne(ctx, spec, targetURL)
 	}
 }
 
 // scrapeAndPushOne performs one scrape against targetURL, parses the
 // response, and calls push_prom_samples. Failures are logged but never
 // abort the loop — the next tick is the only retry strategy.
-//
-// tickCounter 透传给 scrapeOnce 用于生成 ServerTimeMs 偏移.
-func (p *Plugin) scrapeAndPushOne(ctx context.Context, spec specView, targetURL string, tickCounter uint64) {
+func (p *Plugin) scrapeAndPushOne(ctx context.Context, spec specView, targetURL string) {
 	rctx, cancel := context.WithTimeout(ctx, spec.Timeout)
 	defer cancel()
 
-	samples, source, err := scrapeOnce(rctx, spec, targetURL, p.serverTimeMs, tickCounter)
+	samples, source, err := scrapeOnce(rctx, spec, targetURL, p.serverTimeMs)
 	p.mu.Lock()
 	p.scrapeCount++
 	p.mu.Unlock()
