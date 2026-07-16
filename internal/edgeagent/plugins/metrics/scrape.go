@@ -154,7 +154,19 @@ func sourceLabelForURL(raw string) string {
 // Plugin 每 tick 从 agent 拿最新心跳响应里的 ServerTimeMs. 注意:
 // scrape 内部不钳位本地时间 (v2 的 SafeNow 钳位逻辑已取消, 改在
 // manager 端 ingester 用 ServerTimeMs 字段作 Prom sample.timestamp).
-func scrapeOnce(ctx context.Context, spec specView, targetURL string, serverTimeMsFn metricscommon.ServerTimeMsFn) ([]tunnel.PromSample, string, error) {
+//
+// tickCounter 是 caller 传入的 scrape tick 序号 (0 起步, 失败 tick 也递增),
+// 仅在 serverTimeMs > 0 时叠加为 ServerTimeMs + tickCounter * scrapeInterval,
+// 让相邻 scrape tick 拿到唯一 ts,避开 Prom duplicate sample 整批拒收.
+// serverTimeMs <= 0 (agent 未收到心跳) 走 legacy fallback 不加偏移,
+// 保证 manager 端 ingester 依然走 s.TsMs 路径.
+func scrapeOnce(
+	ctx context.Context,
+	spec specView,
+	targetURL string,
+	serverTimeMsFn metricscommon.ServerTimeMsFn,
+	tickCounter uint64,
+) ([]tunnel.PromSample, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
 		return nil, spec.SourceLabel, fmt.Errorf("build request: %w", err)
@@ -187,6 +199,14 @@ func scrapeOnce(ctx context.Context, spec specView, targetURL string, serverTime
 	var serverTimeMs int64
 	if serverTimeMsFn != nil {
 		serverTimeMs = serverTimeMsFn()
+	}
+	// tick 偏移只在 serverTimeMs > 0 时叠加:
+	//   - serverTimeMs > 0: 走 manager 时钟锚定路径, ts = anchor + tickCounter * scrapeInterval
+	//   - serverTimeMs <= 0: legacy fallback (ingester 读 s.TsMs),不加偏移以免污染回退路径
+	// spec.Interval 由 parseSpec 兑底为 defaultInterval=15s, 不会为 0 避免除零.
+	if serverTimeMs > 0 {
+		tickOffsetMs := int64(tickCounter) * int64(spec.Interval/time.Millisecond)
+		serverTimeMs += tickOffsetMs
 	}
 	for i := range samples {
 		samples[i].ServerTimeMs = serverTimeMs
