@@ -97,10 +97,9 @@ const PANEL_META: PanelMeta[] = [
 
 function panelExpr(key: PanelKey, deviceId: string): string {
   const sel = `device_id="${deviceId}"`;
-  // 显式 by (...) 聚合掉写入侧注入的 edge_ts_ms 动态 label
-  // （同个 cpu / device 多次 scrape 会被拆成 N 个时序，不聚合会出
-  // 现图例重复 + rate() 缺样本不返回值）。用 avg 保持「原始比率/
-  // 原始比例」语义，与 Monitor 页面的 avg by (device_id) 一致。
+  // 显示使用 avg by (...) 显式聚合，是“点点相同”（cpu / device）多 series
+  // 的兜底 — 即便上游某天重新注入了动态 label（比如 edge_ts_ms），
+  // PromQL 仍是稳定的，不依赖主指标 series 名稳定性。
   //
   // CPU 用 rate(...[2m]) 而不是 [5m]：edge 是 push 模型而非 pull，
   // scrape interval 可能拉长，6h 窗口中很可能出现 ≥2 采样本的区段
@@ -150,10 +149,8 @@ function matrixToPanel(
     return !['tmpfs', 'devtmpfs', 'overlay', 'squashfs', 'autofs'].includes(fstype);
   });
 
-  // 第二层兑底：按 labelVal 去重 series（即使 PromQL 改了，后端 edge_ts_ms
-  // 动态 label 仍可能让同 cpu/device 拆出 N 个 series）。同一 label 的
-  // 多余 series 的 values 按 ts 原盖合并，避免图例出现 “/dev/sda2” 重复 N
-  // 次的问题。
+  // 第二层兑底：按 labelVal 去重 series（保留为治理碰撞、多端
+  // 采样同时上报的兑底，避免图例重复）。
   const seenLabels = new Set<string>();
   const deduped: PromMatrixSeries[] = [];
   for (const s of filtered) {

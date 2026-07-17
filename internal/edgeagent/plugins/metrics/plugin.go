@@ -41,7 +41,6 @@ import (
 	"time"
 
 	"github.com/ongridio/ongrid/internal/edgeagent/plugins"
-	"github.com/ongridio/ongrid/internal/edgeagent/plugins/metricscommon"
 	"github.com/ongridio/ongrid/internal/pkg/tunnel"
 )
 
@@ -49,39 +48,22 @@ import (
 // directory key under <workDir>/plugins/.
 const Name = "metrics"
 
-// Pusher is the narrow surface this plugin needs from the tunnel client.
-// Declaring it locally keeps the plugin testable without standing up a
-// real tunnel; tunnel.Client satisfies it.
+// Pusher 是该插件需要的 tunnel client 获窄面. 局部声明让插件无需起一个
+// 完整的 tunnel 也能调试; tunnel.Client 满足该接口.
 type Pusher interface {
 	Call(ctx context.Context, method string, req, resp any) error
 }
 
-// EdgeIDProvider returns the cloud-assigned edge ID (0 until
-// register_edge has succeeded). The plugin defers to this getter on every
-// push so a delayed registration doesn't drop the first batch with
-// edge_id=0.
+// EdgeIDProvider 返回 cloud 分配的 edge ID (register_edge 成功之前为 0).
+// 插件在每次 push 时都会查该 getter, 这样拖后的注册不会丢掉第一批样本
+// (edge_id=0).
 type EdgeIDProvider func() uint64
-
-// ServerTimeMsProvider 返回 agent 最近一次心跳响应里 manager 端的
-// Unix 毫秒时间戳 (trusted 时间源). scrape 函数拿这个值填
-// PromSample.ServerTimeMs 字段, 给 manager 端 ingester 作为
-// Prom 的 sample.timestamp 锦点 —— 避免 edge 端 CLOCK_REALTIME
-// 漂移 forward 触发 Prom 的 5min hard-reject. 0 表示 agent 未收到
-// 任何带 ServerTimeMs 的心跳响应, ingester 会走 legacy fallback
-// (用 TsMs 作 sample.timestamp, 不加 edge_ts_ms label).
-type ServerTimeMsProvider = metricscommon.ServerTimeMsFn
 
 // Plugin 是在进程内的 metrics scraper. implements plugins.Plugin.
 type Plugin struct {
 	pusher Pusher
 	edgeID EdgeIDProvider
-	// serverTimeMs is read on every scrape so a freshly-booted edge (or
-	// one whose heartbeat hasn't yet carried a ServerTimeMs) keeps
-	// pushing samples — manager-side ingester walks legacy fallback
-	// (TsMs as sample.timestamp, no edge_ts_ms label) until ServerTimeMs
-	// arrives. nil is OK — same fallback.
-	serverTimeMs ServerTimeMsProvider
-	log          *slog.Logger
+	log    *slog.Logger
 
 	mu sync.Mutex
 	// Static at construction.
@@ -97,9 +79,7 @@ type Plugin struct {
 
 // New 构造 metrics plugin. pusher 必须是活着的 tunnel client
 // (或者测试 fake); edgeID 在 register_edge 成功后返回 cloud-assigned ID.
-// serverTimeMs 是 agent 的 ServerTimeMs getter (nil-safe; 测试 / 极简
-// boot wiring 可以传 nil — legacy fallback 走 defaults).
-func New(pusher Pusher, edgeID EdgeIDProvider, serverTimeMs ServerTimeMsProvider, log *slog.Logger) *Plugin {
+func New(pusher Pusher, edgeID EdgeIDProvider, log *slog.Logger) *Plugin {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -107,10 +87,9 @@ func New(pusher Pusher, edgeID EdgeIDProvider, serverTimeMs ServerTimeMsProvider
 		edgeID = func() uint64 { return 0 }
 	}
 	return &Plugin{
-		pusher:       pusher,
-		edgeID:       edgeID,
-		serverTimeMs: serverTimeMs,
-		log:          log.With(slog.String("plugin", Name)),
+		pusher: pusher,
+		edgeID: edgeID,
+		log:    log.With(slog.String("plugin", Name)),
 		health: plugins.PluginHealth{
 			Name:      Name,
 			State:     plugins.StateStopped,
@@ -242,7 +221,7 @@ func (p *Plugin) scrapeAndPushOne(ctx context.Context, spec specView, targetURL 
 	rctx, cancel := context.WithTimeout(ctx, spec.Timeout)
 	defer cancel()
 
-	samples, source, err := scrapeOnce(rctx, spec, targetURL, p.serverTimeMs)
+	samples, source, err := scrapeOnce(rctx, spec, targetURL)
 	p.mu.Lock()
 	p.scrapeCount++
 	p.mu.Unlock()

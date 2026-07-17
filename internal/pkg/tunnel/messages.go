@@ -315,20 +315,10 @@ type PluginTargetHealthWire struct {
 	UpdatedAt     int64  `json:"updated_at,omitempty"`
 }
 
-// HeartbeatResponse 在 v3.3 起非空: edge agent 读取 ServerTimeMs 字段
-// 缓存到自身的 lastServerTimeMs, scrape 时同步到 PromSample.ServerTimeMs
-// 字段. manager 端的这个字段是 trusted 时间源: Prom 用它作为
-// sample.timestamp, 避免 edge 端 CLOCK_REALTIME 漂移触发 Prom 的
-// 5min hard-reject. edge 端不做任何系统时钟修改 (这条 NTP 类操作是
-// AGENTS.md 时钟管理硬规则禁止的) —— ServerTimeMs 只是"数据时间戳",
-// 不是时间同步.
-//
-// 字段名与 JSON tag 与 api/tunnel/v1/tunnel.proto 的
-// HeartbeatResponse.server_time_ms 保持一致 (wire 兼容, 老 manager
-// 忽略未识别字段).
-type HeartbeatResponse struct {
-	ServerTimeMs int64 `json:"server_time_ms,omitempty"` // unix 毫秒
-}
+// HeartbeatResponse acks the heartbeat. Body is empty for now — we keep
+// it typed for forward compatibility (a "ping-the-edge-with-something"
+// path may land here later, e.g. control-plane config refresh ticks).
+type HeartbeatResponse struct{}
 
 // ---------------------------------------------------------------------
 // push_host_metrics (edge -> cloud)
@@ -366,24 +356,14 @@ type PushHostMetricsResponse struct {
 // PromSample 是 (metric_name, labels, value, ts) 元组, 镜像 Prometheus
 // 的 text-format/protobuf 模型. cloud 端 handler 经 remote_write 转发给 Prom.
 //
-// 时间戳语义 (v3.3 起新增 ServerTimeMs 字段, TsMs 保持不变):
-//   - TsMs: edge 本地采集时间, 即事件时间. 来自 edge 的 time.Now() /
-//     CLOCK_REALTIME. 用于保留"edge 实际观察到值的时间点"这件事的真实性.
-//   - ServerTimeMs: edge 最近一次心跳响应里 manager 端的 Unix 毫秒
-//     时间戳, 即 ongrid 服务端时间 (trusted source). manager 端
-//     ingester 用它作为 Prom 的 sample.timestamp, 解决 edge 时钟漂移
-//     forward 触发 Prom 5min hard-reject 的问题. 同时 edge 本地时间
-//     TsMs 会被 ingester 保留为 `edge_ts_ms` label, 做 post-hoc 校准.
-//
-// 老 edge (没升级) 不发 ServerTimeMs 字段 → JSON omitempty 略过 →
-// manager 端 ingester 走 legacy fallback 路径, 用 TsMs 作 sample.timestamp,
-// 不加 edge_ts_ms label. 滚动发布兼容.
+// 时间戳语义: TsMs 是 edge 本地采集时间, 即事件时间 (scrape 时刻的
+// CLOCK_REALTIME), manager 端 ingester 直接用它作为 Prom 的 sample.timestamp.
+// edge 不对系统时钟做任何修改 (AGENTS.md 时钟管理硬规则禁止 NTP 校时).
 type PromSample struct {
-	Name         string            `json:"name"`             // e.g. "node_cpu_seconds_total"
-	Labels       map[string]string `json:"labels,omitempty"` // dimension labels (mode=, device=, ...)
-	Value        float64           `json:"value"`
-	TsMs         int64             `json:"ts_ms"`                    // unix 毫秒, edge 本地时间
-	ServerTimeMs int64             `json:"server_time_ms,omitempty"` // unix 毫秒, ongrid 时间
+	Name   string            `json:"name"`             // e.g. "node_cpu_seconds_total"
+	Labels map[string]string `json:"labels,omitempty"` // dimension labels (mode=, device=, ...)
+	Value  float64           `json:"value"`
+	TsMs   int64             `json:"ts_ms"` // unix 毫秒, edge 本地时间
 }
 
 // PushPromSamplesRequest is one push of open-set samples. Source identifies

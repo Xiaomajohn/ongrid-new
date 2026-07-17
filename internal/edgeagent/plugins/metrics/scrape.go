@@ -17,7 +17,6 @@ import (
 
 	"github.com/ongridio/ongrid/internal/edgeagent/collector"
 	"github.com/ongridio/ongrid/internal/edgeagent/plugins"
-	"github.com/ongridio/ongrid/internal/edgeagent/plugins/metricscommon"
 	"github.com/ongridio/ongrid/internal/pkg/tunnel"
 )
 
@@ -149,12 +148,10 @@ func sourceLabelForURL(raw string) string {
 // 扁平 sample 切片 + source label. 每个 spec.URL 独立 scrape, 一个
 // 200 不会掩盖另一个的失败.
 //
-// v3.3 起时间戳字段: TsMs = scrape 时刻的 edge 本地 time.Now() (事件时间);
-// ServerTimeMs 由 caller (Plugin) 通过 serverTimeMsFn 注入 —
-// Plugin 每 tick 从 agent 拿最新心跳响应里的 ServerTimeMs. 注意:
-// scrape 内部不钳位本地时间 (v2 的 SafeNow 钳位逻辑已取消, 改在
-// manager 端 ingester 用 ServerTimeMs 字段作 Prom sample.timestamp).
-func scrapeOnce(ctx context.Context, spec specView, targetURL string, serverTimeMsFn metricscommon.ServerTimeMsFn) ([]tunnel.PromSample, string, error) {
+// samples[i].TsMs = scrape 时刻的 edge 本地 time.Now() (事件时间),
+// 是进入 Prom 数据的最终时间戳锚点. manager 端 ingester 不再做
+// 任何时间戳替换, 不会按 ongrid 本机时间重写该样本时间戳.
+func scrapeOnce(ctx context.Context, spec specView, targetURL string) ([]tunnel.PromSample, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
 		return nil, spec.SourceLabel, fmt.Errorf("build request: %w", err)
@@ -181,17 +178,8 @@ func scrapeOnce(ctx context.Context, spec specView, targetURL string, serverTime
 	mfs := familiesToSlice(families)
 	// FlattenSamples 来自 internal/edgeagent/collector — 已经处理
 	// counter / gauge / histogram / summary fan-out + extraLabels merge.
-	// 我们不重复实现. samples[i].TsMs 由 FlattenSamples 写入 (用 time.Now()),
-	// ServerTimeMs 由下面的循环从 serverTimeMsFn 注入 (可为 nil → 留 0).
-	samples := collector.FlattenSamples(time.Now(), spec.SourceLabel, mfs, spec.ExtraLabels)
-	var serverTimeMs int64
-	if serverTimeMsFn != nil {
-		serverTimeMs = serverTimeMsFn()
-	}
-	for i := range samples {
-		samples[i].ServerTimeMs = serverTimeMs
-	}
-	return samples, spec.SourceLabel, nil
+	// 我们不重复实现. samples[i].TsMs 由 FlattenSamples 写入 (用 time.Now()).
+	return collector.FlattenSamples(time.Now(), spec.SourceLabel, mfs, spec.ExtraLabels), spec.SourceLabel, nil
 }
 
 // newClient builds a per-scrape HTTP client. We don't pool per-target
