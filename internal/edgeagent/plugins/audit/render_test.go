@@ -88,19 +88,29 @@ func TestRenderDefaultModules(t *testing.T) {
 		t.Fatalf("render: %v", err)
 	}
 	body := string(out)
-	// default modules = ["fim"] → file_integrity
-	if !strings.Contains(body, "- module: file_integrity") {
-		t.Errorf("default modules should include file_integrity, got body:\n%s", body)
+	// Default modules = ["fim", "auditd"] — auditd was added to
+	// defaults in 2026-07-18 so the on-event audit surface is broad
+	// enough out of the box, but auditd_rules still defaults to []
+	// so auditd emits no rules of its own. Operators fill the rules
+	// in the UI to opt specific paths (e.g. /bin, /usr/bin) into the
+	// execve watcher. The system module stays opted-out (default).
+	for _, w := range []string{
+		"- module: file_integrity", // Spec alias "fim"
+		"- module: auditd",
+		"resolve_ids: true",         // auditd defaults
+		"audit_rules: |",
+	} {
+		if !strings.Contains(body, w) {
+			t.Errorf("default modules missing %q\n--- body ---\n%s", w, body)
+		}
 	}
-	// auditd block must NOT be present when only fim is requested.
-	if strings.Contains(body, "- module: auditd") {
-		t.Errorf("auditd block should not render when modules=[fim]\n--- body ---\n%s", body)
+	// system block stays absent — system is NOT in [fim, auditd].
+	if strings.Contains(body, "- module: system") {
+		t.Errorf("system module should NOT render when default modules=[fim, auditd]\n--- body ---\n%s", body)
 	}
-	// system datasets should render when default modules expands to
-	// include system (it doesn't by default — only fim — so this stays
-	// empty. We assert the negative to lock the default in place.)
+	// system datasets should not render either way (system opted out).
 	if strings.Contains(body, "datasets:") {
-		t.Errorf("system datasets should not render when modules=[fim]\n--- body ---\n%s", body)
+		t.Errorf("system datasets should not render by default\n--- body ---\n%s", body)
 	}
 }
 

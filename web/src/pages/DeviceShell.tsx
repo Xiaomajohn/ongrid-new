@@ -22,12 +22,14 @@ import { Power, RotateCw, Terminal as TerminalIcon } from 'lucide-react';
 import { Modal } from '@/components/Modal';
 import { Button } from '@/components/ui/Button';
 import { XTerminal, type XTerminalApi } from '@/components/XTerminal';
+import { getDevice, type Device } from '@/api/devices';
 import { getEdge, listEdges, type Edge } from '@/api/edges';
 import {
   openShellSocket,
   probeShellPreflight,
   sendControl,
   type ShellControlFrameIn,
+  type ShellOpenFrame,
   type ShellRoute,
 } from '@/api/webshell';
 import { getToken } from '@/store/auth';
@@ -105,6 +107,12 @@ export default function DeviceShellPage() {
 
   const [edge, setEdge] = useState<Edge | null>(null);
   const [edgeError, setEdgeError] = useState<string | null>(null);
+  // tunnel 模式自动连接：拉 device 详情拿 ssh_user。如果设备表里
+  // 已有 ssh_user / ssh_password（或 ssh_key），tunnel 通道下后端
+  // 会自己用 device 表凭据登录，前端不需要再弹 ConnectModal 收 OS
+  // 凭据；direct 通道下这个字段只用来预填表单，不作主要决策依据。
+  const [deviceRow, setDeviceRow] = useState<Device | null>(null);
+  const [deviceRowLoaded, setDeviceRowLoaded] = useState(false);
   const [modalOpen, setModalOpen] = useState(true);
   const [conn, setConn] = useState<ConnState>({ kind: 'idle' });
 
@@ -149,6 +157,27 @@ export default function DeviceShellPage() {
         }
       } catch (err) {
         if (!cancelled) setEdgeError((err as Error).message || tr('加载设备信息失败', 'Failed to load device info'));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [deviceId]);
+
+  // 拉 device 详情拿 ssh_user / ssh_password / ssh_auth_kind，供
+  // tunnel 模式自动连接使用。出错静默（device 详情失败不该阻止
+  // 页面其他部分工作，ConnectModal 兑底让用户手输）。
+  useEffect(() => {
+    if (!deviceId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const d = await getDevice(deviceId);
+        if (!cancelled) setDeviceRow(d as Device);
+      } catch {
+        /* ignore — fall through to ConnectModal */
+      } finally {
+        if (!cancelled) setDeviceRowLoaded(true);
       }
     })();
     return () => {
@@ -262,15 +291,27 @@ export default function DeviceShellPage() {
       ws.onopen = () => {
         const { cols, rows } = sizeRef.current;
         const sshHost = inputs.port && inputs.port !== 22 ? `127.0.0.1:${inputs.port}` : '';
-        sendControl(ws, {
+        // tunnel 通道下，前端 open frame 里不传 ssh_user / ssh_pass，
+        // 让后端 devicessh.ShellService.OpenShell 直接用 device 表里
+        // 已存的 ssh_user / ssh_password（或 ssh_key）登录（详见
+        // biz/devicessh/service.go:OpenShell 的 override 逻辑）。direct
+        // 通道下 ssh_user / ssh_pass 必传——后端没有其他来源兑底。
+        const frame: ShellOpenFrame = {
           type: 'open',
           cols,
           rows,
           term: 'xterm-256color',
-          ssh_user: inputs.user,
-          ssh_pass: inputs.password,
-          ssh_host: sshHost,
-        });
+        };
+        if (shellRoute === 'direct' || inputs.user) {
+          frame.ssh_user = inputs.user;
+        }
+        if (shellRoute === 'direct' || inputs.password) {
+          frame.ssh_pass = inputs.password;
+        }
+        if (sshHost) {
+          frame.ssh_host = sshHost;
+        }
+        sendControl(ws, frame);
         // We deliberately do NOT clear inputs.password from the closure —
         // it's already only in stack memory + the WS frame buffer. Once
         // ws.send returns, the only reference is the GCable closure.
@@ -358,6 +399,30 @@ export default function DeviceShellPage() {
     [deviceId, edge, teardown, writeBanner],
   );
 
+  // tunnel 模式自动连接：device 表里已有 ssh_user 且后端 OpenShell
+  // 会用 device.ssh_user + device.ssh_password（或 ssh_key）直接
+  // 走 SSH，前端 open frame 里省略 ssh_user / ssh_pass 即可。后端
+  // 找不到 online edge 会返回 ErrTunnelNotImplemented（503），
+  // 再交由 ConnectModal 兑底让用户走 direct 输入凭据。autoConnect
+  // ref 防止 React 18 strict-mode 下 mount→unmount→remount 双触发，
+  // 以及手点「重连」后的重跑入口。
+  const autoConnectTriedRef = useRef(false);
+  useEffect(() => {
+    if (shellRoute !== 'tunnel') return;
+    if (!deviceRowLoaded) return;
+    if (conn.kind !== 'idle') return;
+    if (autoConnectTriedRef.current) return;
+    if (!deviceRow?.ssh_user) return;
+    autoConnectTriedRef.current = true;
+    setModalOpen(false);
+    void openConnection({
+      user: deviceRow.ssh_user,
+      password: '',
+      port: 22,
+      remember: false,
+    });
+  }, [shellRoute, deviceRowLoaded, deviceRow, conn.kind, openConnection]);
+
   // Wire xterm onData → ws via a ref-based pump so we don't have to
   // re-mount the terminal when the socket changes (reconnect).
   const pumpRef = useRef<(data: string) => void>(() => {});
@@ -410,6 +475,10 @@ export default function DeviceShellPage() {
   const handleReconnect = useCallback(() => {
     teardown();
     setConn({ kind: 'idle' });
+    // 重置 auto-connect ref，让 device.ssh_user 路径在 tunnel 模式下
+    // 重新走自动连接逻辑。点「重连」是用户明确表达「重新连」，不需
+    // 要弹窗卡在那儿等他手输密码。
+    autoConnectTriedRef.current = false;
     setModalOpen(true);
   }, [teardown]);
 
@@ -482,6 +551,8 @@ export default function DeviceShellPage() {
       <ConnectModal
         open={modalOpen}
         deviceId={deviceId}
+        tunnelMode={shellRoute === 'tunnel'}
+        defaultUser={deviceRow?.ssh_user}
         title={tr(`连接到 ${hostname}`, `Connect to ${hostname}`)}
         onCancel={() => {
           // If we never connected, leave the page; otherwise just hide
@@ -503,12 +574,21 @@ export default function DeviceShellPage() {
 function ConnectModal({
   open,
   deviceId,
+  tunnelMode,
+  defaultUser,
   title,
   onSubmit,
   onCancel,
 }: {
   open: boolean;
   deviceId: string;
+  // tunnel 模式下 user / password 可以为空——后端会用 device 表里
+  // 已存的 ssh_user / ssh_password（或 ssh_key）登录。表单在
+  // tunnel 模式下是「覆盖默认凭据」的入口，留空 = 用默认。
+  tunnelMode?: boolean;
+  // tunnel 模式下 deviceRow.ssh_user 作预填值，传到表单里；direct
+  // 模式下被忽略。
+  defaultUser?: string;
   title: string;
   onSubmit(inputs: ConnectInputs): void;
   onCancel(): void;
@@ -524,27 +604,35 @@ function ConnectModal({
   // Pre-fill the username from localStorage on first open. We don't
   // depend on `deviceId` for the lifetime — the hook re-runs when the
   // modal toggles open so reconnects keep the user remembered.
+  // tunnel 模式下额外优先使用 device.ssh_user 作为预填值。
   useEffect(() => {
     if (!open) return;
     setErr(null);
     setPassword('');
     try {
-      const last = localStorage.getItem(rememberUserKey(deviceId));
-      if (last) setUser(last);
+      // tunnel 模式下 deviceRow.ssh_user 优先，否则回落到
+      // localStorage「上次记住的用户名」。direct 模式只查
+      // localStorage，与原行为一致。
+      const remembered = localStorage.getItem(rememberUserKey(deviceId));
+      const prefill = (tunnelMode && defaultUser) || remembered;
+      if (prefill) setUser(prefill);
     } catch {
       /* noop */
     }
-  }, [open, deviceId]);
+  }, [open, deviceId, tunnelMode, defaultUser]);
 
   if (!open) return null;
 
   const submit = () => {
     const u = user.trim();
-    if (!u) {
+    // tunnel 模式下 user / password 可以为空——后端会用 device 表里
+    // 已存的 ssh_user / ssh_password（或 ssh_key）登录。表单留空
+    // 即代表「不覆盖默认凭据」。direct 模式两个字段必传。
+    if (!tunnelMode && !u) {
       setErr(tr('请输入 OS 用户名', 'Please enter the OS username'));
       return;
     }
-    if (!password) {
+    if (!tunnelMode && !password) {
       setErr(tr('请输入密码', 'Please enter the password'));
       return;
     }
@@ -601,11 +689,24 @@ function ConnectModal({
             autoComplete="current-password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
+            placeholder={
+              tunnelMode && defaultUser
+                ? tr('留空使用设备默认凭据', 'Leave empty to use device default credentials')
+                : ''
+            }
             className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 focus:border-zinc-600 focus:outline-none"
             onKeyDown={(e) => {
               if (e.key === 'Enter') submit();
             }}
           />
+          {tunnelMode && defaultUser && (
+            <p className="mt-1 text-[11px] text-zinc-600">
+              {tr(
+                `tunnel 通道留空 = 使用设备默认凭据（${defaultUser}）；填入则覆盖该次会话的 OS 凭据。`,
+                `tunnel: leave empty to use device default credentials (${defaultUser}); values entered here override the default for this session only.`,
+              )}
+            </p>
+          )}
         </div>
         <div>
           <button

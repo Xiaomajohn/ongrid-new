@@ -3583,11 +3583,11 @@ function AuditSpecForm({
           <StringListField
             label="auditd_rules"
             values={auditdRules}
-            placeholder="-w /etc/passwd -p wa -k passwd_changes"
+            placeholder="-w /usr/bin -p x -k bin_exec"
             onChange={(next) => setField('auditd_rules', next)}
             hint={tr(
-              '自定义 audit rules，每行一条。等价于 auditbeat.yml 中的 audit_rules: 块。',
-              'Custom audit rules, one per line. Mirrors the audit_rules: block in auditbeat.yml.',
+              '自定义 audit rules，每行一条，等价于 auditbeat.yml 中的 audit_rules: 块。默认仅加载 auditd 模块（不发事件），要监控「谁执行了 /bin、/usr/bin 下的二进制」请填诸如 `-w /bin -p x -k bin_exec`、`-w /usr/bin -p x -k bin_exec`、`-w /sbin -p x -k bin_exec`、`-w /usr/sbin -p x -k bin_exec` 这种规则。规则为空则不产出任何 execve 事件。',
+              'Custom audit rules, one per line. Mirrors the audit_rules: block in auditbeat.yml. The auditd module is loaded by default but emits zero events until you add rules — fill entries like `-w /bin -p x -k bin_exec`, `-w /usr/bin -p x -k bin_exec`, `-w /sbin -p x -k bin_exec`, `-w /usr/sbin -p x -k bin_exec` to capture "who ran /usr/bin/*" execve events. Empty rules → no execve events.',
             )}
           />
         </div>

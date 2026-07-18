@@ -656,9 +656,15 @@ function HostRolesEditorModal({
 
 // ----- ShellButton (host 视角) -----
 // Host 页不需要 Edge 列表的旋转 / 删除；只要一个面向 host.id 的终端
-// 入口。语义与 HostDetail 头部按钮一致：设备直连 SSH（不走
-// edge-tunnel），因此路径走 /shell-direct，禁用条件只看账号权限和
-// device.id 是否注入；不依赖 edge agent 上报的 device.online。
+// 入口。语义与 HostDetail 头部按钮一致：走 device → online edge →
+// device 本地 sshd 的 tunnel 通道（不走 manager → 设备 IP 的直连
+// SSH）。路径走 /shell，后端 devicessh.ShellHandler.handleTunnel
+// 会迫使 Router.Pick 走 tunnel 分支，并由 device 表里已存的
+// ssh_user / ssh_password（或 ssh_key）自动登录，不需要前端再弹
+// ConnectModal 收 OS 凭据。判断能否进入只看账号权限和 device.id
+// 是否注入；不依赖 edge agent 上报的 device.online —— tunnel
+// dialer 找不到 online edge 时由后端返回 ErrTunnelNotImplemented
+// （503），前端 ConnectModal 兜底让用户改走 direct 输入凭据。
 function ShellButton({ device, canMutate }: { device: HostDevice; canMutate: boolean }) {
   const { tr } = useI18n();
   const noId = !device?.id;
@@ -668,7 +674,7 @@ function ShellButton({ device, canMutate }: { device: HostDevice; canMutate: boo
     : noId
       ? tr('设备 ID 缺失', 'Device id missing')
       : '';
-  const href = `/hosts/${encodeURIComponent(String(device.id))}/shell-direct`;
+  const href = `/hosts/${encodeURIComponent(String(device.id))}/shell`;
   if (disabled) {
     return (
       <span

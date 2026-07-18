@@ -60,13 +60,20 @@ export function openShellSocket(
 // ShellOpen is the first text frame the browser must send post-upgrade.
 // `ssh_host` defaults to "127.0.0.1:22" when empty — the edge agent runs
 // on the device's host network so localhost loops back to the OS sshd.
+//
+// `ssh_user` / `ssh_pass` 是可选：tunnel 通道下，前端可以省略
+// 这两个字段让后端直接用 device 表里已存的 ssh_user / ssh_password
+// （或 ssh_key）登录，避免重复弹 ConnectModal；direct 通道下必须传
+// （后端 device 表没有 ssh_host 时也需要在前端显式提供）。`ssh_host`
+// 始终可选，未提供时 tunnel → edge 本地 sshd；direct → device 表的
+// ssh_host（fallback 127.0.0.1）。
 export type ShellOpenFrame = {
   type: 'open';
   cols: number;
   rows: number;
   term: string;
-  ssh_user: string;
-  ssh_pass: string;
+  ssh_user?: string;
+  ssh_pass?: string;
   ssh_host?: string;
 };
 

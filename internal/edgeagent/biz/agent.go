@@ -377,8 +377,7 @@ func (a *Agent) registerEdge(ctx context.Context) error {
 	a.edgeID = resp.EdgeID
 	a.mu.Unlock()
 	// resp.ServerTime 字段保留以维持 register_edge wire 兼容 (老 edge 仍在读),
-	// 但 agent 不消费它做时钟偏移推断 (不允许修改本地系统时钟, 详见 AGENTS.md
-	// 时钟管理硬规则). Prom 端时间戳直接用 scrape 时刻的 edge 本地时间.
+	// agent 不消费它.
 	a.log.Info("agent: registered with cloud",
 		slog.Uint64("edge_id", resp.EdgeID),
 	)

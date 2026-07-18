@@ -272,9 +272,21 @@ func buildTemplateData(workDir string, cfg plugins.PluginConfig) templateData {
 	// manager-side audit probe configs (which named the module fim
 	// per auditbeat 7.x docs) keep working. The template renders
 	// `- module: file_integrity` directly — see auditbeatTemplate.
+	//
+	// Default = [fim, auditd] (not [fim] alone). rationale:
+	//   - fim alone only emits file content/attribute changes; it has
+	//     no "who executed /usr/bin/ls" event surface — that lives in
+	//     auditd's execve kernel-hooks via `-w /bin -p x` rules.
+	//   - adding auditd to defaults unlocks process-execution audit
+	//     out-of-the-box. Empty auditd_rules (spec default) means
+	//     auditd is loaded but emits no rules of its own — the only
+	//     on-event impact is the module's own nothing-bursted state;
+	//     operators fill auditd_rules in the UI to opt into the paths
+	//     they want watched. See DefaultSpec() / AuditDefaultSpec()
+	//     for the mirrored manager-side default.
 	modules := stringSliceField(cfg.Spec, "modules")
 	if len(modules) == 0 {
-		modules = []string{"fim"}
+		modules = []string{"fim", "auditd"}
 	}
 
 	// FIM paths: spec > env > default.
@@ -419,9 +431,15 @@ func auditOutputExclude() string {
 // internal/manager/model/edge/audit_default.go 的 AuditDefaultSpec()），
 // 因为 manager 不能直接 import edgeagent 包（跨域隔离）。修改默认值时
 // 必须同步两边。
+//
+// auditd_rules 故意保持空数组（不预填路径）。auditbeat 加载空规则集
+// 不会发出任何 execve 类事件——只有 operator 在 UI 上显式填入 `-w /bin -p x` /
+// `-w /usr/bin -p x` 这类规则后才会真正产出"系统文件被哪个进程执行了"
+// 事件。这样默认配置改动是"加挂载能力、不产生新事件"，对没运维接入
+// auditd_rules 的 edge 是 no-op，避免误伤存量设备。
 func DefaultSpec() map[string]interface{} {
 	return map[string]interface{}{
-		"modules":               []string{"fim"},
+		"modules":               []string{"fim", "auditd"},
 		"fim_paths":             []string{"/opt", "/tmp", "/mnt/data/apps", "/mnt/data/components", "/root/x1"},
 		"fim_recursive":         true,
 		"fim_scan_at_start":     true,

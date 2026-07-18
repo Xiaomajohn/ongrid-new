@@ -71,13 +71,15 @@ export default function HostDetailPage() {
     };
   }, [hostId]);
 
-  // 设备页终端是「设备直连」语义：走 manager → 设备 IP 的 SSH，
-  // 不经过 edge-tunnel。所以路径拼接为 `/shell-direct`，后端
-  // devicessh.ShellHandler.handleDirect 会迫使 Router.Pick 走
-  // direct 分支。判断能否进入只看账号是非 viewer（直连 SSH 不依赖
-  // Prom 上报的 device.online——你连的是设备本身）。
+  // 设备页终端走 tunnel 通道：manager → device 关联的 online edge →
+  // edge 本地 127.0.0.1:22 的 sshd。路径拼为 /shell，后端
+  // devicessh.ShellHandler.handleTunnel 会迫使 Router.Pick 走
+  // tunnel 分支，并由 device 表里已存的 ssh_user / ssh_password
+  // （或 ssh_key）自动登录 —— 前端不需要弹 ConnectModal 收 OS 凭据。
+  // tunnel 路径找不到 online edge 时后端返回 ErrTunnelNotImplemented
+  // （503），前端 ConnectModal 兑底让用户改走 direct 输入凭据。
   const terminalHref = device?.id
-    ? `/hosts/${encodeURIComponent(String(device.id))}/shell-direct`
+    ? `/hosts/${encodeURIComponent(String(device.id))}/shell`
     : '#';
   // 只读账号不允许进入终端，与 Hosts.tsx 列表页 ShellButton 规则一致。
   const terminalEnabled = !!device?.id && canMutate;

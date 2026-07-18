@@ -30,6 +30,10 @@ dist/out/
 bin/linux-*
 bin/darwin-*
 bin/windows-*
+.qoder/*sh
+.qoder/*txt
+.qoder/*diff
+.qoder/diff*
 
 # Dependencies
 vendor/

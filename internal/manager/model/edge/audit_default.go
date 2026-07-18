@@ -16,7 +16,12 @@ package edge
 //
 // 字段对照（保持与 internal/edgeagent/plugins/audit/render.go 的
 // buildTemplateData 默认值同源）：
-//   - modules              → []string{"fim"}
+//   - modules              → []string{"fim", "auditd"}
+//                            默认加载 auditd 模块，但不预填 auditd_rules。
+//                            加载 module 本身是 no-op（不预填规则就不产生
+//                            任何 execve 事件），operator 在 UI 填入
+//                            `-w /usr/bin -p x -k bin_exec` 等规则后才
+//                            开始输出"系统文件被哪个进程执行了"事件。
 //   - fim_paths            → []string{"/opt", "/tmp", "/mnt/data/apps",
 //                                 "/mnt/data/components", "/root/x1"}
 //   - fim_recursive        → true
@@ -37,7 +42,7 @@ package edge
 //   - system_socket        → false
 func AuditDefaultSpec() map[string]interface{} {
 	return map[string]interface{}{
-		"modules":               []string{"fim"},
+		"modules":               []string{"fim", "auditd"},
 		"fim_paths":             []string{"/opt", "/tmp", "/mnt/data/apps", "/mnt/data/components", "/root/x1"},
 		"fim_recursive":         true,
 		"fim_scan_at_start":     true,
