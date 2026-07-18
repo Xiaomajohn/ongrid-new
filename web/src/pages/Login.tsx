@@ -62,7 +62,7 @@ export default function LoginPage() {
           <div className="mx-auto mb-4 flex h-20 w-20 items-center justify-center">
             <OngridLogo size={72} />
           </div>
-          <h1 className="text-xl font-semibold text-zinc-100">{tr('登录到 Ongrid', 'Sign in to Ongrid')}</h1>
+          <h1 className="text-xl font-semibold text-zinc-100">{tr('登录到 行业测试AI运维平台', 'Sign in to 行业测试AI运维平台')}</h1>
           <p className="mt-1 text-xs text-zinc-500">{tr('AIOps 工作台', 'AIOps Workbench')}</p>
         </div>
 

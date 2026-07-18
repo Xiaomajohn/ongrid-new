@@ -2337,7 +2337,7 @@ function DatabaseMetricsSpecForm({
       )}
       {sources.length === 0 && (
         <div className="rounded-md border border-dashed border-zinc-800 px-3 py-3 text-[11px] text-zinc-500">
-          {tr('用于需要 Ongrid 在 edge 上托管 exporter 的数据库。已有 /metrics 接口的数据库 exporter 请放到 custommetrics。', 'Use this when Ongrid should manage the exporter on the edge. Existing database /metrics exporters belong in custommetrics.')}
+          {tr('用于需要 AI 运维平台 在 edge 上托管 exporter 的数据库。已有 /metrics 接口的数据库 exporter 请放到 custommetrics。', 'Use this when the AI Ops Platform should manage the exporter on the edge. Existing database /metrics exporters belong in custommetrics.')}
         </div>
       )}
       {sources.length > 0 && (

@@ -12,11 +12,11 @@ type Props = {
   /** Pixel size (square). Default 28 — sidebar / header scale. */
   size?: number;
   className?: string;
-  /** title for screen readers (default "ongrid"). */
+  /** title for screen readers (default "行业测试AI运维平台"). */
   title?: string;
 };
 
-export function OngridLogo({ size = 28, className, title = 'Ongrid' }: Props) {
+export function OngridLogo({ size = 28, className, title = '行业测试AI运维平台' }: Props) {
   return (
     <svg
       width={size}

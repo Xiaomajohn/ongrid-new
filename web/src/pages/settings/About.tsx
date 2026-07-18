@@ -35,7 +35,7 @@ export default function About() {
         <div className="flex items-center gap-3">
           <OngridLogo size={44} className="shrink-0" />
           <div>
-            <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">Ongrid</h2>
+            <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">行业测试AI运维平台</h2>
             <p className="text-xs text-zinc-500">{tr('AIOps 平台', 'AIOps platform')}</p>
           </div>
         </div>

@@ -58,8 +58,8 @@ export function Sidebar() {
   // Prefer display_name when present — Bootstrap 时设的"admin"或后续
   // /v1/users/{id} 改的，比 email 在 sidebar / user menu 里更友好。
   const { me } = useMe();
-  const { isAdmin } = usePermissions();
-  const displayName = (me?.display_name?.trim() || email) ?? tr('Ongrid 用户', 'Ongrid user');
+  const { isAdmin, isUser } = usePermissions();
+  const displayName = (me?.display_name?.trim() || email) ?? tr('AI 运维用户', 'AI Ops user');
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -243,7 +243,7 @@ export function Sidebar() {
           type="button"
           onClick={toggleSidebar}
           aria-label={tr('展开侧边栏', 'Expand sidebar')}
-          title={tr('Ongrid · 点击展开', 'Ongrid · click to expand')}
+          title={tr('行业测试AI运维平台 · 点击展开', '行业测试AI运维平台 · click to expand')}
           className="rounded-lg p-1 hover:bg-zinc-800/60"
         >
           <OngridLogo size={34} />
@@ -298,13 +298,16 @@ export function Sidebar() {
         >
           <HardDrive size={16} />
         </Link>
-        <Link
-          to="/skills"
-          aria-label={tr('技能', 'Skills')}
-          className="rounded-lg p-2 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
-        >
-          <Wrench size={16} />
-        </Link>
+        {/* user 角色看不到「技能」入口 — 折叠状态下也保持隐藏，与展开侧保持一致 */}
+        {!isUser && (
+          <Link
+            to="/skills"
+            aria-label={tr('技能', 'Skills')}
+            className="rounded-lg p-2 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
+          >
+            <Wrench size={16} />
+          </Link>
+        )}
         <div className="mt-auto flex flex-col items-center gap-2">
           <Link
             to="/settings/health"
@@ -339,11 +342,11 @@ export function Sidebar() {
       <div className="flex items-center gap-1.5 border-b border-zinc-800/60 px-3 py-3">
         <Link
           to="/"
-          aria-label={tr('Ongrid 首页', 'Ongrid home')}
+          aria-label={tr('行业测试AI运维平台 首页', '行业测试AI运维平台 home')}
           className="flex min-w-0 items-center gap-1.5 rounded-lg px-1 py-1 -ml-1 hover:bg-zinc-800/40"
         >
           <OngridLogo size={32} className="-mr-0.5 shrink-0" />
-          <span className="text-[16px] font-semibold tracking-tight text-zinc-100">Ongrid</span>
+          <span className="min-w-0 truncate text-[15px] font-semibold tracking-tight text-zinc-100">行业测试AI运维平台</span>
           {/* Version moved to Settings → About (the brand mark stays clean). */}
         </Link>
         {/* Version + upgrade CTA moved to Settings → About / Upgrade — the brand
@@ -416,7 +419,9 @@ export function Sidebar() {
         <NavSection>
           <SidebarNavItem to="/agents" icon={Bot} label={tr('助理', 'Assistants')} />
           <SidebarNavItem to="/workflows" icon={Route} label={tr('工作流', 'Workflows')} />
-          <SidebarNavItem to="/skills" icon={Wrench} label={tr('技能', 'Skills')} />
+          {/* user 角色隐藏「技能」入口：技能面向管理员 / 开发者自助编排，
+              普通用户只消费 Agent 输出的能力，不该在导航层看到菜单。 */}
+          {!isUser && <SidebarNavItem to="/skills" icon={Wrench} label={tr('技能', 'Skills')} />}
           <SidebarNavItem to="/mcp" icon={Plug} label="MCP" />
           <SidebarNavItem to="/plugins" icon={Boxes} label={tr('插件', 'Plugins')} />
         </NavSection>
@@ -448,7 +453,9 @@ export function Sidebar() {
         <CollapsibleSection storageKey="observability" title={tr('监控告警', 'Observability')} defaultOpen={false}>
           <SidebarNavItem to="/monitor" icon={ChartLine} label={tr('监控', 'Monitor')} />
           <SidebarNavItem to="/logs" icon={FileText} label={tr('日志', 'Logs')} />
-          <SidebarNavItem to="/traces" icon={Waypoints} label={tr('链路', 'Traces')} />
+          {/* user 角色隐藏「链路」入口：trace 调试对运维 / 排障有意义，
+              对普通业务用户是噪音，统一在导航层屏蔽。 */}
+          {!isUser && <SidebarNavItem to="/traces" icon={Waypoints} label={tr('链路', 'Traces')} />}
           <SidebarNavItem to="/alerts" icon={Siren} label={tr('告警', 'Alerts')} badge={incidentOpen} />
         </CollapsibleSection>
 

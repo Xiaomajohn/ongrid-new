@@ -513,7 +513,7 @@ function GrafanaCard() {
         )}
         <code className="mx-1 font-mono text-zinc-400">ongrid-prometheus</code>
         {tr(' 数据源和默认 dashboard 推到 Grafana 的 ', ' datasource and default dashboards into the Grafana ')}<code className="mx-1 font-mono text-zinc-400">ongrid</code>
-        {tr(' 文件夹。跳转过去仍然由用户在 Grafana 那边登录（Ongrid 不代登录）。', ' folder. Jumping to Grafana still requires the user to sign in there (Ongrid does not impersonate).')}
+        {tr(' 文件夹。跳转过去仍然由用户在 Grafana 那边登录（AI 运维平台 不代登录）。', ' folder. Jumping to Grafana still requires the user to sign in there (the AI Ops Platform does not impersonate).')}
       </p>
 
       {loading ? (

@@ -102,8 +102,8 @@ export default function SettingsPreferences() {
         </div>
         <p className="mb-3 text-xs text-zinc-500">
           {tr(
-            '选择一种品牌色作为高亮 / CTA / 当前选中态。来源自 Ongrid logo 的两束渐变。',
-            'Pick a brand color for highlights, primary CTAs, and active state. Drawn from the two gradients in the Ongrid logo.',
+            '选择一种品牌色作为高亮 / CTA / 当前选中态。来源自行业测试AI运维平台 logo 的两束渐变。',
+            'Pick a brand color for highlights, primary CTAs, and active state. Drawn from the two gradients in the 行业测试AI运维平台 logo.',
           )}
         </p>
         <div className="flex flex-wrap gap-2">

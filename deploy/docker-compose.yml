@@ -146,6 +146,23 @@ services:
       # in deploy/README.md).
       ONGRID_ADMIN_EMAIL: ${ONGRID_ADMIN_EMAIL:-}
       ONGRID_ADMIN_PASSWORD: ${ONGRID_ADMIN_PASSWORD:-}
+      # Outbound proxy — HTTP_PROXY / HTTPS_PROXY default to the host's
+      # own proxy so a developer running on a corporate network doesn't
+      # have to edit this file. If the host has neither set, the values
+      # are left empty (no proxy — Go net/http / curl / Python urllib all
+      # treat an empty string as "no proxy"). NO_PROXY is intentionally
+      # NOT inherited from the host: it is hard-pinned to the docker-
+      # internal service names so ongrid → loki / prometheus / mysql /
+      # grafana / ... traffic stays on the compose network and never
+      # traverses the corp proxy. Both case-spellings are written so
+      # Go's net/http (lowercase by default) + Python urllib / curl
+      # (case-sensitive on the convention) all see the same value.
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,mysql,prometheus,loki,tempo,qdrant,searxng,grafana,ongrid,nginx,frontier,.svc,.cluster.local}
+      http_proxy: ${http_proxy:-${HTTP_PROXY:-}}
+      https_proxy: ${https_proxy:-${HTTPS_PROXY:-}}
+      no_proxy: ${no_proxy:-${NO_PROXY:-localhost,127.0.0.1,mysql,prometheus,loki,tempo,qdrant,searxng,grafana,ongrid,nginx,frontier,.svc,.cluster.local}}
     # No ./data bind mount in MySQL mode (data lives in the mysql_data
     # named volume on the mysql service).
     # if switching to sqlite: add bind mount here
