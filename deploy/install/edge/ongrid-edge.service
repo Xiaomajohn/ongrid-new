@@ -4,10 +4,12 @@ After=network-online.target
 Wants=network-online.target
 # C11 Phase-B / ADR-024 remote upgrade. The privileged "apply staged bundle"
 # step runs as a SEPARATE root oneshot (ongrid-edge-upgrade.service) because
-# this unit runs sandboxed (ProtectSystem=strict) and non-root (User=) and so
-# cannot write the binary paths under /usr/local. Wants= pulls the oneshot on
-# every (re)start of this unit — including Restart=always auto-restarts — and
-# After= guarantees the swap lands before the agent execs.
+# this unit runs sandboxed (ProtectSystem=strict) and as root (User=root,
+# required by the audit plugin to read /var/log/audit/audit.log + netlink
+# NETLINK_AUDIT) and so cannot write the binary paths under /usr/local.
+# Wants= pulls the oneshot on every (re)start of this unit — including
+# Restart=always auto-restarts — and After= guarantees the swap lands
+# before the agent execs.
 #
 # This replaces the old `ExecStartPre=-+.../apply-pending-upgrade.sh`, whose
 # `+` root-exec prefix is unsupported on systemd < 231 (CentOS 7 = 219) and
@@ -33,12 +35,21 @@ Type=simple
 # covers systemd 233/234 where StateDirectory= would be silently ignored but
 # ProtectSystem=strict + ReadWritePaths= still take effect.
 # __LIB_DIR__ is included so auditbeat can create its data/ subdir for metadata.
+#
+# User=root / Group=root — required by the audit plugin (Linux audit
+# subsystem reads via NETLINK_AUDIT and /var/log/audit/audit.log, both
+# gated on CAP_AUDIT_* + DAC override; running the whole agent as root
+# is simpler than juggling AmbientCapabilities + supplementary groups,
+# and the sandbox directives below still keep the blast radius tight).
+# install-edge.sh still creates the `ongrid-edge` system user for file
+# ownership (STATE_DIR / PLUGIN_WORK_DIR chown'd to it), but the service
+# itself no longer drops to it.
 EnvironmentFile=__ENV_FILE__
 ExecStart=__BIN_DEST__
 Restart=always
 RestartSec=5
-User=ongrid-edge
-Group=ongrid-edge
+User=root
+Group=root
 AmbientCapabilities=CAP_NET_ADMIN
 NoNewPrivileges=true
 ProtectSystem=strict

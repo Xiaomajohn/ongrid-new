@@ -971,10 +971,23 @@ fi
 ENV_FILE="$INSTALL_DIR/.env"
 chmod 600 "$ENV_FILE"
 
-# Propagate host HTTP(S)_PROXY → ONGRID_HTTPS_PROXY/ONGRID_HTTP_PROXY/
-# ONGRID_NO_PROXY (read from current env, /etc/environment fallback).
-# Idempotent + respects operator hand-tuned values (uses is_blank).
-apply_host_proxy_to_env
+# Proxy: ONGRID_HTTP_PROXY / ONGRID_HTTPS_PROXY / ONGRID_NO_PROXY in $ENV_FILE
+# are operator-managed only — NOT auto-populated from shell env or
+# /etc/environment by this script. The .env.example template ships the
+# three keys as blanks; the operator fills them by hand (or via a corp
+# onboarding runbook) before `docker compose up`. Rationale:
+#   - shell env on jump hosts / CI runners frequently carries a stale or
+#     corp-wide no_proxy (e.g. docker daemon's default "localhost,
+#     localhost4, ...") that silently poisons ONGRID_NO_PROXY when the
+#     install script auto-fills it from ${no_proxy}.
+#   - operator hand-tuned values should win on every install/upgrade; the
+#     fill_blank semantics already guarantee that, but only if we don't
+#     race the operator by writing during install.
+# detect_host_proxy / apply_host_proxy_to_env / append_internal_no_proxy_domains
+# are kept defined above for reference / future opt-in re-enable, but
+# not invoked here. If a corp later asks for auto-detection, gate it
+# behind an explicit ONGRID_AUTODETECT_PROXY=1 env on the install command.
+# apply_host_proxy_to_env
 
 # Fill blanks in-place (portable sed: use .bak suffix then rm).
 fill_blank() {

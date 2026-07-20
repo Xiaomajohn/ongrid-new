@@ -716,7 +716,15 @@ backfill_plain() {
 backfill_plain  GRAFANA_ADMIN_USER     admin
 backfill_secret GRAFANA_ADMIN_PASSWORD 20
 ensure_host_gateway_env
-upgrade_apply_host_proxy
+# Proxy: ONGRID_HTTP_PROXY / ONGRID_HTTPS_PROXY / ONGRID_NO_PROXY in $ENV_FILE
+# are operator-managed only — NOT auto-populated by this upgrade. The
+# .env.example template ships the three keys as blanks; the operator
+# fills them by hand before `docker compose up`. upgrade_apply_host_proxy
+# is kept defined above for reference / future opt-in re-enable, but
+# not invoked here. Mirrors install.sh — see that file for the full
+# rationale (auto-detect races with operator hand-tuned values and
+# silently picks up corp-jump-host no_proxy noise).
+# upgrade_apply_host_proxy
 
 chmod 600 "$ENV_FILE"
 
