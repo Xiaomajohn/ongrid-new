@@ -40,21 +40,21 @@ func NewHandler(svc PanelService) *Handler { return &Handler{svc: svc} }
 
 // Register attaches routes:
 //
-//	GET    /v1/monitor/panels                     (any auth user)
-//	POST   /v1/monitor/panels                     (admin)
-//	PATCH  /v1/monitor/panels/{id}                (admin)
-//	DELETE /v1/monitor/panels/{id}?hard=true      (admin)
-//	POST   /v1/monitor/panels/{id}/restore        (admin)
+//	GET    /v1/monitor/panels                     (any authed)
+//	POST   /v1/monitor/panels                     (any authed)
+//	PATCH  /v1/monitor/panels/{id}                (any authed)
+//	DELETE /v1/monitor/panels/{id}?hard=true      (any authed)
+//	POST   /v1/monitor/panels/{id}/restore        (any authed)
 //
-// Listing is open to any authenticated operator so dashboards render
-// for all users; mutations are admin-gated to mirror the rest of the
-// settings/integration surface.
+// 监控面板的增删改查与设备一样对所有已认证角色开放（沿袭
+// 2026-07-20 的决定），方便 user 自己调整面板。原先的 admin 闸门
+// 已移除；handler 内部的 requireAdmin 仅作为兜底保留，不再被调用。
 func (h *Handler) Register(r chi.Router) {
 	r.Get("/v1/monitor/panels", h.list)
 	r.Post("/v1/monitor/panels", h.create)
 	r.Patch("/v1/monitor/panels/{id}", h.update)
 	r.Delete("/v1/monitor/panels/{id}", h.delete)
-	r.With(h.requireAdminMW).Post("/v1/monitor/panels/{id}/restore", h.restore)
+	r.Post("/v1/monitor/panels/{id}/restore", h.restore)
 }
 
 type listResp struct {
@@ -97,7 +97,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
-	if !h.requireAdmin(w, r) {
+	if !h.requireUser(w, r) {
 		return
 	}
 	var in biz.CreateInput
@@ -114,7 +114,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
-	if !h.requireAdmin(w, r) {
+	if !h.requireUser(w, r) {
 		return
 	}
 	id, err := parseID(r)
@@ -136,7 +136,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
-	if !h.requireAdmin(w, r) {
+	if !h.requireUser(w, r) {
 		return
 	}
 	id, err := parseID(r)
@@ -152,11 +152,10 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// restore revives a soft-deleted panel. Admin only — a restore can
-// re-introduce a panel the operator had explicitly retired, so we
-// don't want any-authed callers triggering it accidentally.
+// restore revives a soft-deleted panel. 任何已认证角色均可触发；
+// admin-only 的注释历史保留作为变更说明，不再强制闸门。
 func (h *Handler) restore(w http.ResponseWriter, r *http.Request) {
-	if !h.requireAdmin(w, r) {
+	if !h.requireUser(w, r) {
 		return
 	}
 	id, err := parseID(r)
