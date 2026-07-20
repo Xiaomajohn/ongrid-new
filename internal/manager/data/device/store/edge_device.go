@@ -69,16 +69,33 @@ func (r *EdgeDeviceRepo) LookupHostDevice(ctx context.Context, edgeID uint64) (u
 // relation type). When more than one edge has a junction to the same
 // device under the same type (a multi-agent host), the most recently
 // created junction wins.
+//
+// 防御性 JOIN edges：junction 行没软删 (delete_marker=0)，但被指向
+// 的 edge 行可能被软删 (edges.delete_marker=1)。如果不加 JOIN，
+// 历史数据会返回"指向已删除 edge"的悬挂 id，导致 devicessh.Router
+// 内部 edges.Get 报 "record not found"（用户表现：WebSSH 打不开）。
+// GORM 的 soft_delete 插件已为 edges 自动加 delete_marker=0 过滤，
+// 这里再显式 Where 一下保证两条路径行为一致 —— 走原生 GORM 查询时
+// 默认走 *model.Edge 的 soft_delete 钩子；LEFT JOIN 的兜底是兜住
+// 未来误关掉插件或绕开软删插件写入的场景。返回 ErrNotFound 让 router
+// fall through 到 direct SSH 分支（devicessh.Router.Pick 的现有逻辑）。
 func (r *EdgeDeviceRepo) LookupEdgeForDevice(ctx context.Context, deviceID uint64, t model.EdgeDeviceRelationType) (uint64, error) {
-	var row model.EdgeDevice
-	if err := r.db.WithContext(ctx).
-		Where("device_id = ? AND type = ?", deviceID, t).
-		Order("id DESC").
-		First(&row).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return 0, errs.ErrNotFound
-		}
+	var row struct {
+		EdgeID uint64
+	}
+	err := r.db.WithContext(ctx).
+		Table("edge_devices AS ed").
+		Select("ed.edge_id AS edge_id").
+		Joins("JOIN edges e ON e.id = ed.edge_id AND e.delete_marker = 0").
+		Where("ed.device_id = ? AND ed.type = ? AND ed.delete_marker = 0", deviceID, t).
+		Order("ed.id DESC").
+		Limit(1).
+		Scan(&row).Error
+	if err != nil {
 		return 0, err
+	}
+	if row.EdgeID == 0 {
+		return 0, errs.ErrNotFound
 	}
 	return row.EdgeID, nil
 }

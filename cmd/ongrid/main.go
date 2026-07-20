@@ -773,6 +773,36 @@ func main() {
 		}
 	}
 
+	// Boot backfill: heal "orphaned edge_devices junctions" —— junction
+	// 行（delete_marker=0）但指向的 edge 已被软删（edges.delete_marker>0）。
+	// 历史成因：Usecase.Delete 在 2026-07-20 修复之前只软删 edges，不联动
+	// 清理 edge_devices，导致 LookupEdgeForDevice 返回悬挂 edge_id，
+	// devicessh.Router 走 edges.Get 时报"record not found"，用户表现
+	// 就是 WebSSH 打不开。这里在启动时一次性清扫所有悬挂 junction（不改
+	// edges 主体），让 devicessh.Router 后续能从 ErrNotFound 自然 fall
+	// through 到 direct SSH / 自动降级。
+	//
+	// 仅清理仍存活的 junction 行（delete_marker=0），不动已被正常软删
+	// 的 junction。后续 Usecase.Delete 已经联动清理，不会再产生新悬挂。
+	{
+		marker := time.Now().UTC().UnixMilli()
+		res := db.Exec(`
+			UPDATE edge_devices ed
+			JOIN edges e ON e.id = ed.edge_id
+			SET ed.delete_marker = ?
+			WHERE ed.delete_marker = 0
+			  AND e.delete_marker > 0`,
+			marker,
+		)
+		if res.Error != nil {
+			log.Warn("edge_devices: orphaned-junction backfill failed", slog.Any("err", res.Error))
+		} else if res.RowsAffected > 0 {
+			log.Info("edge_devices: cleaned orphaned junctions to dangling soft-deleted edges",
+				slog.Int64("rows", res.RowsAffected),
+			)
+		}
+	}
+
 	// Boot backfill: heal orphaned investigation reports. An RCA worker only
 	// lives inside this process, so any report left in pending/running by a
 	// previous process (crash or deploy mid-investigation) is orphaned —

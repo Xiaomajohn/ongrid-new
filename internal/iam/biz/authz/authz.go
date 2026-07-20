@@ -93,9 +93,14 @@ var rolePolicies = [][]string{
 	{iammodel.MembershipRoleAdmin, "*", "member:*", "*"},
 	{iammodel.MembershipRoleAdmin, "*", "*", "*"},
 
-	// member: read + write + exec on resources, no member management.
+	// member: read + write + delete + exec on resources, no member management.
+	// delete 覆盖 DELETE 类端点（edge/http.go 的 deleteMW → act="delete"），
+	// 与 device/monitor panel 任何已认证角色都能删的语义保持一致；不加
+	// 这一行会导致 user 角色点删除 edge 时被 casbin 403（详见
+	// .record/2026-07-20-edge-delete-policy-fix.md）。
 	{iammodel.MembershipRoleMember, "*", "*", "read"},
 	{iammodel.MembershipRoleMember, "*", "*", "write"},
+	{iammodel.MembershipRoleMember, "*", "*", "delete"},
 	{iammodel.MembershipRoleMember, "*", "device:shell", "exec"},
 
 	// viewer: read only. No device:shell access — viewers see audit

@@ -293,6 +293,14 @@ func (u *Usecase) List(ctx context.Context, f ListFilter) ([]*model.Edge, error)
 // list / query_devices forever (the device row outlives the edge row; only
 // HandleOffline on a tunnel close used to flip it, so a hard delete left an
 // orphan that read as perpetually online).
+//
+// 同时联动清理 edge_devices junction —— 软删 edge 后保留 junction 行
+// 会导致 LookupEdgeForDevice 返回一个"指向已删除 edge"的悬挂 id，
+// 进而触发 devicessh.Router 内的 edges.Get 报"record not found"，
+// 用户表现就是 WebSSH 打不开。一并软删 junction（任意 type：host /
+// discovered 都清）保证两边 delete_marker 同步翻转，避免历史回归。
+// 失败仅记录：edge 主体的软删已经提交，悬挂 junction 在启动 backfill
+// 阶段也会被清扫（见 cmd/ongrid/main.go）。
 func (u *Usecase) Delete(ctx context.Context, id uint64) error {
 	if u.repo == nil {
 		return errs.ErrNotWiredYet
@@ -305,7 +313,38 @@ func (u *Usecase) Delete(ctx context.Context, id uint64) error {
 			}
 		}
 	}
+	if u.links != nil {
+		if err := u.softDeleteJunctions(ctx, id); err != nil && u.log != nil {
+			u.log.Warn("delete edge: edge_devices cleanup failed (startup backfill will retry)", "edge_id", id, "err", err)
+		}
+	}
 	return u.repo.Delete(ctx, id)
+}
+
+// softDeleteJunctions 把某个 edge 在 edge_devices 表里的所有 junction 行
+// （任意 type：host / discovered）做软删除：delete_marker = now.UnixMilli()，
+// deleted_at = now()。与 probes_softdelete.SSHBulkSoftDelete 风格保持一致，
+// 不绕过 soft_delete 插件（GORM 的 .UpdateColumn 不带软删过滤），而是
+// 直接走 GORM 的 Unlink —— Unlink 已实现为软删除（详见
+// data/device/store/edge_device.go）。失败返回原 error 让上层决定
+// 是否降级。
+func (u *Usecase) softDeleteJunctions(ctx context.Context, edgeID uint64) error {
+	if u.links == nil || edgeID == 0 {
+		return nil
+	}
+	devices, err := u.links.ListDevicesForEdge(ctx, edgeID)
+	if err != nil {
+		return fmt.Errorf("list edge_devices for edge %d: %w", edgeID, err)
+	}
+	for _, ed := range devices {
+		if ed == nil {
+			continue
+		}
+		if err := u.links.Unlink(ctx, edgeID, ed.DeviceID, ed.Type); err != nil {
+			return fmt.Errorf("unlink edge=%d device=%d type=%d: %w", edgeID, ed.DeviceID, ed.Type, err)
+		}
+	}
+	return nil
 }
 
 // RotateSecret generates a new SecretKey, replaces the stored hash, and
