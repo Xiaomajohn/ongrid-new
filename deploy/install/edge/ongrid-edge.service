@@ -44,13 +44,28 @@ Type=simple
 # install-edge.sh still creates the `ongrid-edge` system user for file
 # ownership (STATE_DIR / PLUGIN_WORK_DIR chown'd to it), but the service
 # itself no longer drops to it.
+#
+# AmbientCapabilities= caps — every one is required. NoNewPrivileges=true
+# makes ambient the ONLY cap propagation channel to children, so listing
+# fewer caps re-EPERMs the audit module on first connect:
+#
+# CAP_NET_ADMIN        历史保留；NETLINK_AUDIT 在部分发行版也走 netlink
+# CAP_AUDIT_READ       audit_open() 订阅 NETLINK_AUDIT multicast，必须
+# CAP_AUDIT_WRITE      auditbeat system module / kernel-audit 写路径，加稳
+# CAP_DAC_READ_SEARCH  绕过 DAC 读 audit.log 0600；不解 DAC_OVERRIDE 避免
+#                      放成「任何文件都能读写」，最小授权
+#
+# Dual-source sync: deploy/install/edge/install.sh 的 heredoc 是这份 unit
+# 的第二个 source（curl-pipe installer 直接 cat 写）。改这里务必同步改
+# install.sh，并通过那边的 self-check 验证。详见
+# .record/2026-07-20-edge-install-heredoc-mismatch-and-audit-caps.md。
 EnvironmentFile=__ENV_FILE__
 ExecStart=__BIN_DEST__
 Restart=always
 RestartSec=5
 User=root
 Group=root
-AmbientCapabilities=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN CAP_AUDIT_READ CAP_AUDIT_WRITE CAP_DAC_READ_SEARCH
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true

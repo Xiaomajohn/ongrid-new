@@ -404,7 +404,8 @@ After=network-online.target
 Wants=network-online.target
 # ADR-024 remote upgrade: the privileged "apply staged bundle + rollback
 # check" step runs as the separate root oneshot ongrid-edge-upgrade.service
-# (this unit is sandboxed + non-root and cannot write ${BIN_DIR}). Wants=
+# (this unit runs as User=root, sandboxed by ProtectSystem=strict, and
+# therefore cannot write ${BIN_DIR} without breaking the sandbox). Wants=
 # pulls it on every (re)start incl. Restart=always; After= guarantees the
 # swap lands before the agent execs.
 Wants=ongrid-edge-upgrade.service
@@ -416,9 +417,30 @@ EnvironmentFile=${ENV_FILE}
 ExecStart=${BIN_DIR}/ongrid-edge
 Restart=always
 RestartSec=5
-User=ongrid-edge
-Group=ongrid-edge
-AmbientCapabilities=CAP_NET_ADMIN
+# User=root / Group=root — required by the audit plugin (auditbeat 9.x
+# auditd module calls audit_open() → audit_get_status() via NETLINK_AUDIT
+# and reads /var/log/audit/audit.log mode 0600 root:audit; both gated on
+# CAP_AUDIT_* + DAC bypass). NoNewPrivileges=true makes ambient caps the
+# only cap propagation channel to children, so the four caps below MUST be
+# listed in AmbientCapabilities= in one shot — dropping any one of them
+# re-EPERMs the audit module on first connect.
+#
+# CAP_NET_ADMIN        历史保留（d809b3fc）；NETLINK_AUDIT 在部分发行版也走 netlink
+# CAP_AUDIT_READ       audit_open() 订阅 NETLINK_AUDIT multicast，必须
+# CAP_AUDIT_WRITE      auditbeat system module / kernel-audit 写路径，加稳
+# CAP_DAC_READ_SEARCH  绕过 DAC 读 audit.log 0600；不解 DAC_OVERRIDE 避免放成
+#                      「任何文件都能读写」，最小授权
+#
+# install-edge.sh still creates the `ongrid-edge` system user for file
+# ownership (STATE_DIR / PLUGIN_WORK_DIR chown'd to it), but the service
+# itself no longer drops to it. Dual-source sync: this heredoc MUST mirror
+# deploy/install/edge/ongrid-edge.service (the offline-tarball template);
+# the self-check below greps both for User=root + AmbientCapabilities
+# CAP_AUDIT_READ to catch drift. See .record/2026-07-20-edge-install-
+# heredoc-mismatch-and-audit-caps.md.
+User=root
+Group=root
+AmbientCapabilities=CAP_NET_ADMIN CAP_AUDIT_READ CAP_AUDIT_WRITE CAP_DAC_READ_SEARCH
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
@@ -562,6 +584,25 @@ if [[ -n "$DP_HOST" ]] && timeout 5 bash -c "exec 3<>/dev/tcp/${DP_HOST}/443" 2>
     log_ok "data-plane host ${DP_HOST}:443 reachable (TCP)"
 else
     log_warn "data-plane host ${DP_HOST}:443 not reachable from here — logs/traces push may fail"
+fi
+# Validate the freshly-written service file. If the heredoc drifts from the
+# .service template again (e.g. a partial sed, or someone re-renders only one
+# of the two sources of truth), User= or AmbientCapabilities= would silently
+# regress to ongrid-edge / CAP_NET_ADMIN-only and auditbeat would crash on
+# every fresh install with EPERM. Make that loud here. See
+# .record/2026-07-20-edge-install-heredoc-mismatch-and-audit-caps.md.
+if [[ -f "$SERVICE_FILE" ]]; then
+    if ! grep -qE '^User=root$' "$SERVICE_FILE"; then
+        log_error "${SERVICE_FILE}: User= is not root (audit plugin will fail)"; SELFCHECK_FAIL=1
+    fi
+    if ! grep -qE '^AmbientCapabilities=.*\bCAP_AUDIT_READ\b' "$SERVICE_FILE"; then
+        log_error "${SERVICE_FILE}: AmbientCapabilities= missing CAP_AUDIT_READ (audit_open will EPERM)"; SELFCHECK_FAIL=1
+    fi
+    if ! grep -qE '^AmbientCapabilities=.*\bCAP_DAC_READ_SEARCH\b' "$SERVICE_FILE"; then
+        log_error "${SERVICE_FILE}: AmbientCapabilities= missing CAP_DAC_READ_SEARCH (audit.log read will EPERM)"; SELFCHECK_FAIL=1
+    fi
+else
+    log_error "${SERVICE_FILE} not found after install"; SELFCHECK_FAIL=1
 fi
 if [[ $SELFCHECK_FAIL -eq 0 ]]; then
     log_ok "self-check passed"
