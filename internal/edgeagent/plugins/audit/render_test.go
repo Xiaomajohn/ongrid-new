@@ -90,15 +90,21 @@ func TestRenderDefaultModules(t *testing.T) {
 	body := string(out)
 	// Default modules = ["fim", "auditd"] — auditd was added to
 	// defaults in 2026-07-18 so the on-event audit surface is broad
-	// enough out of the box, but auditd_rules still defaults to []
-	// so auditd emits no rules of its own. Operators fill the rules
-	// in the UI to opt specific paths (e.g. /bin, /usr/bin) into the
-	// execve watcher. The system module stays opted-out (default).
+	// enough out of the box. auditd_rules defaults to two 64-bit
+	// execve / execveat syscall rules (proc_exec key) so the
+	// auditd module produces events out of the box on any 64-bit
+	// edge — no operator setup required to capture "who ran what
+	// binary" regardless of path. Operators can still override via
+	// the UI. The system module stays opted-out (default).
 	for _, w := range []string{
 		"- module: file_integrity", // Spec alias "fim"
 		"- module: auditd",
 		"resolve_ids: true",         // auditd defaults
 		"audit_rules: |",
+		// 64-bit syscall defaults cover both x86_64 and aarch64
+		// (arch=b64 = 当前平台原生 64 位).
+		"-S execve -k proc_exec",
+		"-S execveat -k proc_exec",
 	} {
 		if !strings.Contains(body, w) {
 			t.Errorf("default modules missing %q\n--- body ---\n%s", w, body)
@@ -111,6 +117,81 @@ func TestRenderDefaultModules(t *testing.T) {
 	// system datasets should not render either way (system opted out).
 	if strings.Contains(body, "datasets:") {
 		t.Errorf("system datasets should not render by default\n--- body ---\n%s", body)
+	}
+}
+
+// TestRenderExplicitEmptyAuditdRulesRespected pins the contract that an
+// operator who explicitly stores auditd_rules=[] in spec MUST NOT have
+// the default 64-bit execve/execveat rules silently re-injected. The
+// fallback fires only when the spec key is absent (buildTemplateData
+// funnel: stringSliceField → nil → withDefaultAuditdRules returns
+// defaults; specRules=[] is passed through verbatim).
+func TestRenderExplicitEmptyAuditdRulesRespected(t *testing.T) {
+	cfg := plugins.PluginConfig{
+		Enabled: true,
+		EdgeID:  9,
+		Spec: map[string]interface{}{
+			"modules":      []interface{}{"auditd"},
+			"auditd_rules": []interface{}{}, // operator cleared it
+		},
+	}
+	out, err := render(testWorkDir, cfg)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	body := string(out)
+	for _, mustNot := range []string{
+		"-S execve -k proc_exec",
+		"-S execveat -k proc_exec",
+	} {
+		if strings.Contains(body, mustNot) {
+			t.Errorf("operator-cleared auditd_rules must stay empty, found %q\n--- body ---\n%s", mustNot, body)
+		}
+	}
+	// The auditd block still renders with defaults like resolve_ids,
+	// only the rules list is empty.
+	if !strings.Contains(body, "- module: auditd") {
+		t.Errorf("auditd block missing when modules=[auditd]\n--- body ---\n%s", body)
+	}
+	if !strings.Contains(body, "audit_rules: |") {
+		t.Errorf("audit_rules key still expected when rules are empty\n--- body ---\n%s", body)
+	}
+}
+
+// TestRenderCustomAuditdRulesOverrideDefaults pins that a non-empty
+// spec.auditd_rules wins over the default execve/execveat pair.
+// Operators can replace the defaults entirely with `-w /path -p x` style
+// rules if they prefer inotify path-based monitoring.
+func TestRenderCustomAuditdRulesOverrideDefaults(t *testing.T) {
+	cfg := plugins.PluginConfig{
+		Enabled: true,
+		EdgeID:  11,
+		Spec: map[string]interface{}{
+			"modules": []interface{}{"auditd"},
+			"auditd_rules": []interface{}{
+				"-w /etc/passwd -p wa -k passwd_changes",
+			},
+		},
+	}
+	out, err := render(testWorkDir, cfg)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	body := string(out)
+	for _, w := range []string{
+		"-w /etc/passwd -p wa -k passwd_changes",
+	} {
+		if !strings.Contains(body, w) {
+			t.Errorf("custom rule missing %q\n--- body ---\n%s", w, body)
+		}
+	}
+	// Default execve rules must NOT also appear (no merge).
+	for _, mustNot := range []string{
+		"-S execve -k proc_exec",
+	} {
+		if strings.Contains(body, mustNot) {
+			t.Errorf("custom rules must replace defaults, but found %q\n--- body ---\n%s", mustNot, body)
+		}
 	}
 }
 

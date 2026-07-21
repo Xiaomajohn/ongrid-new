@@ -3583,11 +3583,11 @@ function AuditSpecForm({
           <StringListField
             label="auditd_rules"
             values={auditdRules}
-            placeholder="-w /usr/bin -p x -k bin_exec"
+            placeholder="-a always,exit -F arch=b64 -S execve -k proc_exec"
             onChange={(next) => setField('auditd_rules', next)}
             hint={tr(
-              '自定义 audit rules，每行一条，等价于 auditbeat.yml 中的 audit_rules: 块。默认仅加载 auditd 模块（不发事件），要监控「谁执行了 /bin、/usr/bin 下的二进制」请填诸如 `-w /bin -p x -k bin_exec`、`-w /usr/bin -p x -k bin_exec`、`-w /sbin -p x -k bin_exec`、`-w /usr/sbin -p x -k bin_exec` 这种规则。规则为空则不产出任何 execve 事件。',
-              'Custom audit rules, one per line. Mirrors the audit_rules: block in auditbeat.yml. The auditd module is loaded by default but emits zero events until you add rules — fill entries like `-w /bin -p x -k bin_exec`, `-w /usr/bin -p x -k bin_exec`, `-w /sbin -p x -k bin_exec`, `-w /usr/sbin -p x -k bin_exec` to capture "who ran /usr/bin/*" execve events. Empty rules → no execve events.',
+              '自定义 audit rules，每行一条，等价于 auditbeat.yml 中的 audit_rules: 块。默认已预填两条 64 位 execve / execveat syscall 规则（arch=b64 同时覆盖 x86_64 / aarch64），可监控任意路径下启动的进程（不限于 /bin、/usr/bin）。需要监控特定路径请追加诸如 `-w /etc/passwd -p wa -k passwd_changes` 这种规则。填空数组保存则会丢掉默认规则、auditd 模块发出 0 事件。',
+              'Custom audit rules, one per line. Mirrors the audit_rules: block in auditbeat.yml. By default two 64-bit execve / execveat syscall rules are pre-filled (arch=b64 covers both x86_64 and aarch64) so any process start is captured regardless of path — not just /bin or /usr/bin. Add entries like `-w /etc/passwd -p wa -k passwd_changes` for specific path watches. Saving with an empty array clears the defaults and the auditd module emits 0 events.',
             )}
           />
         </div>

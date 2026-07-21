@@ -33,7 +33,11 @@ package edge
 //   - auditd_failure_mode  → "silent"
 //   - auditd_backlog_limit → 8192
 //   - auditd_rate_limit    → 0
-//   - auditd_rules         → []string{}
+//   - auditd_rules         → []string{两条 64 位 execve / execveat 系统调用级规则}
+//                            覆盖任意路径下启动的进程（/opt、动态脚本等都命中）；
+//                            arch=b64 在 auditd 里就是当前平台原生 64 位
+//                            （x86_64 / aarch64 都命中）；不引入 32 位、不引入
+//                            exit_group/exit（避免高 QPS 机器产生风暴）。
 //   - system_state_period  → "12h"
 //   - system_login         → true
 //   - system_package       → true
@@ -53,7 +57,10 @@ func AuditDefaultSpec() map[string]interface{} {
 		"auditd_failure_mode":   "silent",
 		"auditd_backlog_limit":  8192,
 		"auditd_rate_limit":     0,
-		"auditd_rules":          []string{},
+		"auditd_rules": []string{
+			"-a always,exit -F arch=b64 -S execve -k proc_exec",
+			"-a always,exit -F arch=b64 -S execveat -k proc_exec",
+		},
 		"system_state_period":   "12h",
 		"system_login":          true,
 		"system_package":        true,

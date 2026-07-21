@@ -365,7 +365,14 @@ func buildTemplateData(workDir string, cfg plugins.PluginConfig) templateData {
 		AuditdFailureMode:  stringFieldOr(cfg.Spec, "auditd_failure_mode", "silent"),
 		AuditdBacklogLimit: intFieldOr(cfg.Spec, "auditd_backlog_limit", 8192),
 		AuditdRateLimit:    intFieldOr(cfg.Spec, "auditd_rate_limit", 0),
-		AuditdRules:        stringSliceField(cfg.Spec, "auditd_rules"),
+		// auditd_rules 默认给两条 64 位 execve/execveat 系统调用级规则：
+		// arch=b64 在 auditd 里就是当前平台原生 64 位（x86_64 / aarch64 都命中），
+		// 不区分 CPU 家族。覆盖任意路径下启动的进程（含 /opt 自定义二进制、
+		// 动态链接脚本等），比 -w /usr/bin -p x 的 inotify 路径级更彻底。
+		// 不引入 exit_group/exit 是为了避免高 QPS 机器产生 exit 风暴——
+		// 进程停止依靠 auditbeat system.process dataset 或 ps 补齐。
+		// Spec 里显式给了 auditd_rules（含空数组）就以 spec 为准，env override 不参与。
+		AuditdRules: withDefaultAuditdRules(stringSliceField(cfg.Spec, "auditd_rules")),
 
 		SystemDatasets:    sysDatasets,
 		SystemStatePeriod: stringFieldOr(cfg.Spec, "system_state_period", "12h"),
@@ -416,6 +423,27 @@ func auditOutputExclude() string {
 	return `^.*/audit\.jsonl(-\d{8}(-\d+)?\.ndjson|(\.\d+)?)$`
 }
 
+// defaultAuditdRules 64 位默认规则：execve + execveat 双 syscall，捕获任意路径下进程启动 / 重启。
+// arch=b64 在 auditd 里就是当前平台原生 64 位（x86_64 / aarch64 都命中）。
+// 不引入 32 位（arm/x86 32-bit 在生产边缘几乎绝迹，徒增规则噪声）。
+// 不引入 exit_group/exit 是为了避免高 QPS 机器产生 exit 风暴。
+// 注意：Go 里 []string{} 不是常量，必须 var；const 只能是基础类型字面量。
+// 用 var + 函数内 copy 的方式避免多个调用方共享同一个 slice 被意外修改。
+var defaultAuditdRules = []string{
+	"-a always,exit -F arch=b64 -S execve -k proc_exec",
+	"-a always,exit -F arch=b64 -S execveat -k proc_exec",
+}
+
+// withDefaultAuditdRules 把"spec 显式给空数组"也视作"operator 主动清空"，尊重 spec；
+// 只有 spec 里根本没给 auditd_rules 键时才回落到默认规则。这样 reconcile 时 DB 里
+// 存的 auditd_rules=[] 不会被默认值覆盖（避免「我清空了又被悄悄填回去」）。
+func withDefaultAuditdRules(specRules []string) []string {
+	if specRules == nil {
+		return append([]string(nil), defaultAuditdRules...)
+	}
+	return specRules
+}
+
 // DefaultSpec 返回 audit plugin 默认 spec 的 JSON 化形式，供 manager
 // 侧在 ListForUI / FetchForEdge 当 DB row 没 spec 时填默认用。这样
 // UI 上能直接看到完整模板而不是空 {}，操作员在 form/json 间切换修改
@@ -432,11 +460,11 @@ func auditOutputExclude() string {
 // 因为 manager 不能直接 import edgeagent 包（跨域隔离）。修改默认值时
 // 必须同步两边。
 //
-// auditd_rules 故意保持空数组（不预填路径）。auditbeat 加载空规则集
-// 不会发出任何 execve 类事件——只有 operator 在 UI 上显式填入 `-w /bin -p x` /
-// `-w /usr/bin -p x` 这类规则后才会真正产出"系统文件被哪个进程执行了"
-// 事件。这样默认配置改动是"加挂载能力、不产生新事件"，对没运维接入
-// auditd_rules 的 edge 是 no-op，避免误伤存量设备。
+// auditd_rules 改成 64 位 execve / execveat 双 syscall 默认值，覆盖任何路径下
+// 启动的进程（含 /opt 自定义二进制、动态脚本），不再是空数组。arch=b64 在 auditd
+// 里就是当前平台原生 64 位（x86_64 / aarch64 都命中）；不引入 32 位（生产边缘
+// 几乎绝迹，徒增噪声）；不引入 exit_group/exit（避免高 QPS 机器产生 exit 风暴）。
+// 进程停止依靠 auditbeat system.process dataset 或 ps 补齐。
 func DefaultSpec() map[string]interface{} {
 	return map[string]interface{}{
 		"modules":               []string{"fim", "auditd"},
@@ -450,7 +478,7 @@ func DefaultSpec() map[string]interface{} {
 		"auditd_failure_mode":   "silent",
 		"auditd_backlog_limit":  8192,
 		"auditd_rate_limit":     0,
-		"auditd_rules":          []string{},
+		"auditd_rules":          append([]string(nil), defaultAuditdRules...),
 		"system_state_period":   "12h",
 		"system_login":          true,
 		"system_package":        true,
