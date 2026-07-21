@@ -172,6 +172,39 @@ for grp in adm systemd-journal; do
     fi
 done
 
+# ---------- stop OS-shipped auditd so auditbeat owns the audit subsystem ---
+#
+# auditbeat 9.x 的 auditd 模块通过 audit_open() → audit_get_status() 订阅
+# NETLINK_AUDIT multicast；如果 OS 自带的 auditd.service 也开着，两者
+# 抢 audit 子系统，auditbeat 子进程会 EPERM（servernode 验证过，详见
+# .record/2026-07-20-edge-install-heredoc-mismatch-and-audit-caps.md）。
+# 装机时把 OS 自带 auditd stop + disable，让 auditbeat 独占。
+#
+# Silent skip：systemctl 不存在（容器、darwin、init=/bin/bash）、
+# auditd.service unit 不存在（极简镜像、WSL）、stop/disable 失败均
+# 不阻断装机主流程（warn 但 continue）。不动 audit 规则文件，保留现场
+# 便于事后排查。
+stop_auditd_for_auditbeat() {
+    command -v systemctl >/dev/null 2>&1 || return 0
+    # auditd.service unit 不存在 → 静默跳过
+    systemctl cat auditd.service >/dev/null 2>&1 || return 0
+    if systemctl is-active --quiet auditd.service 2>/dev/null; then
+        if systemctl stop auditd.service 2>/dev/null; then
+            log_info "stopped auditd.service (auditbeat's auditd module owns the audit subsystem now)"
+        else
+            log_warn "failed to stop auditd.service — audit plugin may conflict; continue anyway"
+        fi
+    fi
+    if systemctl is-enabled --quiet auditd.service 2>/dev/null; then
+        if systemctl disable auditd.service 2>/dev/null; then
+            log_info "disabled auditd.service (auditbeat replaces it on next boot)"
+        else
+            log_warn "failed to disable auditd.service — it'll restart on next boot; continue anyway"
+        fi
+    fi
+}
+stop_auditd_for_auditbeat
+
 # ---------- install binary ----------
 log_info "installing binary to $BIN_DEST"
 install -m 0755 -o root -g root "$BIN_SRC" "$BIN_DEST"

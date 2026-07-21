@@ -77,6 +77,36 @@ ensure_log_groups() {
 }
 ensure_log_groups
 
+# ----- Pre-start: disable OS-shipped auditd --------------------------------
+#
+# Same role as install-edge.sh's stop_auditd_for_auditbeat, but with the
+# `set -uo pipefail` (no -e) + `log` (no log_info/log_warn) style of this
+# script. Runs as root via the ongrid-edge-upgrade.service oneshot on every
+# boot, including every Restart=always auto-restart, so re-asserted on every
+# start: if a fresh box had auditd enabled by default (RHEL/Kylin family),
+# this hook stops + disables it before the agent spawns auditbeat and the
+# auditd module's audit_open() collides with the OS auditd on NETLINK_AUDIT.
+#
+# Silent skip on containers / WSL / Darwin / minimal Linux (no systemctl
+# or no auditd.service unit). Stop / disable failures only `log` and never
+# block the upgrade. We intentionally don't touch /etc/audit/rules.d/ — the
+# rules stay on disk for post-mortem use.
+ensure_auditd_disabled() {
+  command -v systemctl >/dev/null 2>&1 || return 0
+  systemctl cat auditd.service >/dev/null 2>&1 || return 0
+  if systemctl is-active --quiet auditd.service 2>/dev/null; then
+    systemctl stop auditd.service 2>/dev/null \
+      && log "stopped auditd.service (auditbeat's auditd module owns the audit subsystem now)" \
+      || log "failed to stop auditd.service; audit plugin may conflict"
+  fi
+  if systemctl is-enabled --quiet auditd.service 2>/dev/null; then
+    systemctl disable auditd.service 2>/dev/null \
+      && log "disabled auditd.service (auditbeat replaces it on next boot)" \
+      || log "failed to disable auditd.service; it'll restart on next boot"
+  fi
+}
+ensure_auditd_disabled
+
 # ----- Mode 1: auto-rollback ------------------------------------------------
 #
 # Trigger: a prior boot ran apply (LAST_UPGRADE_AT exists) AND the agent
