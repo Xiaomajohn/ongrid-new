@@ -128,20 +128,34 @@ func (r *EdgeDeviceRepo) ListEdgesForDevice(ctx context.Context, deviceID uint64
 // IN 查询带 JOIN，避免 N+1。仅暴露不含敏感字段的子集（id / name /
 // status / task_name / last_seen_at），不返 access_key_id 与
 // secret_key_hash —— 列表接口的授权面比单查 GET /v1/edges 更广，不能
-// 借机泄漏 agent 凭据。Soft-delete 双方都按 delete_marker=0 过滤。
+// 借机泄漏 agent 凭据。
+//
+// includeDeleted=true 时不过滤已软删除的 edge 行（e.delete_marker != 0），
+// 供 Logs 页面"显示已删除"开关联动查询已删除的 edge 任务。
+// junction 行始终按 ed.delete_marker=0 过滤（junction 删除语义不同）。
 //
 // 返回值：device_id → 该 device 关联的 edge 列表（保持 edges.id 升序）。
 // 未关联 edge 的 device 不在 map 里；deviceIDs 为空时返回空 map。
-func (r *EdgeDeviceRepo) ListEdgesForDevices(ctx context.Context, deviceIDs []uint64) (map[uint64][]biz.EdgeMini, error) {
+func (r *EdgeDeviceRepo) ListEdgesForDevices(ctx context.Context, deviceIDs []uint64, includeDeleted bool) (map[uint64][]biz.EdgeMini, error) {
 	out := make(map[uint64][]biz.EdgeMini, len(deviceIDs))
 	if len(deviceIDs) == 0 {
 		return out, nil
 	}
-	// 注意：GORM 0.x 的 Raw + IN(?) 会按 driver 展开 slice，参数必须是
-	// []uint64；硬编码列名是为了让 MySQL 与 SQLite 走同一条 SQL（与
-	// reconcileOfflineOrphansSQL 同策略）。delete_marker=0 是软删除"行
-	// 还活着"的 sentinel（参见 model.Device.DeleteMarker 注释）。
-	const q = `SELECT ed.device_id AS device_id,
+	// includeDeleted 控制是否过滤已软删除的 edge。junction 行始终过滤。
+	var q string
+	if includeDeleted {
+		q = `SELECT ed.device_id AS device_id,
+	                  e.id         AS id,
+	                  e.name       AS name,
+	                  e.status     AS status,
+	                  e.task_name  AS task_name,
+	                  e.last_seen_at AS last_seen_at
+	           FROM edges e
+	           JOIN edge_devices ed
+	             ON ed.edge_id = e.id AND ed.delete_marker = 0
+	           WHERE ed.device_id IN (?)`
+	} else {
+		q = `SELECT ed.device_id AS device_id,
 	                  e.id         AS id,
 	                  e.name       AS name,
 	                  e.status     AS status,
@@ -152,6 +166,7 @@ func (r *EdgeDeviceRepo) ListEdgesForDevices(ctx context.Context, deviceIDs []ui
 	             ON ed.edge_id = e.id AND ed.delete_marker = 0
 	           WHERE e.delete_marker = 0
 	             AND ed.device_id IN (?)`
+	}
 	type row struct {
 		DeviceID   uint64
 		ID         uint64

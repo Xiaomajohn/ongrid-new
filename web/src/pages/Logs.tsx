@@ -490,23 +490,20 @@ export default function LogsPage() {
     });
   }, [devices]);
 
-  // 任务下拉 options：从所有 device 关联的 edge 聚合（不再过滤空
-  // task_name），label 与 LogQL 注入耦合：
+  // 任务下拉 options：从设备关联的 edge 聚合。当选择了设备时，
+  // 仅展示该设备关联的 edge 任务；未选设备时展示全局任务。
+  // label 与 LogQL 注入耦合：
   //   - task_name 非空 → { value: task_name, label: task_name,
   //     hint: edge.name }。Loki 注入 task_name="<v>"。
   //   - task_name 为空 → { value: `__edge_<id>__`（哨兵）, label: (无任务) }，
   //     注入时由 topbarFacets 切到 device_id="<device_id>" 路径。
-  //
-  // 为什么 task_name 为空时 label 用 (无任务) 而不是 edge.name？
-  // edge.name 在生产环境经常 = hostname（"localhost.localdomain"），
-  // 跟 d.name 同质都是「系统自动填的没信息量的名字」。把它当任务
-  // 名回退会误导 operator。明确显示 (无任务) 让用户知道这条 edge
-  // 创建时没填 task_name，避免继续点击后发现过滤为空。
-  // hint 字段在两个分支都不再传 edge.name（避免误导），仅在
-  // task_name 非空时给 `#<edge.id>` 作为副标识。
   const taskOptions = useMemo<SearchableSelectOption[]>(() => {
     const out: SearchableSelectOption[] = [];
-    for (const d of devices) {
+    // 设备关联：选了设备时只从该设备的 edges 聚合任务
+    const source = deviceFilter
+      ? devices.filter((d) => String(d.id) === deviceFilter)
+      : devices;
+    for (const d of source) {
       for (const e of d.edges ?? []) {
         const tn = (e.task_name || '').trim();
         if (tn) {
@@ -521,7 +518,7 @@ export default function LogsPage() {
       }
     }
     return out.sort((a, b) => a.label.localeCompare(b.label));
-  }, [devices]);
+  }, [devices, deviceFilter]);
   useEffect(() => {
     if (taskFilter && !taskOptions.some((o) => o.value === taskFilter)) setTaskFilter('');
   }, [taskOptions, taskFilter]);

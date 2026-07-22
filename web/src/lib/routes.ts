@@ -36,6 +36,7 @@ const ROUTE_DEFS: RouteDef[] = [
   { path: '/devices?roles=storage', zh: '设备 / 存储', en: 'Devices / Storage', keywords: ['storage', 'disk', 'cunchu'], group: '设备' },
   { path: '/devices?roles=database', zh: '设备 / 数据库', en: 'Devices / Database', keywords: ['database', 'db', 'shujuku'], group: '设备' },
   { path: '/devices?roles=network', zh: '设备 / 网络设备', en: 'Devices / Network', keywords: ['network', 'switch', 'router', 'wangluo'], group: '设备' },
+  { path: '/devices/history', zh: '设备 / 历史数据', en: 'Devices / History', keywords: ['history', 'deleted', 'trash', 'lishi', 'shanchu'], group: '设备' },
 
   { path: '/monitor', zh: '监控', en: 'Monitor', keywords: ['monitor', 'metrics', 'jiankong'], group: '监控告警' },
   { path: '/logs', zh: '日志', en: 'Logs', keywords: ['logs', 'rizhi'], group: '监控告警' },

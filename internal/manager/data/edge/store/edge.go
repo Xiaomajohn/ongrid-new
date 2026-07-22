@@ -87,6 +87,10 @@ func (r *Repo) GetByName(ctx context.Context, name string) (*model.Edge, error) 
 // makes sense once the agent has registered.
 func (r *Repo) List(ctx context.Context, f biz.ListFilter) ([]*model.Edge, error) {
 	tx := r.db.WithContext(ctx).Model(&model.Edge{})
+	// IncludeDeleted 跳过 GORM 软删除过滤，让已删除的 edge 也能被查询到
+	if f.IncludeDeleted {
+		tx = tx.Unscoped()
+	}
 	if f.DeviceID != nil {
 		tx = tx.Joins("JOIN edge_devices ed ON ed.edge_id = edges.id AND ed.delete_marker = 0").
 			Where("ed.device_id = ?", *f.DeviceID)

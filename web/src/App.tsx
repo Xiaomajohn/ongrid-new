@@ -18,6 +18,7 @@ const HostDetailPage = lazy(() => import('@/pages/HostDetail'));
 // 使 HostDetail 恢复为只承载主机视角（basic / topology / meta）的纯粹页面。
 const MonitorDeviceDetailPage = lazy(() => import('@/pages/MonitorDeviceDetail'));
 const DeviceFilesPage = lazy(() => import('@/pages/DeviceFiles'));
+const DeviceHistoryPage = lazy(() => import('@/pages/DeviceHistory'));
 const DeviceShellPage = lazy(() => import('@/pages/DeviceShell'));
 const DashboardPage = lazy(() => import('@/pages/Dashboard'));
 const MonitorPage = lazy(() => import('@/pages/Monitor'));
@@ -108,6 +109,7 @@ export default function App() {
         <Route path="/edges" element={<Navigate to="/devices" replace />} />
         <Route path="/edges/:edgeId" element={<EdgeDetailPage />} />
         <Route path="/devices" element={<EdgesPage />} />
+        <Route path="/devices/history" element={<DeviceHistoryPage />} />
         <Route path="/devices/:edgeId" element={<EdgeDetailPage />} />
         {/* WebSSH: deviceId is the Prom-label device_id, not the edge.id.
             See DeviceShell.tsx for the rationale. /shell walks the

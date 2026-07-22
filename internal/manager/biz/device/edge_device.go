@@ -56,5 +56,6 @@ type EdgeDeviceRepo interface {
 	// 设备 / 任务下拉能一次拿到 task_name 等字段，省掉 N+1 反查。
 	// 返回 map 缺省语义：未关联 edge 的 device 不会出现在 map 里。
 	// deviceIDs 为空时直接返回空 map，不打 DB。
-	ListEdgesForDevices(ctx context.Context, deviceIDs []uint64) (map[uint64][]EdgeMini, error)
+	// includeDeleted=true 时同时返回已软删除的 edge 行（Logs 页面"显示已删除"联动）。
+	ListEdgesForDevices(ctx context.Context, deviceIDs []uint64, includeDeleted bool) (map[uint64][]EdgeMini, error)
 }

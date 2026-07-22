@@ -33,6 +33,7 @@ import {
   Folder,
   Power,
   Pencil,
+  History,
 } from 'lucide-react';
 import { StatusPill } from '@/components/StatusPill';
 import { Modal } from '@/components/Modal';
@@ -253,6 +254,13 @@ export default function HostsPage() {
               title={tr('WebSSH 会话审计 / 活跃会话', 'WebSSH session audit / active sessions')}
             >
               <TerminalSquare size={12} /> {tr('WebSSH 会话', 'WebSSH sessions')}
+            </Link>
+            <Link
+              to="/devices/history"
+              className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800"
+              title={tr('已删除的主机与监控任务', 'Deleted hosts and monitoring tasks')}
+            >
+              <History size={12} /> {tr('历史数据', 'History')}
             </Link>
             {canMutate && (
               <button

@@ -35,6 +35,8 @@ type ListFilter struct {
 	DeviceID  *uint64
 	Limit     int
 	Offset    int
+	// IncludeDeleted 为 true 时不过滤已软删除的 edge 行，供历史数据页面展示。
+	IncludeDeleted bool
 }
 
 // Repo is the manager/edge persistence contract. Implemented in

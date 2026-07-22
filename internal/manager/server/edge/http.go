@@ -371,6 +371,8 @@ type listItem struct {
 	// omitempty 在 JSON 里省略 —— 区分「未填」和「显式清空」靠 DB 列
 	// 实际值，UI 端统一渲染成 —。Logs 页面的 task_name 筛选也读这一列。
 	TaskName string `json:"task_name,omitempty"`
+	// DeletedAt 软删除时间戳，非空表示该行已被软删除。历史数据页面用来过滤。
+	DeletedAt *time.Time `json:"deleted_at,omitempty"`
 }
 
 type listResp struct {
@@ -473,6 +475,9 @@ func (h *Handler) listEdges(w http.ResponseWriter, r *http.Request) {
 			f.Offset = n
 		}
 	}
+	if v := strings.ToLower(strings.TrimSpace(q.Get("include_deleted"))); v == "true" || v == "1" || v == "yes" {
+		f.IncludeDeleted = true
+	}
 
 	edges, err := h.svc.List(r.Context(), f)
 	if err != nil {
@@ -494,6 +499,7 @@ func (h *Handler) listEdges(w http.ResponseWriter, r *http.Request) {
 			DeviceID:     e.DeviceID,
 			HostInfo:     deviceToHostInfo(dev),
 			TaskName:     e.TaskName,
+			DeletedAt:    e.DeletedAt,
 		})
 	}
 	writeJSON(w, http.StatusOK, listResp{Items: items, Total: len(items)})

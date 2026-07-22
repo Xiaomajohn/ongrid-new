@@ -311,7 +311,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 		for _, d := range rows {
 			ids = append(ids, d.ID)
 		}
-		if m, lerr := links.ListEdgesForDevices(r.Context(), ids); lerr == nil {
+		if m, lerr := links.ListEdgesForDevices(r.Context(), ids, f.IncludeDeleted); lerr == nil {
 			edgesByDevice = m
 		} else {
 			fmt.Fprintf(os.Stderr, "device list: list edges for devices failed: %v\n", lerr)

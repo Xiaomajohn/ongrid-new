@@ -51,6 +51,8 @@ export type Edge = {
   // 带该字段；UI 渲染为空时显示 —。后端新增精准查询参数 name / hostname /
   // ip 的依据字段之一。
   task_name?: string;
+  // 软删除时间戳，非空表示该 edge 已被删除。历史数据页面用来过滤。
+  deleted_at?: string | null;
 };
 
 export type UpgradeAgentResponse = {
@@ -148,6 +150,7 @@ export function listEdges(params?: {
   name?: string;
   hostname?: string;
   ip?: string;
+  include_deleted?: boolean;
 }) {
   const usp = new URLSearchParams();
   if (params?.roles) usp.set('roles', params.roles);
@@ -155,6 +158,7 @@ export function listEdges(params?: {
   if (params?.name) usp.set('name', params.name);
   if (params?.hostname) usp.set('hostname', params.hostname);
   if (params?.ip) usp.set('ip', params.ip);
+  if (params?.include_deleted) usp.set('include_deleted', 'true');
   const qs = usp.toString();
   return request<{ items: Edge[]; total: number }>('GET', `/edges${qs ? `?${qs}` : ''}`);
 }
