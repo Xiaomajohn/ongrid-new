@@ -131,8 +131,12 @@ func (r *EdgeDeviceRepo) ListEdgesForDevice(ctx context.Context, deviceID uint64
 // 借机泄漏 agent 凭据。
 //
 // includeDeleted=true 时不过滤已软删除的 edge 行（e.delete_marker != 0），
-// 供 Logs 页面"显示已删除"开关联动查询已删除的 edge 任务。
-// junction 行始终按 ed.delete_marker=0 过滤（junction 删除语义不同）。
+// 供 Logs 页面"显示已删除"开关联动查询已删除的 edge 任务。此时 junction
+// 行也不按 ed.delete_marker=0 过滤——edge 被删除时 biz/edge 会连带软删
+// junction（softDeleteJunctions），若仍过滤 ed.delete_marker=0，已删除的
+// edge 任务就永远查不到（这是"日志页查不到已删除监控任务"的根因）。
+// 结果按 (device_id, edge_id) 去重，避免删除后重新注册产生的多条
+// junction 导致同一 edge 重复出现。
 //
 // 返回值：device_id → 该 device 关联的 edge 列表（保持 edges.id 升序）。
 // 未关联 edge 的 device 不在 map 里；deviceIDs 为空时返回空 map。
@@ -141,11 +145,11 @@ func (r *EdgeDeviceRepo) ListEdgesForDevices(ctx context.Context, deviceIDs []ui
 	if len(deviceIDs) == 0 {
 		return out, nil
 	}
-	// includeDeleted 控制是否过滤已软删除的 edge。junction 行始终过滤。
-	// 无论 includeDeleted 为何值，都排除“确认删除”（purge_marker != 0）
-	// 的 edge：这些行日志页面查询不到。
+	// includeDeleted 控制是否过滤已软删除的 edge。无论 includeDeleted 为何值，
+	// 都排除“确认删除”（purge_marker != 0）的 edge：这些行日志页面查询不到。
 	var q string
 	if includeDeleted {
+		// 不过滤 junction 的 delete_marker（见上方注释），只排除 purge 的 edge。
 		q = `SELECT ed.device_id AS device_id,
 	                  e.id         AS id,
 	                  e.name       AS name,
@@ -154,7 +158,7 @@ func (r *EdgeDeviceRepo) ListEdgesForDevices(ctx context.Context, deviceIDs []ui
 	                  e.last_seen_at AS last_seen_at
 	           FROM edges e
 	           JOIN edge_devices ed
-	             ON ed.edge_id = e.id AND ed.delete_marker = 0
+	             ON ed.edge_id = e.id
 	           WHERE e.purge_marker = 0
 	             AND ed.device_id IN (?)`
 	} else {
@@ -183,7 +187,18 @@ func (r *EdgeDeviceRepo) ListEdgesForDevices(ctx context.Context, deviceIDs []ui
 	if err := r.db.WithContext(ctx).Raw(q, deviceIDs).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
+	// 按 (device_id, edge_id) 去重：includeDeleted 分支不过滤 junction 的
+	// delete_marker，同一 edge 可能因“删除后重新注册”同时存在软删与存活
+	// 两条 junction；非 includeDeleted 分支也可能因 host/discovered 双 type
+	// 关联出现重复。保留第一条即可。
+	type dedupeKey struct{ deviceID, edgeID uint64 }
+	seen := make(map[dedupeKey]struct{}, len(rows))
 	for _, x := range rows {
+		k := dedupeKey{x.DeviceID, x.ID}
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
 		out[x.DeviceID] = append(out[x.DeviceID], biz.EdgeMini{
 			ID:         x.ID,
 			Name:       x.Name,

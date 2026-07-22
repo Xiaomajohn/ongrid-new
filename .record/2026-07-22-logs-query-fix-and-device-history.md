@@ -155,3 +155,51 @@ cd web && npx tsc --noEmit     # 通过，零错误
 ```
 
 > 注：`biz/aiops/*` 测试包在 Windows 上因预存的 edgeagent 跨平台问题（`syscall.Setpgid` Linux-only）无法构建，与本次新增的单行 fake stub 无关。
+
+---
+
+# 第三轮：修复日志页仍查不到已删除监控任务（junction 软删回归）
+
+## 背景（用户反馈）
+
+“日志管理页面还是查询不到删除的监控任务。”
+
+## 根因
+
+第一轮保留了 `ListEdgesForDevices` JOIN 里的 `ed.delete_marker = 0`（当时决策“junction 表过滤保留”）。
+但 2026-07-20 的 WebSSH 修复（见 `.record/2026-07-20-fix-webssh-orphaned-edge-junction.md`）让
+`biz/edge.Usecase.Delete` 在软删 edge 时**连带软删 junction 行**（`softDeleteJunctions` → `Unlink`）。
+于是已删除 edge 的 junction 行 `delete_marker != 0`，被 JOIN 条件过滤掉——
+即使 `includeDeleted=true` 不过滤 `e.delete_marker`，已删除的 edge 任务也永远查不到。
+这是“日志页查不到已删除监控任务”的真正根因（第一轮只移除 `e.delete_marker = 0` 不够）。
+
+## 改动
+
+### `internal/manager/data/device/store/edge_device.go` — `ListEdgesForDevices`
+- `includeDeleted=true` 分支：JOIN 条件从 `ON ed.edge_id = e.id AND ed.delete_marker = 0`
+  改为 `ON ed.edge_id = e.id`（不再过滤 junction 的 delete_marker），保留 `WHERE e.purge_marker = 0`。
+- 行循环新增按 `(device_id, edge_id)` 去重（`dedupeKey` + `seen` map）：
+  同一 edge 可能因“删除后重新注册”同时存在软删与存活两条 junction；
+  非 includeDeleted 分支也可能因 host/discovered 双 type 关联出现重复。
+- 更新函数文档注释，说明为何 includeDeleted 时不能过滤 junction。
+
+## 关键决策（修正第一轮决策）
+
+- **推翻“junction 表过滤保留”**：`includeDeleted=true` 时 junction 行**不能**按 `delete_marker=0` 过滤，
+  否则查不到“edge 删除连带软删 junction”的已删除任务。`includeDeleted=false` 分支维持原样（仍过滤 junction）。
+- **去重保留第一条**：JOIN 顺序不定，但同一 (device, edge) 的多条 junction 携带的 edge 字段完全相同，
+  保留哪条都不影响展示。
+- **purge 排除不变**：两分支都保留 `e.purge_marker = 0`，确认删除的任务依然查不到（符合第二轮设计）。
+
+## 影响面验证
+
+- `Unlink`（junction 软删）仅被 `biz/edge.softDeleteJunctions`（edge 删除时）与测试调用，
+  不存在“junction 软删但 edge 存活”的常规路径，放开过滤不会引入错误关联。
+- 启动 backfill（`cmd/ongrid/main.go`）只软删悬挂 junction、不物理删除，修复后仍能查到。
+- DeviceHistory 页走 `data/edge/store/edge.go` `List`（不 JOIN junction），不受影响。
+
+## 编译验证
+
+```bash
+go vet ./internal/manager/data/device/store/...   # 通过，零错误
+```
