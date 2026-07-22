@@ -74,6 +74,7 @@ func (h *Handler) Register(r chi.Router) {
 	r.Patch("/v1/devices/{id}/roles", h.updateRoles)
 	r.Delete("/v1/devices/{id}", h.delete)
 	r.Post("/v1/devices/{id}/restore", h.restore)
+	r.Post("/v1/devices/{id}/confirm-delete", h.confirmDelete)
 	r.Get("/v1/devices/{id}/edges", h.listEdges)
 	// SSH 凭据相关写操作同上，any-authed。
 	r.Put("/v1/devices/{id}/ssh-credentials", h.putSSHCredentials)
@@ -123,9 +124,12 @@ type deviceItem struct {
 	Reachable       bool       `json:"reachable"`
 	LastReachableAt *time.Time `json:"last_reachable_at,omitempty"`
 	// DeletedAt: 非 nil 表示当前行已被软删除。`include_deleted=true` 时
-	// 后端才会把这些行返给前端，让 Logs / Hosts 的"显示已删除"开关能
-	// 渲染灰标 + "已删除"后缀。Pointer 让未删行直接省字段。
+	// 后端才会把这些行返给前端，让 Logs / Hosts 的“显示已删除”开关能
+	// 渲染灰标 + “已删除”后缀。Pointer 让未删行直接省字段。
 	DeletedAt *time.Time `json:"deleted_at,omitempty"`
+	// PurgeMarker 非零表示“确认删除”（二次删除）。include_deleted=true
+	// 的查询会排除这些行；历史数据页用它过滤已确认的行。
+	PurgeMarker int64     `json:"purge_marker"`
 	CreatedAt time.Time  `json:"created_at"`
 	// SSH fields echoed in clear (internal ops system — plaintext is
 	// the documented contract; see model/device/model.go + the 行为变化
@@ -566,6 +570,26 @@ func (h *Handler) restore(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, devToItem(updated))
 }
 
+// confirmDelete 确认删除（二次删除）：将设备及其关联的所有 edge 的
+// purge_marker 置为非零值。行不做物理删除，但 include_deleted=true
+// 的列表查询会排除这些行，日志页面因此查询不到该设备及其任务。
+func (h *Handler) confirmDelete(w http.ResponseWriter, r *http.Request) {
+	if _, ok := tenantctx.From(r.Context()); !ok {
+		writeErr(w, errs.ErrUnauthorized)
+		return
+	}
+	id, err := parseID(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := h.uc.ConfirmDelete(r.Context(), id); err != nil {
+		writeErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (h *Handler) listEdges(w http.ResponseWriter, r *http.Request) {
 	if _, ok := tenantctx.From(r.Context()); !ok {
 		writeErr(w, errs.ErrUnauthorized)
@@ -623,6 +647,7 @@ func devToItem(d *devicemodel.Device) deviceItem {
 		Reachable:       d.Reachable,
 		LastReachableAt: d.LastReachableAt,
 		DeletedAt:       d.DeletedAt,
+		PurgeMarker:     d.PurgeMarker,
 		CreatedAt:       d.CreatedAt,
 		SSHHost:         d.SSHHost,
 		SSHPort:         d.SSHPort,

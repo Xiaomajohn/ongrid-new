@@ -132,6 +132,14 @@ func (d *fakeDeviceRepo) Restore(_ context.Context, id uint64) error {
 	return nil
 }
 
+// ConfirmDelete is a no-op for the test fake.
+func (d *fakeDeviceRepo) ConfirmDelete(_ context.Context, id uint64) error {
+	if _, ok := d.byID[id]; !ok {
+		return errs.ErrNotFound
+	}
+	return nil
+}
+
 // fakeSvc is an in-memory EdgeService for handler tests. Matches the real
 // Service's method signatures exactly; any drift will fail compile.
 type fakeSvc struct {
@@ -175,6 +183,9 @@ func (f *fakeSvc) Get(_ context.Context, id uint64) (*model.Edge, error) {
 func (f *fakeSvc) Delete(_ context.Context, id uint64) error {
 	f.lastDeleteID = id
 	return f.deleteErr
+}
+func (f *fakeSvc) ConfirmDelete(_ context.Context, id uint64) error {
+	return nil
 }
 func (f *fakeSvc) RotateSecret(_ context.Context, id uint64) (string, error) {
 	f.lastRotateID = id

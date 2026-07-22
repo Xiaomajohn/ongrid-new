@@ -325,7 +325,9 @@ func (r *Repo) List(ctx context.Context, f biz.ListFilter) ([]*model.Device, err
 	// the default-scope branch so the surrounding default behaviour
 	// (hidden soft-deleted rows) stays the same as before the change.
 	if f.IncludeDeleted {
-		tx = tx.Unscoped()
+		// 排除“确认删除”（purge_marker != 0）的行：这些行日志页面
+		// 查询不到，历史数据页也不展示。
+		tx = tx.Unscoped().Where("purge_marker = 0")
 	}
 	switch {
 	case f.RolesUnknownOnly:
@@ -416,6 +418,38 @@ func (r *Repo) Restore(ctx context.Context, id uint64) error {
 		return errs.ErrNotFound
 	}
 	return nil
+}
+
+// ConfirmDelete 确认删除（二次删除）：将 device 的 purge_marker 置为
+// 当前毫秒时间戳，同时通过 junction 表把该设备关联的所有 edge 也标记
+// 为确认删除。行不做物理删除；include_deleted=true 的列表查询会排除
+// purge_marker != 0 的行，日志页面因此查询不到该设备及其任务。
+// 使用 Unscoped + 列名直接写 SQL，绕开 GORM 软删除插件的自动 WHERE。
+func (r *Repo) ConfirmDelete(ctx context.Context, id uint64) error {
+	marker := time.Now().UTC().UnixMilli()
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 1) 标记 device 本身。
+		res := tx.Exec(`UPDATE devices SET purge_marker = ? WHERE id = ? AND purge_marker = 0`, marker, id)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			// 行不存在或已被确认删除；幂等处理，不报错。
+			return nil
+		}
+		// 2) 标记该设备关联的所有 edge（含已软删除的）。
+		if err := tx.Exec(`
+			UPDATE edges
+			SET purge_marker = ?
+			WHERE purge_marker = 0
+			  AND id IN (
+				SELECT edge_id FROM edge_devices
+				WHERE device_id = ? AND delete_marker = 0
+			  )`, marker, id).Error; err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 // SetSSHCredentials writes the operator-supplied SSH block. Uses

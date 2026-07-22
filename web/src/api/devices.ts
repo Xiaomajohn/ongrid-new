@@ -31,6 +31,9 @@ export type Device = {
   // request still strips soft-deleted rows at the server, so the SPA
   // only ever sees this set when it explicitly asked for it).
   deleted_at?: string | null;
+  // — 确认删除标记（二次删除）。非零表示已确认删除：include_deleted=true
+  // 的查询会排除这些行，日志页面查询不到，历史数据页不再展示。
+  purge_marker?: number;
   // — basic host facts. Present once the linked edge has reported its
   // host_info at least once; absent on rows only seeded via topology
   // discovery. Frontend treats undefined as "not yet known".
@@ -198,6 +201,16 @@ export function restoreDevice(id: string | number) {
   return request<Device>(
     'POST',
     `/devices/${encodeURIComponent(String(id))}/restore`,
+  );
+}
+
+// confirmDeleteDevice 确认删除（二次删除）：将设备及其关联的所有 edge
+// 的 purge_marker 置为非零值。行不做物理删除，但日志页面查询不到该
+// 设备及其任务，历史数据页不再展示。
+export function confirmDeleteDevice(id: string | number) {
+  return request<void>(
+    'POST',
+    `/devices/${encodeURIComponent(String(id))}/confirm-delete`,
   );
 }
 

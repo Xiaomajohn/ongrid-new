@@ -153,6 +153,12 @@ type Repo interface {
 	// Idempotent on already-live rows; missing id → ErrNotFound.
 	Restore(ctx context.Context, id uint64) error
 
+	// ConfirmDelete 确认删除（二次删除）：将 purge_marker 置为非零值。
+	// 行不做物理删除，但 include_deleted=true 的列表查询会排除
+	// purge_marker != 0 的行，日志页面因此查询不到该设备及其任务。
+	// 同时将该设备关联的所有 edge 也标记为确认删除。
+	ConfirmDelete(ctx context.Context, id uint64) error
+
 	// ReconcileOfflineOrphans flips online=true devices back to offline
 	// when none of their linked (non-deleted) edges is online. Heals
 	// orphan "ghost" devices — a device whose edge was deleted, or whose

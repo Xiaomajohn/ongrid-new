@@ -287,6 +287,7 @@ func (r *fakeEdgeRepoAgent) SetDeviceID(_ context.Context, _ uint64, _ uint64) e
 func (r *fakeEdgeRepoAgent) SetAgentVersion(_ context.Context, _ uint64, _ string) error { return nil }
 func (r *fakeEdgeRepoAgent) UpdateTaskName(_ context.Context, _ uint64, _ string) error { return nil }
 func (r *fakeEdgeRepoAgent) Delete(_ context.Context, _ uint64) error                    { return nil }
+func (r *fakeEdgeRepoAgent) ConfirmDelete(_ context.Context, _ uint64) error            { return nil }
 func (r *fakeEdgeRepoAgent) Count(_ context.Context) (int64, error)                     { return 1, nil }
 
 // ----- tests -----

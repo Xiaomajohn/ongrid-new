@@ -87,9 +87,11 @@ func (r *Repo) GetByName(ctx context.Context, name string) (*model.Edge, error) 
 // makes sense once the agent has registered.
 func (r *Repo) List(ctx context.Context, f biz.ListFilter) ([]*model.Edge, error) {
 	tx := r.db.WithContext(ctx).Model(&model.Edge{})
-	// IncludeDeleted 跳过 GORM 软删除过滤，让已删除的 edge 也能被查询到
+	// IncludeDeleted 跳过 GORM 软删除过滤，让已删除的 edge 也能被查询到。
+	// 同时排除“确认删除”（purge_marker != 0）的行：这些行日志页面
+	// 查询不到，历史数据页也不展示。
 	if f.IncludeDeleted {
-		tx = tx.Unscoped()
+		tx = tx.Unscoped().Where("edges.purge_marker = 0")
 	}
 	if f.DeviceID != nil {
 		tx = tx.Joins("JOIN edge_devices ed ON ed.edge_id = edges.id AND ed.delete_marker = 0").
@@ -230,6 +232,21 @@ func (r *Repo) Delete(ctx context.Context, id uint64) error {
 	if res.RowsAffected == 0 {
 		return errs.ErrNotFound
 	}
+	return nil
+}
+
+// ConfirmDelete 确认删除（二次删除）：将 purge_marker 置为当前毫秒
+// 时间戳。行不做物理删除；include_deleted=true 的列表查询会排除
+// purge_marker != 0 的行，日志页面因此查询不到该任务。
+// 使用列名直接写 SQL，绕开 GORM 软删除插件的自动 WHERE。
+func (r *Repo) ConfirmDelete(ctx context.Context, id uint64) error {
+	marker := time.Now().UTC().UnixMilli()
+	res := r.db.WithContext(ctx).Exec(
+		`UPDATE edges SET purge_marker = ? WHERE id = ? AND purge_marker = 0`, marker, id)
+	if res.Error != nil {
+		return res.Error
+	}
+	// RowsAffected==0 表示行不存在或已被确认删除；幂等处理，不报错。
 	return nil
 }
 

@@ -70,6 +70,12 @@ func (s *Service) Delete(ctx context.Context, id uint64) error {
 	return s.uc.Delete(ctx, id)
 }
 
+// ConfirmDelete 确认删除（二次删除）：将 purge_marker 置为非零值。
+// Thin passthrough to biz.Usecase.ConfirmDelete.
+func (s *Service) ConfirmDelete(ctx context.Context, id uint64) error {
+	return s.uc.ConfirmDelete(ctx, id)
+}
+
 // RotateSecret generates + stores a new hash, returns plaintext ONCE.
 func (s *Service) RotateSecret(ctx context.Context, id uint64) (string, error) {
 	return s.uc.RotateSecret(ctx, id)

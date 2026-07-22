@@ -43,6 +43,9 @@ type EdgeService interface {
 	List(ctx context.Context, f biz.ListFilter) ([]*model.Edge, error)
 	Get(ctx context.Context, id uint64) (*model.Edge, error)
 	Delete(ctx context.Context, id uint64) error
+	// ConfirmDelete 确认删除（二次删除）：将 purge_marker 置为非零值，
+	// 行不做物理删除但日志页面查询不到。
+	ConfirmDelete(ctx context.Context, id uint64) error
 	RotateSecret(ctx context.Context, id uint64) (string, error)
 	UpgradeAgent(ctx context.Context, edgeID uint64, url, sha256 string) (tunnel.AgentUpgradeResponse, error)
 	FetchPackage(ctx context.Context, edgeID uint64, url, sha256, version string) (tunnel.FetchPackageResponse, error)
@@ -143,6 +146,7 @@ func (h *Handler) Register(r chi.Router) {
 	r.Get("/v1/edges", h.listEdges)
 	r.Get("/v1/edges/{id}", h.getEdge)
 	r.With(h.deleteMW("edge:*")).Delete("/v1/edges/{id}", h.deleteEdge)
+	r.With(h.deleteMW("edge:*")).Post("/v1/edges/{id}/confirm-delete", h.confirmDeleteEdge)
 	r.With(h.writeMW("edge:*")).Post("/v1/edges/{id}/rotate-secret", h.rotateSecret)
 	// Remote agent upgrade (C11 Phase-B). Gated behind edge:* so non-admin
 	// roles can't trigger; the edge handler itself further validates URL
@@ -373,6 +377,8 @@ type listItem struct {
 	TaskName string `json:"task_name,omitempty"`
 	// DeletedAt 软删除时间戳，非空表示该行已被软删除。历史数据页面用来过滤。
 	DeletedAt *time.Time `json:"deleted_at,omitempty"`
+	// PurgeMarker 非零表示“确认删除”（二次删除）。历史数据页用它过滤已确认的行。
+	PurgeMarker int64 `json:"purge_marker"`
 }
 
 type listResp struct {
@@ -500,6 +506,7 @@ func (h *Handler) listEdges(w http.ResponseWriter, r *http.Request) {
 			HostInfo:     deviceToHostInfo(dev),
 			TaskName:     e.TaskName,
 			DeletedAt:    e.DeletedAt,
+			PurgeMarker:  e.PurgeMarker,
 		})
 	}
 	writeJSON(w, http.StatusOK, listResp{Items: items, Total: len(items)})
@@ -544,6 +551,22 @@ func (h *Handler) deleteEdge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.svc.Delete(r.Context(), id); err != nil {
+		writeErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// confirmDeleteEdge 确认删除（二次删除）：将 edge 的 purge_marker 置为
+// 非零值。行不做物理删除，但 include_deleted=true 的列表查询会排除
+// 这些行，日志页面因此查询不到该任务。
+func (h *Handler) confirmDeleteEdge(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := h.svc.ConfirmDelete(r.Context(), id); err != nil {
 		writeErr(w, err)
 		return
 	}

@@ -321,6 +321,17 @@ func (u *Usecase) Delete(ctx context.Context, id uint64) error {
 	return u.repo.Delete(ctx, id)
 }
 
+// ConfirmDelete 确认删除（二次删除）：将 edge 的 purge_marker 置为非零值。
+// 行不做物理删除，但 include_deleted=true 的列表查询会排除这些行，
+// 日志页面因此查询不到该任务。与 Delete 不同，确认删除不清理 junction、
+// 不标记设备离线——行已经处于软删除状态，这里只是加“不再可查”标记。
+func (u *Usecase) ConfirmDelete(ctx context.Context, id uint64) error {
+	if u.repo == nil {
+		return errs.ErrNotWiredYet
+	}
+	return u.repo.ConfirmDelete(ctx, id)
+}
+
 // softDeleteJunctions 把某个 edge 在 edge_devices 表里的所有 junction 行
 // （任意 type：host / discovered）做软删除：delete_marker = now.UnixMilli()，
 // deleted_at = now()。与 probes_softdelete.SSHBulkSoftDelete 风格保持一致，

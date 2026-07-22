@@ -452,6 +452,16 @@ func (u *Usecase) Restore(ctx context.Context, id uint64) error {
 	return u.repo.Restore(ctx, id)
 }
 
+// ConfirmDelete 确认删除（二次删除）：将设备及其关联的所有 edge 的
+// purge_marker 置为非零值。行不做物理删除，但 include_deleted=true
+// 的列表查询会排除这些行，日志页面因此查询不到该设备及其任务。
+func (u *Usecase) ConfirmDelete(ctx context.Context, id uint64) error {
+	if u.repo == nil {
+		return errs.ErrNotWiredYet
+	}
+	return u.repo.ConfirmDelete(ctx, id)
+}
+
 // LookupHostDevice resolves edge → host device_id. Returns 0,
 // ErrNotFound when the edge has no Type=Host junction yet (race during
 // register).

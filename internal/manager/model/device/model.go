@@ -121,6 +121,14 @@ type Device struct {
 	// next migration pass.
 	NodeID *uint64 `gorm:"column:node_id;uniqueIndex:idx_devices_node_id,priority:1"`
 
+	// PurgeMarker 是“确认删除”标记（二次删除）。操作员在历史数据页点
+	// “确认删除”后写入非零值（UnixMilli）。行不做物理删除，但：
+	//   - include_deleted=true 的列表查询会排除 purge_marker != 0 的行
+	//   - 日志页面因此查询不到该设备及其关联任务
+	//   - 历史数据页面不再展示该设备
+	// 0 = 未确认删除（普通软删除状态，日志勾选“已删除”仍可查）。
+	PurgeMarker int64 `gorm:"column:purge_marker;not null;default:0"`
+
 	CreatedAt    time.Time             `gorm:"column:created_at"`
 	UpdatedAt    time.Time             `gorm:"column:updated_at"`
 	DeletedAt    *time.Time            `gorm:"index;column:deleted_at"`

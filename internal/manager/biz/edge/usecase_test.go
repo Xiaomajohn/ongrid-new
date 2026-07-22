@@ -251,6 +251,18 @@ func (d *fakeDeviceRepo) Restore(_ context.Context, id uint64) error {
 	return nil
 }
 
+// ConfirmDelete 模拟 store 把 purge_marker 置为非零值的语义。
+func (d *fakeDeviceRepo) ConfirmDelete(_ context.Context, id uint64) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	dev, ok := d.byID[id]
+	if !ok {
+		return errs.ErrNotFound
+	}
+	dev.PurgeMarker = time.Now().UTC().UnixMilli()
+	return nil
+}
+
 func (d *fakeDeviceRepo) ReconcileOfflineOrphans(_ context.Context) (int64, error) {
 	return 0, nil
 }
@@ -504,6 +516,17 @@ func (r *fakeRepo) Delete(_ context.Context, id uint64) error {
 	}
 	now := time.Now()
 	e.DeletedAt = &now
+	return nil
+}
+
+func (r *fakeRepo) ConfirmDelete(_ context.Context, id uint64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.byID[id]
+	if !ok {
+		return errs.ErrNotFound
+	}
+	e.PurgeMarker = time.Now().UTC().UnixMilli()
 	return nil
 }
 

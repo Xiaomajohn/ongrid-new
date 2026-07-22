@@ -72,3 +72,86 @@ go vet ./internal/manager/biz/device/ ./internal/manager/biz/edge/ \
 cd web && npx tsc --noEmit
 # 通过，零错误
 ```
+
+---
+
+# 第二轮：确认删除（二次删除）+ 侧边栏入口 + 历史页增强
+
+## 背景（用户反馈）
+
+1. 历史数据页面位置不对——应加到侧边栏“设备”下级菜单，而非只放在 Hosts 页头。
+2. 页面缺少“确认删除”按钮与提示。数据流：主机/监控页删除 → 历史页可见（日志勾选“已删除”可查）→ 历史页点“确认删除”→ 不物理删除但日志页面查询不到。
+3. 要考虑“主机未删除、仅监控任务删除”的情况。
+
+## 设计：purge_marker（确认删除标记）
+
+- Device / Edge 模型新增 `PurgeMarker int64`（`purge_marker` 列，default 0）。
+- `purge_marker != 0` = 已确认删除：行不物理删除，但 `include_deleted=true` 的列表查询会排除它 → 日志页面查不到，历史页不再展示。
+- `purge_marker = 0` + `deleted_at != null` = 普通软删除：日志勾选“已删除”可查，历史页展示。
+- 确认删除设备时，同时通过 junction 表把该设备关联的所有 edge 一并标记（事务）。
+
+## 后端改动
+
+### 模型
+- `model/device/model.go` Device 新增 `PurgeMarker int64`。
+- `model/edge/model.go` Edge 新增 `PurgeMarker int64`。
+
+### 接口 + 实现
+- `biz/device/repo.go` Repo 新增 `ConfirmDelete(ctx, id)`；`biz/device/usecase.go` 新增 `Usecase.ConfirmDelete`。
+- `data/device/store/device.go` `Repo.ConfirmDelete`：事务内先 `UPDATE devices SET purge_marker=?`，再 `UPDATE edges ... WHERE id IN (SELECT edge_id FROM edge_devices WHERE device_id=? AND delete_marker=0)`。
+- `biz/edge/repo.go` Repo 新增 `ConfirmDelete(ctx, id)`；`biz/edge/usecase.go` 新增 `Usecase.ConfirmDelete`；`data/edge/store/edge.go` `Repo.ConfirmDelete`。
+- `service/edge/service.go` 新增 `Service.ConfirmDelete`；`server/edge/http.go` `EdgeService` 接口新增 `ConfirmDelete`。
+
+### HTTP 端点
+- `POST /v1/devices/{id}/confirm-delete`（`server/device/http.go` `confirmDelete` handler）。
+- `POST /v1/edges/{id}/confirm-delete`（`server/edge/http.go` `confirmDeleteEdge` handler，走 deleteMW）。
+
+### 列表查询排除 purged
+- `data/device/store/device.go` `List`：`IncludeDeleted` 时 `Unscoped().Where("purge_marker = 0")`。
+- `data/edge/store/edge.go` `List`：`IncludeDeleted` 时 `Unscoped().Where("edges.purge_marker = 0")`。
+- `data/device/store/edge_device.go` `ListEdgesForDevices`：两个分支都加 `e.purge_marker = 0`。
+
+### 响应字段
+- `server/device/http.go` `deviceItem` 新增 `PurgeMarker int64 \`json:"purge_marker"\``，`devToItem` 传递。
+- `server/edge/http.go` `listItem` 新增 `PurgeMarker int64 \`json:"purge_marker"\``，`listEdges` 传递。
+
+### 测试 fake 补齐
+- `server/edge/http_test.go` fakeDeviceRepo + fakeSvc 加 `ConfirmDelete`。
+- `biz/edge/usecase_test.go` fakeDeviceRepo + fakeRepo 加 `ConfirmDelete`。
+- `biz/aiops/tools/registry_test.go` fakeEdgeRepo 加 `ConfirmDelete`。
+- `biz/aiops/agent/agent_test.go` fakeEdgeRepoAgent 加 `ConfirmDelete`。
+
+## 前端改动
+
+### 侧边栏
+- `components/Sidebar.tsx`：设备 CollapsibleSection 新增 `<SidebarNavItem to="/devices/history" icon={History} label={历史数据} />`；import `History` icon。
+
+### API 层
+- `api/devices.ts`：Device 新增 `purge_marker?: number`；新增 `confirmDeleteDevice(id)`。
+- `api/edges.ts`：Edge 新增 `purge_marker?: number`；新增 `confirmDeleteEdge(id)`。
+
+### 历史页重写
+- `pages/DeviceHistory.tsx`：
+  - 顶部黄色提示条说明数据流（删除→历史页可见/日志勾选可查；确认删除→日志查不到/本页不展示）。
+  - `allDevices`（未删+已删未确认）用于给“已删除监控任务”回填所属主机名；主机未删除时标注“（主机正常）”。
+  - 已删除主机行：展开查看关联已删除 edge + “确认删除”按钮（window.confirm 二次确认，提示会连带删除关联任务）。
+  - 已删除监控任务行：显示所属主机 + “确认删除”按钮（仅删任务不影响主机）。
+  - 客户端兑底过滤 `purge_marker` 为 0 的行。
+
+## 关键决策
+
+- **purge_marker 用 int64（UnixMilli）而非 bool**：与 delete_marker 风格一致，保留确认时间信息。
+- **确认删除设备连带其 edge**：设备确认删除后其任务也不应再被日志查到，事务内一并标记。
+- **确认删除 edge 不影响设备**：对应“主机未删除、仅任务删除”场景，只标记 edge 本身。
+- **后端 + 前端双重过滤 purged**：后端 `include_deleted=true` 排除 purged；前端再兑底过滤，防旧后端脏数据。
+
+## 编译验证
+
+```bash
+go vet <device/edge 相关包>   # 通过，零错误
+go test -run xxx_none ./internal/manager/biz/edge/ ./internal/manager/server/edge/ \
+  ./internal/manager/data/device/store/ ./internal/manager/data/edge/store/  # ok
+cd web && npx tsc --noEmit     # 通过，零错误
+```
+
+> 注：`biz/aiops/*` 测试包在 Windows 上因预存的 edgeagent 跨平台问题（`syscall.Setpgid` Linux-only）无法构建，与本次新增的单行 fake stub 无关。

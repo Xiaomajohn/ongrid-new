@@ -53,6 +53,9 @@ export type Edge = {
   task_name?: string;
   // 软删除时间戳，非空表示该 edge 已被删除。历史数据页面用来过滤。
   deleted_at?: string | null;
+  // 确认删除标记（二次删除），非零表示已确认删除。include_deleted=true
+  // 的查询会排除这些行；历史数据页用它过滤已确认的行。
+  purge_marker?: number;
 };
 
 export type UpgradeAgentResponse = {
@@ -186,6 +189,12 @@ export function createEdge(input: {
 
 export function deleteEdge(id: string | number) {
   return request<void>('DELETE', `/edges/${encodeURIComponent(String(id))}`);
+}
+
+// confirmDeleteEdge 确认删除（二次删除）：将 edge 的 purge_marker 置为
+// 非零值。行不做物理删除，但日志页面查询不到该任务，历史数据页不再展示。
+export function confirmDeleteEdge(id: string | number) {
+  return request<void>('POST', `/edges/${encodeURIComponent(String(id))}/confirm-delete`);
 }
 
 export function rotateSecret(id: string | number) {

@@ -32,6 +32,7 @@ import {
   Trash2,
   Share2,
   Plug,
+  History,
 } from 'lucide-react';
 import { Avatar } from './Avatar';
 import { AgentBadge } from './AgentBadge';
@@ -435,6 +436,7 @@ export function Sidebar() {
         <CollapsibleSection storageKey="devices" title={tr('设备', 'Devices')} defaultOpen={false}>
           <SidebarNavItem to="/hosts" icon={HardDrive} label={tr('主机', 'Hosts')} />
           <SidebarNavItem to="/devices" icon={HardDrive} label={tr('监控', 'Monitor')} />
+          <SidebarNavItem to="/devices/history" icon={History} label={tr('历史数据', 'History')} />
           {presentRoles.has('server') && (
             <SidebarNavItem to="/devices?roles=server" icon={Server} label={tr('服务器', 'Servers')} />
           )}

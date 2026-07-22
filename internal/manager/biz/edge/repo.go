@@ -70,5 +70,9 @@ type Repo interface {
 	// 游 TrimSpace 过滤空字符串。
 	UpdateTaskName(ctx context.Context, id uint64, taskName string) error
 	Delete(ctx context.Context, id uint64) error // soft delete
+	// ConfirmDelete 确认删除（二次删除）：将 purge_marker 置为非零值。
+	// 行不做物理删除，但 include_deleted=true 的列表查询会排除
+	// purge_marker != 0 的行，日志页面因此查询不到该任务。
+	ConfirmDelete(ctx context.Context, id uint64) error
 	Count(ctx context.Context) (int64, error)
 }

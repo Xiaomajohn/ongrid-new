@@ -53,6 +53,13 @@ type Edge struct {
 	TaskName     string  `gorm:"size:128;column:task_name"`
 	DeviceID     *uint64 `gorm:"index;column:device_id"`
 	CreatedBy    *uint64 `gorm:"column:created_by"` // audit only
+	// PurgeMarker 是“确认删除”标记（二次删除）。操作员在历史数据页点
+	// “确认删除”后写入非零值（UnixMilli）。行不做物理删除，但：
+	//   - include_deleted=true 的列表查询会排除 purge_marker != 0 的行
+	//   - 日志页面因此查询不到该任务
+	//   - 历史数据页面不再展示该任务
+	// 0 = 未确认删除（普通软删除状态，日志勾选“已删除”仍可查）。
+	PurgeMarker  int64   `gorm:"column:purge_marker;not null;default:0"`
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 	DeletedAt    *time.Time            `gorm:"index;column:deleted_at"` // soft delete audit time

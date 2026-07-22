@@ -142,6 +142,8 @@ func (r *EdgeDeviceRepo) ListEdgesForDevices(ctx context.Context, deviceIDs []ui
 		return out, nil
 	}
 	// includeDeleted 控制是否过滤已软删除的 edge。junction 行始终过滤。
+	// 无论 includeDeleted 为何值，都排除“确认删除”（purge_marker != 0）
+	// 的 edge：这些行日志页面查询不到。
 	var q string
 	if includeDeleted {
 		q = `SELECT ed.device_id AS device_id,
@@ -153,7 +155,8 @@ func (r *EdgeDeviceRepo) ListEdgesForDevices(ctx context.Context, deviceIDs []ui
 	           FROM edges e
 	           JOIN edge_devices ed
 	             ON ed.edge_id = e.id AND ed.delete_marker = 0
-	           WHERE ed.device_id IN (?)`
+	           WHERE e.purge_marker = 0
+	             AND ed.device_id IN (?)`
 	} else {
 		q = `SELECT ed.device_id AS device_id,
 	                  e.id         AS id,
@@ -165,6 +168,7 @@ func (r *EdgeDeviceRepo) ListEdgesForDevices(ctx context.Context, deviceIDs []ui
 	           JOIN edge_devices ed
 	             ON ed.edge_id = e.id AND ed.delete_marker = 0
 	           WHERE e.delete_marker = 0
+	             AND e.purge_marker = 0
 	             AND ed.device_id IN (?)`
 	}
 	type row struct {
