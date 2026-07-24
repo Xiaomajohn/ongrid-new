@@ -3,7 +3,6 @@ package logs
 import (
 	"bytes"
 	"fmt"
-	"path/filepath"
 	"sort"
 	"strings"
 	"text/template"
@@ -166,13 +165,29 @@ func render(workDir string, cfg plugins.PluginConfig) ([]byte, error) {
 		filePaths = []string{"/var/log/syslog", "/var/log/messages"}
 	}
 
-	// Auto-tail the audit plugin's JSONL output when the audit plugin
-	// is enabled — single-direction dependency: logs knows about audit,
-	// audit does NOT know about logs. Probe is best-effort: glob empty
-	// (audit disabled, binary missing, not yet created) is a no-op — no
-	// spurious scrape jobs surface to Loki. The probe runs after the
-	// syslog fallback so disabled-audit edges still get the operator's
-	// chosen sources.
+	// Auto-tail the audit plugin's JSONL output. We append the audit
+	// output path glob UNCONDITIONALLY (no on-disk probe) because the
+	// probe-based variant had a startup-race bug:
+	//
+	//   1. supervisor reconciles → Configure(logs) → render() runs
+	//   2. at the same time, supervisor reconciles → Configure(audit) →
+	//      render() runs, then auditbeat starts and (later) writes its
+	//      first audit.jsonl-YYYYMMDD.ndjson
+	//   3. promtail's render step in (1) ran BEFORE auditbeat wrote
+	//      anything, so filepath.Glob(...) returned empty → audit
+	//      path was silently dropped from file_paths
+	//   4. even after auditbeat's first write, the supervisor only
+	//      re-renders logs on cfg change, and audit's file appearing
+	//      on disk is not a cfg change → the dropped path stayed dropped
+	//
+	// Always-emit is safe because promtail's __path__ natively supports
+	// globs and treats "glob with no matches" as zero entries — so when
+	// the audit plugin is disabled (or its binary is missing) the
+	// scrape job sits idle without sending anything to Loki. The cost
+	// is one extra empty job block in the rendered YAML; the benefit
+	// is that the default install's audit plugin (default-enabled, see
+	// internal/manager/biz/edge/plugin_config.go pluginDefaultEnabled)
+	// reliably shows up in the Logs UI without operator wiring.
 	//
 	// We use filepath.Glob rather than os.Stat because auditbeat 9.x's
 	// file output auto-appends `-YYYYMMDD.ndjson` to the configured
@@ -180,14 +195,11 @@ func render(workDir string, cfg plugins.PluginConfig) ([]byte, error) {
 	// (or `-1.ndjson`, `-2.ndjson` for rotated siblings), never the bare
 	// `audit.jsonl`. audit.OutputPath() therefore returns a glob
 	// (`audit.jsonl-*.ndjson`) and we pass that glob straight into
-	// promtail's `__path__` — promtail supports globs natively and
-	// rotates between matched files transparently, so a single scrape
-	// job covers today's file + all rotated siblings without operator
-	// configuration.
+	// promtail's `__path__` — promtail rotates between matched files
+	// transparently, so a single scrape job covers today's file + all
+	// rotated siblings without operator configuration.
 	if workDir != "" {
-		if matches, _ := filepath.Glob(audit.OutputPath(workDir)); len(matches) > 0 {
-			filePaths = append(filePaths, audit.OutputPath(workDir))
-		}
+		filePaths = append(filePaths, audit.OutputPath(workDir))
 	}
 
 	extra := stringMap(cfg.Spec, "extra_labels")

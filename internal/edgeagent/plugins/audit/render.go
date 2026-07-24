@@ -29,6 +29,9 @@ import (
 //     state files (which would otherwise spam noise on every rotate /
 //     checkpoint). exclude_files uses RE2 regex (auditbeat 9.4.2 dropped
 //     glob-shaped exclude_paths in favour of RE2 patterns).
+//   - logging.files          : auditbeat 自身运行日志轮转 (50MB×5)，
+//     压住默认 10MB×7 导致的 IO 抖动；不加时走 auditbeat 默认行为。
+//     路径保持 auditbeat 默认 ${path.home}/logs/auditbeat，不另行指定。
 //
 // Schema version (auditbeat 9.4.2, see auditbeat.reference.yml):
 //   - module names are `file_integrity` (not `fim` — older docs called
@@ -111,8 +114,23 @@ output.file:
   # audit.OutputPath / logs plugin promtail auto-tail.
   path: "{{ .WorkDir }}"
   filename: {{ .OutputFilename }}
-  rotate_every_kb: 10000
-  number_of_files: 7
+  # 50MB×30 ≈ 3GB 滚动窗口：运维需要更长的 audit.jsonl 历史回溯
+  # (Loki 之外留一份本地数据兜底)。磁盘紧张机器可手动 raw_config 调小。
+  rotate_every_kb: 51200
+  number_of_files: 30
+
+# auditbeat 自身运行日志轮转。放在 output.file 之后、processors 之前，
+# 与 auditbeat.reference.yml 的顶层字段顺序保持一致。运行时/排障日志
+# 不需要长期囤积，给 50MB×5 ≈ 250MB 窗口足够——历史日志通过 supervisor
+# 子进程日志已经持久化到 ongrid-edge 自己的日志通道。
+logging.level: info
+logging.to_files: true
+logging.to_stderr: false
+logging.files:
+  rotateeverybytes: 52428800  # 50MB
+  keepfiles: 5
+  permissions: 0644
+  rotateonstartup: true
 
 processors:
   - add_fields:

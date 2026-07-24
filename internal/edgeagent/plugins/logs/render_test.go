@@ -7,12 +7,13 @@ import (
 	"github.com/ongridio/ongrid/internal/edgeagent/plugins"
 )
 
-// testWorkDir is a stable path the audit-probe in render() sees as
-// missing across every logs renderer test (no <testWorkDir>/audit/
-// audit.jsonl exists in CI), so each render call mirrors the
-// operator-disabled-audit scenario and existing assertions stay
-// authoritative. For audit-aware tests, write the JSONL into a
-// t.TempDir and pass it as workDir instead.
+// testWorkDir is a stable path the audit-probe in render() used to
+// see as missing across every logs renderer test. Since 2026-07-23 the
+// audit output path is appended UNCONDITIONALLY (no Glob probe — see
+// render.go docstring for the startup-race rationale), so every render
+// call now includes the audit.jsonl glob regardless of whether the
+// file exists yet. Existing assertions stay authoritative; new
+// assertions pin the always-on audit tail.
 const testWorkDir = "/tmp/ongrid-edge-test-plugins"
 
 func TestRenderHappyPath(t *testing.T) {
@@ -145,6 +146,33 @@ func TestRenderJournaldDefaultOn(t *testing.T) {
 	}
 	if strings.Contains(string(out), "job_name: journald") {
 		t.Errorf("enable_journald=false must remove the journald scrape block:\n%s", string(out))
+	}
+}
+
+// TestRenderAlwaysIncludesAuditGlob pins the unconditional audit
+// tail contract added 2026-07-23: every rendered promtail config
+// MUST include the audit plugin's JSONL output path glob regardless
+// of whether the file currently exists on disk. Previously render()
+// did filepath.Glob(audit.OutputPath(...)) and dropped the path if
+// the probe came back empty — that probe had a startup race against
+// auditbeat's first write, so default-installed audit events silently
+// failed to reach Loki.
+func TestRenderAlwaysIncludesAuditGlob(t *testing.T) {
+	cfg := plugins.PluginConfig{
+		Enabled:  true,
+		EdgeID:   1,
+		Endpoint: "https://x/loki/api/v1/push",
+		// Spec intentionally empty — fresh-install scenario where
+		// auditbeat has not yet produced its first JSONL on disk.
+	}
+	out, err := render(testWorkDir, cfg)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	body := string(out)
+	want := testWorkDir + "/audit/audit.jsonl-*.ndjson"
+	if !strings.Contains(body, "__path__:      '"+want+"'") {
+		t.Errorf("rendered config must include audit glob even when file absent:\n%s", body)
 	}
 }
 

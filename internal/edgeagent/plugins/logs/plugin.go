@@ -30,10 +30,12 @@ func New(binDir, workDir string, log *slog.Logger) plugins.Plugin {
 		Binary:     filepath.Join(binDir, "promtail"),
 		WorkDir:    filepath.Join(workDir, Name),
 		ConfigFile: filepath.Join(workDir, Name, "promtail.yaml"),
-		// Promtail's renderer probes the audit plugin's JSONL output
-		// path so a manager-enabled audit plugin is auto-tailed into
-		// Loki without operator wiring. workDir is captured here at
-		// construction; reconcile reuses the same closure.
+		// Promtail always includes the audit plugin's JSONL output
+		// path glob in file_paths — see render.go docstring for why
+		// the glob is unconditional (the previous on-disk probe had a
+		// startup race against auditbeat's first write). workDir is
+		// captured here at construction; reconcile reuses the same
+		// closure.
 		ConfigRender: func(cfg plugins.PluginConfig) ([]byte, error) {
 			return render(workDir, cfg)
 		},

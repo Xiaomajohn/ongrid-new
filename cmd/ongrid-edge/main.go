@@ -200,7 +200,8 @@ func main() {
 		edgepluginlogs.New(pluginBinDir, pluginWorkDir, pluginLog),
 		// audit plugin: subprocess auditbeat (Elastic closed-source). Writes
 		// JSONL to <workDir>/audit/audit.jsonl; the logs plugin's renderer
-		// auto-discovers and tails that path via audit.OutputPath(workDir).
+		// unconditionally tails that path via audit.OutputPath(workDir)
+		// (promtail __path__ glob, no on-disk probe — see logs/render.go).
 		// Linux-only — on darwin edges the supervisor will report a missing
 		// binary and operators opt out via the Integrations UI.
 		edgepluginaudit.New(pluginBinDir, pluginWorkDir, pluginLog),

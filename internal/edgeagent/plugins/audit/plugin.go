@@ -3,9 +3,10 @@
 // It wraps an auditbeat subprocess (Elastic closed-source binary):
 // ongrid-edge writes an auditbeat.yml derived from the manager-pushed
 // PluginConfig, spawns auditbeat, and auditbeat writes JSONL events to
-// <workDir>/audit/audit.jsonl. The logs plugin (promtail) auto-discovers
-// that path via audit.OutputPath(workDir) and tails it into Loki — no
-// separate push channel for audit.
+// <workDir>/audit/audit.jsonl. The logs plugin (promtail) tails that
+// path via audit.OutputPath(workDir) as an unconditional __path__ glob
+// (no on-disk probe, see logs/render.go) — no separate push channel
+// for audit.
 //
 // Plugin name "audit" matches the ongrid lowercase domain convention
 // (hostmetrics / procmetrics / custommetrics). It is Linux-only because
@@ -102,8 +103,12 @@ func New(binDir, workDir string, log *slog.Logger) plugins.Plugin {
 
 // OutputPath returns the JSONL file glob the auditbeat subprocess
 // writes to under default configuration. Exposed so the logs plugin
-// (promtail) can probe and auto-tail without operator configuration —
-// see internal/edgeagent/plugins/logs/render.go for the consumer side.
+// (promtail) can include it as an unconditional file_path glob
+// without operator configuration — see
+// internal/edgeagent/plugins/logs/render.go for the consumer side.
+// The logs renderer appends this glob on every render (no on-disk
+// probe), so the default-enabled audit plugin's events are picked up
+// in Loki without race conditions against auditbeat's first write.
 //
 // auditbeat 9.x's file output appends a daily suffix + .ndjson extension
 // to whatever filename is set in auditbeat.yml: filename "audit.jsonl"
